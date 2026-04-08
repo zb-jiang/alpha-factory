@@ -35,6 +35,7 @@ ENV/
 .DS_Store
 
 # Qlib Data (历史数据文件，体积很大)
+runtime/data/
 runtime/data/qlib_cn/
 
 # Output Files (运行结果，不需要提交)
