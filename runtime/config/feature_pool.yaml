@@ -1,0 +1,37 @@
+# 原始字段 (Fields): 相当于“最基础的食材”，也就是交易所直接产生的原始数据
+raw_fields:
+  - open    # 开盘价
+  - close   # 收盘价
+  - high    # 最高价
+  - low     # 最低价
+  - volume  # 成交量
+  - factor  # 复权因子
+
+# 基础特征 (Features): 相当于“切好、腌制好的半成品”，是基于原始数据经过简单计算得出的指标
+base_features:
+  - name: ret_5d            # 5日收益率
+    expr: close.pct_change(5)
+  - name: ret_20d           # 20日收益率
+    expr: close.pct_change(20)
+  - name: volume_mean_5d    # 5日平均成交量
+    expr: volume.rolling(5).mean()
+  - name: volume_ratio_5d   # 5日成交量比率（当日成交量 / 5日均量），衡量近期交投活跃度
+    expr: volume / volume.rolling(5).mean()
+  - name: volatility_20d    # 20日波动率（过去20天每日收益率的标准差）
+    expr: close.pct_change().rolling(20).std()
+  - name: max_drawdown_20d  # 20日最大回撤（当前价格距离过去20天最高价的跌幅）
+    expr: close / close.rolling(20).max() - 1
+  - name: price_pos_20d     # 20日价格分位（当前价格在过去20天最高价和最低价之间的相对位置）
+    expr: (close - close.rolling(20).min()) / (close.rolling(20).max() - close.rolling(20).min())
+
+# 允许使用的算子 (Operators): 相当于“烹饪手法”，用来限制大模型，它只能用这些方法去组合产生新的因子
+allowed_operators:
+  - add             # 加法
+  - sub             # 减法
+  - mul             # 乘法
+  - div             # 除法
+  - rolling_mean    # 滚动均值
+  - rolling_std     # 滚动标准差
+  - rank            # 截面排序（计算个股在当天的全市场排名）
+  - zscore          # 标准化（去均值除以标准差）
+  - minmax          # 归一化（缩放到0-1之间）

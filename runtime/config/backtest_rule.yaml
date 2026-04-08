@@ -1,0 +1,41 @@
+# 股票池范围设置，'all' 表示全市场选股，也可以指定特定板块（如 'csi300' 沪深300）
+stock_universe: all
+
+# 调仓频率设置，'weekly' 表示每周调仓一次（也可以是 'daily', 'monthly' 等）
+rebalance: weekly
+
+# 具体的调仓日，'first_trading_day_of_week' 表示每周的第一个交易日执行买卖操作
+rebalance_day: first_trading_day_of_week
+
+# 买入规则：根据因子得分从高到低排序，买入排名前 20 的股票
+buy_top_n: 20
+
+# 卖出规则：持仓股票如果跌出前 40 名，则将其卖出（采用前20买、跌出40卖的宽幅逻辑，可降低换手率）
+sell_drop_to: 40
+
+# 目标持仓数量：组合中最多同时持有 20 只股票
+holding_count: 20
+
+# 仓位权重分配方式，'equal_weight' 表示所有持仓股票等权重分配资金
+weight_mode: equal_weight
+
+# 交易价格设定，'next_open' 表示使用产生信号后的下一个交易日的开盘价成交（避免未来函数）
+trade_price: next_open
+
+# 买入手续费率（包含佣金、过户费等），0.0015 表示千分之1.5
+buy_cost: 0.0015
+
+# 卖出手续费率（包含印花税、佣金等），0.0025 表示千分之2.5
+sell_cost: 0.0025
+
+# 滑点成本（模拟真实交易中吃单导致的买价更高、卖价更低），0.0005 表示万分之5
+slippage: 0.0005
+
+# 停牌股票处理方式，'skip' 表示如果目标股票停牌则跳过该股票的交易
+suspend_action: skip
+
+# 涨停股票处理方式，'skip_buy' 表示如果目标股票涨停（无法买入），则放弃买入
+limit_up_action: skip_buy
+
+# 跌停股票处理方式，'delay_sell' 表示如果持仓股票跌停（无法卖出），则延迟到下一个可交易日再卖
+limit_down_action: delay_sell

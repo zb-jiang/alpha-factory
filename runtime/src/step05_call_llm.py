@@ -1,0 +1,148 @@
+from __future__ import annotations
+
+import json
+import os
+
+from openai import OpenAI
+
+from common import OUTPUT_DIR, backtest_rule_config, env_config, feature_pool_config, read_json, write_json
+
+
+def build_messages() -> list[dict[str, str]]:
+    config = env_config()
+    feature_cfg = feature_pool_config()
+    backtest_rule = backtest_rule_config()
+    summary = read_json(OUTPUT_DIR / "health" / "llm_summary.json")
+    
+    # 尝试读取上一轮表现最好的因子（若文件存在）
+    top_factors_path = OUTPUT_DIR / "backtest" / "top3_factors.json"
+    if top_factors_path.exists():
+        previous_top_factors = read_json(top_factors_path)
+        summary["previous_round_top_factors"] = previous_top_factors
+        
+    # 尝试读取上一轮因为 IC/胜率 不达标而被淘汰的因子（若文件存在）
+    skipped_factors_path = OUTPUT_DIR / "backtest" / "skipped_factors.json"
+    if skipped_factors_path.exists():
+        skipped_factors = read_json(skipped_factors_path)
+        summary["previous_round_skipped_factors"] = skipped_factors
+    
+    base_feature_names = [item["name"] for item in feature_cfg.get("base_features", [])]
+    candidate_count = int(config.get("llm_candidate_count", 10))
+    
+    system_prompt = """你是一个顶级的量化交易策略研究员和金融数据科学家。你精通A股市场微观结构、多因子模型、行为金融学以及Alpha挖掘。
+你的任务是在一个自动化的AI量化研究系统中，根据机器提供的数据体检报告和可用的数据资产，挖掘出具有强预测能力、低相关性且逻辑严密的全新选股因子（Alpha因子）。
+
+【你的思考原则】
+1. 逻辑优先：每个因子必须有坚实的金融学或行为经济学逻辑（如量价背离、均值回复、波动率倒挂等），绝不能是纯粹的无脑数据拼接。
+2. 收益至上：因子的最终目的是在实际交易中获得正向绝对收益（年化收益率 annualized_return）。仅仅在统计上（如 IC 值）显著但不赚钱的因子是没有价值的。
+3. 避免共线性：体检报告中已经提示了高度相关的特征，在组合新因子时，应尽量寻找低相关性特征的交叉，或者对高相关特征做差值/比值处理提取增量信息。
+4. 鲁棒性控制：关注体检报告中的“不稳定特征(unstable_features)”，尽量少用，或者通过非线性变换（如除以波动率）来控制其风险暴露。
+5. 表达式规范：只能使用给定的【允许的基础特征】和【允许的算子】，必须保证公式能够被Python直接解析执行。
+
+请严格遵守系统设定的输出格式，以纯JSON格式返回，不要包含任何Markdown代码块标记（如```json），也不要任何额外的解释性对话。"""
+
+    user_prompt = f"""【任务背景】
+我们需要你挖掘出 {candidate_count} 个全新的量化选股因子。
+当前模型的预测目标是：{config.get("target_label")}
+
+【数据资产与限制】
+1. 允许使用的基础特征列表：
+{json.dumps(base_feature_names, ensure_ascii=False)}
+
+2. 允许使用的数学算子：
+{json.dumps(feature_cfg.get("allowed_operators", []), ensure_ascii=False)}
+注意：公式中仅允许使用加(+)、减(-)、乘(*)、除(/)等基本算数运算符，以及上述列表中的算子。
+
+【特征体检与历史经验报告】
+以下是系统对当前可用特征在历史数据上的表现总结（llm_summary.json）：
+{json.dumps(summary, ensure_ascii=False, indent=2)}
+
+【挖掘指南】
+- top_features：与目标相关性最强的特征，可作为构建因子的核心基石。
+- weak_features：单看相关性极弱，但可能在组合中作为惩罚项或分母（如控制市值、控制换手率）。
+- high_corr_pairs：高度共线性的特征对。如果要同时使用它们，强烈建议采用做差或作比值的方式。
+- unstable_features：历史表现不稳定的特征。使用时需极其谨慎，或者配以强力的信号过滤。
+- previous_round_top_factors（若有）：上一轮迭代中回测表现最好的因子。你可以参考它们的成功逻辑，或者寻找与它们截然不同的正交逻辑以丰富策略库。
+- previous_round_skipped_factors（若有）：上一轮由于预测能力弱（IC低）、稳定性差（ICIR低）或方向胜率不足而被自动淘汰的因子。请务必分析它们的失败原因（如逻辑过度拟合、使用了无意义的高波动特征等），并确保本轮不要生成类似或雷同的因子。
+
+【输出格式要求】
+你必须返回一个符合以下JSON Schema的纯JSON对象，绝对不能有任何其他字符！
+{{
+  "factors": [
+    {{
+      "factor_name": "字符串：因子的英文名称（要求见名知意，如 momentum_vol_ratio_v1）",
+      "formula": "字符串：只使用【允许的基础特征】和【允许的算子】组成的Python表达式（例如：'(ret_20d * volume_ratio_5d) / (1 + volatility_20d)'）",
+      "fields": ["列表：公式中实际使用到的特征名称，必须属于【允许的基础特征列表】"],
+      "direction": "枚举值：'higher_better'(因子值越大越看多) 或 'lower_better'(因子值越小越看多)",
+      "reason": "字符串：用中文简述该因子的金融学逻辑或设计意图（例如：'结合了短期动量和成交量放大的共振，同时剔除高波动率股票的风险'）",
+      "risk": "字符串：用中文简述该因子在什么市场环境下可能失效（例如：'在市场风格急剧切换或低流动性环境下容易发生回撤'）",
+      "backtest_rule": {json.dumps(backtest_rule, ensure_ascii=False)}
+    }}
+  ]
+}}
+
+【最终警告】
+1. 绝对不能使用未来数据！
+2. 绝对不能使用不在【允许的基础特征列表】中的未授权字段！
+3. 返回结果必须是直接可解析的JSON字典，严禁输出 ```json 等Markdown格式标记！
+"""
+
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def run() -> None:
+    config = env_config()
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    base_url = str(config.get("llm_base_url", "")).strip()
+    model = str(config.get("llm_model", "")).strip()
+    
+    # 代理设置检查：如果有全局代理导致 SSL 握手失败，可以选择在这里临时清理环境变量
+    # os.environ.pop("http_proxy", None)
+    # os.environ.pop("https_proxy", None)
+    
+    if not api_key or not base_url or not model:
+        raise RuntimeError("请先设置 OPENAI_API_KEY、OPENAI_BASE_URL、OPENAI_MODEL")
+    
+    import httpx
+    # 使用自定义 httpx client 关闭系统代理，防止某些梯子软件导致 TLS 握手失败或请求无响应
+    os.environ.pop("http_proxy", None)
+    os.environ.pop("https_proxy", None)
+    os.environ.pop("HTTP_PROXY", None)
+    os.environ.pop("HTTPS_PROXY", None)
+    os.environ.pop("all_proxy", None)
+    os.environ.pop("ALL_PROXY", None)
+    
+    # 强制 httpx 忽略所有代理设置，直接连接外网
+    # httpx < 0.24.0 使用 proxies=None，> 0.24.0 使用 proxy=None 或 proxies=None，为兼容性只使用 proxy 且捕获异常
+    try:
+        http_client = httpx.Client(verify=False, trust_env=False, proxy=None) 
+    except TypeError:
+        # 如果不支持 proxy（如老版本或特定版本限制），直接不传代理参数
+        http_client = httpx.Client(verify=False, trust_env=False)
+    
+    client = OpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
+    messages = build_messages()
+    
+    print(f"正在调用大模型 ({model})，请稍候...")
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=0.2,
+    )
+    content = response.choices[0].message.content or ""
+    payload = {
+        "model": model,
+        "base_url": base_url,
+        "messages": messages,
+        "content": content,
+        "raw": response.model_dump(),
+    }
+    write_json(OUTPUT_DIR / "llm" / "raw_response.json", payload)
+    print("llm response saved")
+
+
+if __name__ == "__main__":
+    run()
