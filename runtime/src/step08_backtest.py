@@ -205,10 +205,21 @@ def run() -> None:
     # 保存被淘汰因子的记录，供大模型下一轮参考
     write_json(OUTPUT_DIR / "backtest" / "skipped_factors.json", skipped_factors)
 
-    metrics = pd.DataFrame(metric_rows).set_index("factor_name").sort_index()
-    positions = pd.concat(position_frames, ignore_index=True) if position_frames else pd.DataFrame()
-    orders = pd.concat(order_frames, ignore_index=True) if order_frames else pd.DataFrame()
-    nav_curve = pd.concat(nav_frames, ignore_index=True) if nav_frames else pd.DataFrame()
+    if not metric_rows:
+        print(f"警告: 所有 {len(skipped_factors)} 个因子都被筛选掉了，没有因子进入回测")
+        print("请检查筛选阈值或因子质量：")
+        print(f"  - min_rank_ic_to_backtest: {min_rank_ic_to_backtest}")
+        print(f"  - min_rank_ic_ir_to_backtest: {min_rank_ic_ir_to_backtest}")
+        print(f"  - min_positive_ic_ratio: {min_positive_ic_ratio}")
+        metrics = pd.DataFrame()
+        positions = pd.DataFrame()
+        orders = pd.DataFrame()
+        nav_curve = pd.DataFrame()
+    else:
+        metrics = pd.DataFrame(metric_rows).set_index("factor_name").sort_index()
+        positions = pd.concat(position_frames, ignore_index=True) if position_frames else pd.DataFrame()
+        orders = pd.concat(order_frames, ignore_index=True) if order_frames else pd.DataFrame()
+        nav_curve = pd.concat(nav_frames, ignore_index=True) if nav_frames else pd.DataFrame()
     write_table(OUTPUT_DIR / "backtest" / "strategy_metrics.csv", metrics)
     write_table(OUTPUT_DIR / "backtest" / "positions.parquet", positions)
     write_table(OUTPUT_DIR / "backtest" / "orders.parquet", orders)

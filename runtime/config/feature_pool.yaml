@@ -24,14 +24,21 @@ base_features:
   - name: price_pos_20d     # 20日价格分位（当前价格在过去20天最高价和最低价之间的相对位置）
     expr: (close - close.rolling(20).min()) / (close.rolling(20).max() - close.rolling(20).min())
 
-# 允许使用的算子 (Operators): 相当于“烹饪手法”，用来限制大模型，它只能用这些方法去组合产生新的因子
+# 允许使用的算子 (Operators): 相当于"烹饪手法"，用来限制大模型，它只能用这些方法去组合产生新的因子
 allowed_operators:
   - add             # 加法
   - sub             # 减法
   - mul             # 乘法
   - div             # 除法
+  - abs             # 绝对值
+  - log             # 自然对数
+  - sqrt            # 平方根
+  - sign            # 符号函数（正数为1，负数为-1，零为0）
   - rolling_mean    # 滚动均值
   - rolling_std     # 滚动标准差
+  - rolling_max     # 滚动最大值
+  - rolling_min     # 滚动最小值
   - rank            # 截面排序（计算个股在当天的全市场排名）
   - zscore          # 标准化（去均值除以标准差）
   - minmax          # 归一化（缩放到0-1之间）
+  - clip            # 截断（将数值限制在指定范围内）

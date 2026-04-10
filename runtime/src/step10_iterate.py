@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from common import archive_iteration_outputs, ensure_runtime_dirs, env_config, write_json
-from step01_init_qlib import run as run_step01
+from step01_init_datasource import run as run_step01
 from step02_build_feature_pool import run as run_step02
 from step03_health_check import run as run_step03
 from step04_build_summary import run as run_step04

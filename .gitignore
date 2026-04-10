@@ -34,12 +34,22 @@ ENV/
 *~
 .DS_Store
 
-# Qlib Data (历史数据文件，体积很大)
+# Data (历史数据文件和缓存，体积很大)
 runtime/data/
 runtime/data/qlib_cn/
+runtime/data/tushare_cache/
+runtime/data/ricequant_cache/
 
 # Output Files (运行结果，不需要提交)
 runtime/outputs/
+runtime/outputs/**/
+
+# Iteration outputs (迭代输出，不需要提交)
+runtime/outputs/iter_*/
+
+# Ricequant generated files (米框平台生成的文件，不需要提交)
+ricequant/converted_factors/
+ricequant/validation/
 
 # Logs
 *.log
@@ -48,6 +58,11 @@ logs/
 # Environment Variables (包含敏感信息)
 .env
 .env.local
+.env.*
+
+# Config files with sensitive info (配置文件包含敏感信息)
+runtime/config/env.yaml
+!runtime/config/env.yaml.example
 
 # Temporary Files
 *.tmp
@@ -75,8 +90,16 @@ htmlcov/
 .dmypy.json
 dmypy.json
 
-# Parquet files (如果有的话)
+# Parquet files (数据文件)
 *.parquet
+
+# Binary data files (Qlib二进制数据文件)
+*.day.bin
+*.bin
+
+# Cache files (缓存文件)
+*.cache
+.cache/
 
 # Large CSV files (如果有的话)
 # *.csv

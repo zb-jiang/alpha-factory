@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from common import OUTPUT_DIR, ensure_runtime_dirs, env_config, write_json
-from step01_init_qlib import run as run_step01
+from step01_init_datasource import run as run_step01
 from step02_build_feature_pool import run as run_step02
 from step07_eval_factor import run as run_step07
 from step08_backtest import run as run_step08

@@ -16,6 +16,17 @@ def normalize(series: pd.Series) -> pd.Series:
 def run() -> None:
     factor_metrics = pd.read_csv(OUTPUT_DIR / "backtest" / "factor_metrics.csv", index_col=0)
     strategy_metrics = pd.read_csv(OUTPUT_DIR / "backtest" / "strategy_metrics.csv", index_col=0)
+    
+    # 检查是否有因子进入回测
+    if strategy_metrics.empty:
+        print("警告: 没有因子进入回测，无法进行评分")
+        print("请检查因子在样本外的表现是否满足筛选条件")
+        # 写入空结果
+        write_table(OUTPUT_DIR / "backtest" / "final_score.csv", pd.DataFrame())
+        write_json(OUTPUT_DIR / "backtest" / "top3_factors.json", {"top3": []})
+        print("score ok (no factors)")
+        return
+    
     merged = factor_metrics.join(strategy_metrics, how="inner")
     merged["ic_stability_score"] = normalize(merged["rank_ic_ir"])
     merged["annual_return_score"] = normalize(merged["annualized_return"])

@@ -93,7 +93,7 @@ def init_qlib(config: dict[str, Any] | None = None) -> dict[str, Any]:
     import qlib
 
     cfg = config or env_config()
-    provider_uri = str(cfg["provider_uri"])
+    provider_uri = str(cfg.get("provider_uri", "~/.qlib/qlib_data/cn_data"))
     Path(provider_uri).mkdir(parents=True, exist_ok=True)
     qlib.init(
         provider_uri=provider_uri,
@@ -103,11 +103,93 @@ def init_qlib(config: dict[str, Any] | None = None) -> dict[str, Any]:
     return cfg
 
 
+def get_data_provider(config: dict[str, Any] | None = None) -> "BaseDataProvider":
+    """获取数据提供者实例
+    
+    根据配置中的 data_source 字段创建对应的数据提供者。
+    支持 qlib 和 ricequant 两种数据源。
+    
+    Args:
+        config: 配置字典，如果为 None 则加载默认配置
+        
+    Returns:
+        数据提供者实例
+        
+    示例:
+        >>> provider = get_data_provider()
+        >>> provider.initialize()
+        >>> instruments = provider.get_instruments()
+    """
+    from data_provider import ProviderFactory
+    
+    cfg = config or env_config()
+    return ProviderFactory.create_provider(cfg)
+
+
+def init_data_source(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """初始化数据源（支持 Qlib 和米筐）
+    
+    根据配置自动选择并初始化对应的数据源。
+    
+    Args:
+        config: 配置字典
+        
+    Returns:
+        配置字典
+    """
+    cfg = config or env_config()
+    data_source = cfg.get("data_source", "qlib")
+    
+    if data_source == "ricequant":
+        # 初始化米筐
+        provider = get_data_provider(cfg)
+        provider.initialize()
+    else:
+        # 默认使用 Qlib
+        init_qlib(cfg)
+    
+    return cfg
+
+
 def list_instruments(config: dict[str, Any] | None = None) -> list[str]:
     cfg = config or env_config()
-    init_qlib(cfg)
-    from qlib.data import D
-
+    
+    # 获取数据源类型
+    data_source = cfg.get("data_source", "qlib")
+    
+    # 检查是否使用新的股票池管理器
+    stock_pool_config = cfg.get("stock_pool", {})
+    if stock_pool_config:
+        try:
+            from stock_pool_manager import create_stock_pool_manager, validate_stock_pool_config
+            
+            is_valid, message = validate_stock_pool_config(cfg)
+            if not is_valid:
+                print(f"股票池配置配置验证失败: {message}")
+                print("使用默认的全市场股票池")
+            else:
+                manager = create_stock_pool_manager(cfg)
+                
+                run_mode = cfg.get("run_mode", "train")
+                if run_mode == "test":
+                    start_time = str(cfg.get("test_start_date"))
+                    end_time = str(cfg.get("test_end_date"))
+                else:
+                    start_time = str(cfg.get("train_start_date"))
+                    end_time = str(cfg.get("train_end_date"))
+                
+                stock_pool = manager.get_stock_pool(start_time, end_time)
+                pool_info = manager.get_pool_info()
+                print(f"使用股票池: {pool_info['description']}")
+                
+                return stock_pool
+                
+        except ImportError:
+            print("股票池管理器未找到，使用默认方法")
+        except Exception as e:
+            print(f"股票池管理器出错: {e}，使用默认方法")
+    
+    # 根据数据源类型选择获取方式
     run_mode = cfg.get("run_mode", "train")
     if run_mode == "test":
         start_time = str(cfg.get("test_start_date"))
@@ -115,17 +197,32 @@ def list_instruments(config: dict[str, Any] | None = None) -> list[str]:
     else:
         start_time = str(cfg.get("train_start_date"))
         end_time = str(cfg.get("train_end_date"))
-
-    instruments = D.instruments(market=str(cfg.get("market", "all")))
-    codes = D.list_instruments(
-        instruments=instruments,
-        start_time=start_time,
-        end_time=end_time,
-        as_list=True,
-    )
+    
+    if data_source == "qlib":
+        # 使用 Qlib 本地数据
+        init_qlib(cfg)
+        from qlib.data import D
+        
+        instruments = D.instruments(market=str(cfg.get("market", "all")))
+        codes = D.list_instruments(
+            instruments=instruments,
+            start_time=start_time,
+            end_time=end_time,
+            as_list=True,
+        )
+    else:
+        # 使用数据提供者（Tushare、米筐等）
+        provider = get_data_provider(cfg)
+        provider.initialize()
+        codes = provider.get_instruments()
+        print(f"从 {data_source} 获取股票列表: {len(codes)} 只")
+    
+    # 只有在没有配置 stock_pool 时才使用 max_instruments
     max_instruments = int(cfg.get("max_instruments", 0) or 0)
     if max_instruments > 0:
+        print(f"使用 max_instruments 限制: {max_instruments} 只股票（按字母顺序）")
         return codes[:max_instruments]
+    
     return codes
 
 
@@ -140,9 +237,10 @@ def load_raw_data(
     cfg = config or env_config()
     fp_cfg = feature_pool_config()
     fields = raw_fields or list(fp_cfg.get("raw_fields", []))
-    init_qlib(cfg)
-    from qlib.data import D
-
+    
+    # 获取数据源类型
+    data_source = cfg.get("data_source", "qlib")
+    
     run_mode = cfg.get("run_mode", "train")
     if run_mode == "test":
         start_time = str(cfg.get("test_start_date"))
@@ -150,18 +248,47 @@ def load_raw_data(
     else:
         start_time = str(cfg.get("train_start_date"))
         end_time = str(cfg.get("train_end_date"))
-
+    
     instruments = list_instruments(cfg)
-    frame = D.features(
-        instruments=instruments,
-        fields=raw_field_tokens(fields),
-        start_time=start_time,
-        end_time=end_time,
-        freq=str(cfg.get("freq", "day")),
-    )
+    
+    if data_source == "qlib":
+        # 使用 Qlib 本地数据
+        init_qlib(cfg)
+        from qlib.data import D
+        
+        frame = D.features(
+            instruments=instruments,
+            fields=raw_field_tokens(fields),
+            start_time=start_time,
+            end_time=end_time,
+            freq=str(cfg.get("freq", "day")),
+        )
+    else:
+        # 使用数据提供者（Tushare、米筐等）
+        provider = get_data_provider(cfg)
+        provider.initialize()
+        
+        frame = provider.get_features(
+            instruments=instruments,
+            fields=raw_field_tokens(fields),
+            start_date=start_time,
+            end_date=end_time,
+            freq=str(cfg.get("freq", "day")),
+        )
+    
     frame = frame.sort_index()
     frame.columns = [column.replace("$", "") for column in frame.columns]
-    frame.index = frame.index.set_names(["instrument", "datetime"])
+    
+    # 统一索引名称（支持单索引和 MultiIndex）
+    if isinstance(frame.index, pd.MultiIndex):
+        # MultiIndex: 设置为 (instrument, datetime)
+        if len(frame.index.names) == 2:
+            frame.index = frame.index.set_names(["instrument", "datetime"])
+    else:
+        # 单索引: 尝试转换为 MultiIndex
+        if frame.index.name is None or frame.index.name == "":
+            frame.index.name = "datetime"
+    
     return frame
 
 
@@ -404,11 +531,18 @@ OPERATOR_ENV = {
     "sub": lambda left, right: left - right,
     "mul": lambda left, right: left * right,
     "div": lambda left, right: left / right.replace(0, np.nan) if isinstance(right, pd.Series) else left / right,
+    "abs": lambda x: np.abs(x),
+    "log": lambda x: np.log(x.replace(0, np.nan)),
+    "sqrt": lambda x: np.sqrt(np.maximum(x, 0)),
+    "sign": lambda x: np.sign(x),
     "rolling_mean": rolling_mean,
     "rolling_std": rolling_std,
+    "rolling_max": lambda series, window: series.groupby(level="instrument").rolling(window=window, min_periods=1).max().reset_index(level=0, drop=True),
+    "rolling_min": lambda series, window: series.groupby(level="instrument").rolling(window=window, min_periods=1).min().reset_index(level=0, drop=True),
     "rank": rank,
     "zscore": zscore,
     "minmax": minmax,
+    "clip": lambda series, lower, upper: series.clip(lower=lower, upper=upper),
 }
 
 
