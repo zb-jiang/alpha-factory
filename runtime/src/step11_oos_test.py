@@ -37,11 +37,13 @@ def collect_train_top_factors() -> list[dict]:
                 continue
                 
             seen_formulas.add(formula)
-            # 转换成 step07 能识别的格式 (类似 step06 的输出)
+            empirical_direction = factor["empirical_direction"]
+            llm_direction = factor["llm_direction"]
             collected_factors.append({
-                "factor_name": factor["factor_name"] + "_OOS", # 加上后缀方便区分
+                "factor_name": factor["factor_name"] + "_OOS",
                 "formula": formula,
-                "direction": factor.get("direction", "higher_better"),
+                "llm_direction": llm_direction,
+                "empirical_direction": empirical_direction,
                 "reason": factor.get("reason", "来自训练集的优秀因子"),
                 "risk": factor.get("risk", "样本外盲测阶段"),
             })

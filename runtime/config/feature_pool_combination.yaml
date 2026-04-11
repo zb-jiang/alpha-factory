@@ -1,0 +1,13 @@
+base_features:
+  - name: volatility_ratio_5_20   # 短长波动比，衡量短期波动是否显著放大
+    expr: close.pct_change().rolling(5).std() / close.pct_change().rolling(20).std()
+  - name: volume_trend_5_20       # 短长均量趋势差，衡量量能是否持续走强
+    expr: volume.rolling(5).mean() / volume.rolling(20).mean() - 1
+  - name: price_volume_corr_20d   # 20日价量相关性，衡量上涨是否伴随放量
+    expr: close.pct_change().rolling(20).corr(volume.pct_change())
+  - name: momentum_accel_5_20     # 动量加速度，衡量短期动量相对月度动量是否加速
+    expr: ret_5d - ret_20d
+  - name: momentum_accel_20_60    # 中期动量加速度，衡量月度动量相对季度动量是否加速
+    expr: ret_20d - ret_60d
+  - name: volume_price_resonance_20d  # 量价共振，衡量上涨是否得到成交量支持
+    expr: ret_20d * volume_ratio_20d

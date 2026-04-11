@@ -18,8 +18,8 @@
 | **rank_ic_ir** | Rank IC IR | Rank IC均值除以Rank IC标准差 | common.py |
 | **positive_ic_ratio** | Positive IC Ratio | IC为正的天数占总天数的比例 | common.py |
 | **win_rate** | Win Rate | 规律稳定的天数占比（回测筛选时计算） | step08_backtest.py |
-| **direction** | Direction | LLM对因子方向的猜测（higher_better或lower_better） | LLM生成 |
-| **adjusted_score** | Adjusted Score | 根据direction调整后的因子值 | step07_eval_factor.py |
+| **llm_direction** | LLM Direction | LLM对因子方向的原始猜测（higher_better或lower_better） | step06_validate_factor.py |
+| **empirical_direction** | Empirical Direction | 根据样本内 `mean_rank_ic` 推导出的经验方向 | step07_eval_factor.py |
 | **raw_score** | Raw Score | 原始因子值，未经方向调整 | step07_eval_factor.py |
 
 ---
@@ -148,11 +148,11 @@ win_rate = pos_ratio if not is_negative_ic else (1 - pos_ratio)
 
 ---
 
-### 2.6 direction（因子方向）
+### 2.6 llm_direction（LLM原始方向）
 
-**定义**：LLM对因子方向的猜测。
+**定义**：LLM对因子经济含义的原始方向假设。
 
-**来源**：LLM生成因子时给出
+**来源**：LLM生成因子时先返回 `direction`，通过 step06 校验后被标准化保存为 `llm_direction`
 
 **取值**：
 - `higher_better`：因子值越大越好（因子大→收益高）
@@ -161,33 +161,34 @@ win_rate = pos_ratio if not is_negative_ic else (1 - pos_ratio)
 **重要提示**：
 - 这只是LLM的**猜测**，不是事实
 - 数据验证后可能发现方向相反
-- 回测代码**不使用**这个字段
+- 回测代码不会直接按它买卖
+- 它主要用于记录设计意图，以及可选的方向一致性过滤
 
 ---
 
-### 2.7 raw_score 和 adjusted_score
+### 2.7 empirical_direction 和 raw_score
 
 **定义**：
 - `raw_score`：根据公式计算的原始因子值
-- `adjusted_score`：根据direction调整后的因子值
+- `empirical_direction`：根据样本内 `mean_rank_ic` 推导出的经验方向
 
-**计算代码**（`step07_eval_factor.py:28-31`）：
+**计算代码**（`step07_eval_factor.py`）：
 ```python
 raw_score = evaluate_formula(str(item["formula"]), factor_input)
-adjusted_score = raw_score if item["direction"] == "higher_better" else -raw_score
+metrics["empirical_direction"] = "higher_better" if metrics["mean_rank_ic"] >= 0 else "lower_better"
 ```
 
-**调整逻辑**：
+**判断逻辑**：
 
-| direction | adjusted_score | 目的 |
-|-----------|---------------|------|
-| higher_better | raw_score（不变） | 已经是"越大越好" |
-| lower_better | -raw_score（取反） | 转换为"越大越好" |
+| mean_rank_ic | empirical_direction | 含义 |
+|--------------|---------------------|------|
+| >= 0 | higher_better | 因子值越大通常未来收益越高 |
+| < 0 | lower_better | 因子值越小通常未来收益越高 |
 
-**为什么要调整？**
-- 统一所有因子的方向
-- 后续IC计算和回测逻辑可以统一处理
-- 所有因子的`adjusted_score`都是"越大越好"
+**为什么这样做？**
+- 让方向判断完全由样本内数据决定
+- 避免 LLM 猜测方向与实际数据冲突
+- 当前实现不再维护 `adjusted_score`，而是直接使用 `raw_score`
 
 ---
 
@@ -196,17 +197,18 @@ adjusted_score = raw_score if item["direction"] == "higher_better" else -raw_sco
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                    LLM生成因子                                    │
-│  输出：formula, direction (higher_better / lower_better)         │
+│  输出：formula, direction                                         │
+│  注：该字段在 step06 通过校验后会保存为 llm_direction            │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │              step07: 因子评估                                     │
 │  1. 计算 raw_score（原始因子值）                                  │
-│  2. 根据 direction 调整 → adjusted_score                         │
-│  3. 计算 IC 指标：                                                │
+│  2. 直接基于 raw_score 计算 IC 指标：                             │
 │     - mean_ic, mean_rank_ic（预测能力）                          │
 │     - ic_ir, rank_ic_ir（稳定性）                                │
 │     - positive_ic_ratio（方向一致性）                            │
+│  3. 记录 llm_direction 与 empirical_direction                    │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
@@ -223,8 +225,8 @@ adjusted_score = raw_score if item["direction"] == "higher_better" else -raw_sco
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │              step08: 回测买卖                                     │
-│  1. 读取 adjusted_score                                          │
-│  2. 如果 is_negative_ic 为 True，翻转：score = -adjusted_score   │
+│  1. 读取 raw_score                                               │
+│  2. 如果 is_negative_ic 为 True，翻转：score = -raw_score        │
 │  3. 按 score 排序，买入前 N 名                                    │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -253,7 +255,7 @@ positive_ic_ratio = 0.8
 
 **回测行为**：
 - `is_negative_ic = False`，不翻转
-- 买入 adjusted_score 大的股票
+- 买入 raw_score 大的股票
 
 ---
 
@@ -277,7 +279,7 @@ positive_ic_ratio = 0.2
 
 **回测行为**：
 - `is_negative_ic = True`，翻转因子值
-- 买入 adjusted_score 小的股票（翻转后变成大的）
+- 买入 raw_score 小的股票（翻转后等价于“越小越好”）
 
 ---
 
@@ -333,21 +335,22 @@ positive_ic_ratio = 0.45
 
 ### 误区2：IC为正 = LLM猜对了
 
-**正解**：IC的正负与LLM的direction无关。
+**正解**：IC的正负与 `llm_direction` 不是一回事。
 
-- IC反映的是 adjusted_score 与收益的相关性
-- adjusted_score 已经根据 direction 调整过
-- IC为正只表示"adjusted_score越大收益越高"
+- IC反映的是 `raw_score` 与收益的相关性
+- `llm_direction` 只是设计假设
+- `empirical_direction` 才是样本内验证后的实际方向
 
 ---
 
 ### 误区3：回测时会根据LLM的direction买卖
 
-**正解**：回测代码完全不看direction，只看IC正负。
+**正解**：回测代码不会直接按 `llm_direction` 买卖，只看经验方向。
 
-- direction 只在 step07 用于调整因子值
-- 回测时只根据 is_negative_ic 决定是否翻转
-- is_negative_ic 由 mean_rank_ic 决定，与 direction 无关
+- `llm_direction` 只用于保留设计意图
+- 回测时只根据 `is_negative_ic` 决定是否翻转
+- `is_negative_ic` 由 `mean_rank_ic` 决定，本质上对应 `empirical_direction`
+- 只有当 `enable_direction_filter: true` 时，系统才会额外检查 `llm_direction` 和 `empirical_direction` 是否一致
 
 ---
 
@@ -369,7 +372,8 @@ positive_ic_ratio = 0.45
 | mean_ic, mean_rank_ic | common.py | 571-572 |
 | ic_ir, rank_ic_ir | common.py | 575-576 |
 | positive_ic_ratio | common.py | 582 |
-| direction调整 | step07_eval_factor.py | 28-31 |
+| llm_direction 标准化 | step06_validate_factor.py | 42-55 |
+| empirical_direction 计算 | step07_eval_factor.py | 29-34 |
 | win_rate计算 | step08_backtest.py | 185-186 |
 | 因子翻转 | step08_backtest.py | 66-67 |
 | 筛选条件 | step08_backtest.py | 168-191 |
@@ -385,8 +389,9 @@ positive_ic_ratio = 0.45
 | rank_ic_ir | IC的稳定性，越高越稳定 |
 | positive_ic_ratio | IC为正的天数占比（注意：不是胜率） |
 | win_rate | 真正的胜率，规律稳定的天数占比 |
-| direction | LLM的猜测，仅供参考 |
-| adjusted_score | 统一方向后的因子值，都是"越大越好" |
+| llm_direction | LLM的原始猜测，保留设计意图 |
+| empirical_direction | 样本内验证出的实际方向 |
+| raw_score | 公式直接算出的原始因子值 |
 
 ---
 

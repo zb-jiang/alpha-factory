@@ -29,17 +29,19 @@ def run() -> None:
     for item in validated:
         factor_name = str(item["factor_name"])
         raw_score = evaluate_formula(str(item["formula"]), factor_input)
-        adjusted_score = raw_score if item["direction"] == "higher_better" else -raw_score
+        metrics = factor_metrics_from_series(factor_name, raw_score, label_series)
+        metrics["llm_direction"] = str(item["llm_direction"])
+        metrics["empirical_direction"] = "higher_better" if metrics["mean_rank_ic"] >= 0 else "lower_better"
         factor_rows.append(
             pd.DataFrame(
                 {
                     "factor_name": factor_name,
                     "raw_score": raw_score,
-                    "score": adjusted_score,
+                    "score": raw_score,
                 }
             )
         )
-        metric_rows.append(factor_metrics_from_series(factor_name, adjusted_score, label_series))
+        metric_rows.append(metrics)
     if not factor_rows:
         raise RuntimeError("没有可评估的合法因子")
     factor_values = pd.concat(factor_rows).reset_index()

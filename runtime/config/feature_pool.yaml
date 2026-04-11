@@ -1,44 +1,129 @@
 # 原始字段 (Fields): 相当于“最基础的食材”，也就是交易所直接产生的原始数据
+# 当前字段集已经覆盖价格、成交额、成交均价、换手、市值与行业等 A股日频生产常用底层数据
+# 对于 Tushare 日频链路，VWAP 基于 daily.amount（千元）与 daily.vol（手）按 amount * 10 / volume 派生
 raw_fields:
-  - open    # 开盘价
-  - close   # 收盘价
-  - high    # 最高价
-  - low     # 最低价
-  - volume  # 成交量
-  - factor  # 复权因子
+  - open    # 开盘价，用于刻画隔夜跳空与日内强弱
+  - close   # 收盘价，用于构建收益率、趋势、波动率等核心价格特征
+  - high    # 最高价，用于刻画上影线、区间突破、振幅上沿
+  - low     # 最低价，用于刻画下影线、回撤、振幅下沿
+  - volume  # 成交量，用于刻画交易活跃度、放量缩量、价量共振
+  - amount  # 成交额，来自 Tushare daily.amount，可用于衡量真实资金参与强度
+  - vwap    # 成交量加权平均价，在 Tushare 日频下由 amount 与 volume 派生，可用于近似刻画全天成交重心
+  - turnover  # 换手率，来自 Tushare daily_basic.turnover_rate，可用于衡量筹码交换速度
+  - market_cap  # 总市值，来自 Tushare daily_basic.total_mv，可用于容量与风格约束
+  - industry  # 行业分类，来自 Tushare stock_basic.industry，可用于行业分组或中性化处理
+  - factor  # 复权因子，用于价格前复权/后复权处理，保证历史连续性
 
 # 基础特征 (Features): 相当于“切好、腌制好的半成品”，是基于原始数据经过简单计算得出的指标
 base_features:
-  - name: ret_5d            # 5日收益率
+  # 价格动量与收益：衡量不同周期的方向性变化、跳空与日内强弱
+  - name: ret_1d                  # 1日收益率，衡量最短周期价格变化
+    expr: close.pct_change(1)
+  - name: ret_5d                  # 5日收益率，衡量一周级别短期动量
     expr: close.pct_change(5)
-  - name: ret_20d           # 20日收益率
+  - name: ret_20d                 # 20日收益率，衡量一月级别中短期动量
     expr: close.pct_change(20)
-  - name: volume_mean_5d    # 5日平均成交量
-    expr: volume.rolling(5).mean()
-  - name: volume_ratio_5d   # 5日成交量比率（当日成交量 / 5日均量），衡量近期交投活跃度
-    expr: volume / volume.rolling(5).mean()
-  - name: volatility_20d    # 20日波动率（过去20天每日收益率的标准差）
-    expr: close.pct_change().rolling(20).std()
-  - name: max_drawdown_20d  # 20日最大回撤（当前价格距离过去20天最高价的跌幅）
-    expr: close / close.rolling(20).max() - 1
-  - name: price_pos_20d     # 20日价格分位（当前价格在过去20天最高价和最低价之间的相对位置）
+  - name: ret_60d                 # 60日收益率，衡量季度级别中期趋势
+    expr: close.pct_change(60)
+  - name: gap_open_ret            # 跳空收益率，衡量隔夜情绪与开盘缺口
+    expr: open / close.shift(1) - 1
+  - name: intraday_ret            # 日内收益率，衡量开盘到收盘的当日强弱
+    expr: close / open - 1
+
+  # 价格位置与区间结构：衡量收盘所在位置、振幅、区间突破与回撤
+  - name: high_low_range          # 日内振幅，衡量当天波动区间大小
+    expr: high / low - 1
+  - name: close_to_high           # 收盘贴近最高价程度，越接近0代表收在高位
+    expr: close / high - 1
+  - name: close_to_low            # 收盘贴近最低价程度，越接近0代表收在低位
+    expr: close / low - 1
+  - name: price_pos_20d           # 20日价格位置，衡量当前价在近20日区间中的相对高度
     expr: (close - close.rolling(20).min()) / (close.rolling(20).max() - close.rolling(20).min())
+  - name: max_drawdown_20d        # 20日最大回撤，衡量月度回撤压力
+    expr: close / close.rolling(20).max() - 1
+  - name: breakout_20d            # 20日向上突破幅度，衡量是否接近或突破近期新高
+    expr: close / close.rolling(20).max().shift(1) - 1
+
+  # 波动风险：衡量收益离散程度
+  - name: realized_vol_20d        # 20日实现波动率，衡量月度收益离散程度
+    expr: close.pct_change().rolling(20).std()
+
+  # 成交量行为：衡量交易活跃度、放量缩量与量能稳定性
+  - name: volume_mean_20d         # 20日平均成交量，衡量月度平均活跃度
+    expr: volume.rolling(20).mean()
+  - name: volume_ratio_20d        # 当日量比20日均量，衡量相对月度放量水平
+    expr: volume / volume_mean_20d
+  - name: volume_vol_20d          # 成交量波动率，衡量量能稳定性
+    expr: volume.pct_change().rolling(20).std()
+
+  # 资金强度与成交额：衡量资金参与深度与放量成交额
+  - name: amount_mean_20d         # 20日平均成交额，衡量月度资金参与的平均强度
+    expr: amount.rolling(20).mean()
+  - name: amount_ratio_20d        # 成交额相对20日均值之比，衡量是否出现显著放量成交额
+    expr: amount / amount_mean_20d
+
+  # VWAP 成交重心：衡量尾盘位置与全天成交重心趋势
+  - name: close_to_vwap           # 收盘相对成交均价偏离，衡量尾盘相对全天成交重心的强弱
+    expr: close / vwap - 1
+  - name: vwap_ret_20d            # 成交均价20日变化率，衡量一月内全天成交重心的中短期趋势
+    expr: vwap.pct_change(20)
+
+  # 换手与筹码交换：衡量筹码周转速度与换手异常
+  - name: turnover_mean_20d       # 20日平均换手率，衡量月度筹码交换强度
+    expr: turnover.rolling(20).mean()
+  - name: turnover_ratio_20d      # 当日换手率相对20日均值之比，衡量换手是否异常活跃
+    expr: turnover / turnover_mean_20d
+
+  # 市值容量：衡量股票体量变化与容量稳定性
+  - name: market_cap_change_20d   # 20日总市值变化率，衡量容量扩张或收缩
+    expr: market_cap.pct_change(20)
+  - name: market_cap_stability_20d  # 20日市值稳定度，衡量容量波动是否平稳
+    expr: market_cap.pct_change().rolling(20).std()
 
 # 允许使用的算子 (Operators): 相当于"烹饪手法"，用来限制大模型，它只能用这些方法去组合产生新的因子
 allowed_operators:
-  - add             # 加法
-  - sub             # 减法
-  - mul             # 乘法
-  - div             # 除法
-  - abs             # 绝对值
-  - log             # 自然对数
-  - sqrt            # 平方根
-  - sign            # 符号函数（正数为1，负数为-1，零为0）
-  - rolling_mean    # 滚动均值
-  - rolling_std     # 滚动标准差
-  - rolling_max     # 滚动最大值
-  - rolling_min     # 滚动最小值
-  - rank            # 截面排序（计算个股在当天的全市场排名）
-  - zscore          # 标准化（去均值除以标准差）
-  - minmax          # 归一化（缩放到0-1之间）
-  - clip            # 截断（将数值限制在指定范围内）
+  - add           # 加法，用于构建线性组合或加总信号
+  - sub           # 减法，用于提取强弱差、斜率差、增量信息
+  - mul           # 乘法，用于构建共振、交互和条件放大效应
+  - div           # 除法，用于做比值、归因或风险惩罚
+  - abs           # 绝对值，用于提取偏离强度而忽略方向
+  - log           # 对数变换，用于压缩长尾分布
+  - sqrt          # 平方根变换，用于弱化极端值影响
+  - sign          # 符号函数，用于只保留方向不保留幅度
+  - rolling_mean  # 滚动均值，用于平滑短期噪声
+  - rolling_std   # 滚动标准差，用于刻画时序波动
+  - rolling_sum   # 滚动求和，用于累计近期冲击
+  - rolling_max   # 滚动最大值，用于刻画突破和阶段高点
+  - rolling_min   # 滚动最小值，用于刻画支撑和阶段低点
+  - delay         # 时序滞后，用于引用过去值
+  - delta         # 时序变化量，用于衡量阶段增减幅度
+  - pct_change    # 时序收益率变化，用于统一计算相对变化
+  - ema           # 指数移动平均，用于强调近期信息
+  - ts_rank       # 时序排序，用于衡量当前值在历史窗口中的相对位置
+  - ts_zscore     # 时序标准化，用于衡量当前值相对自身历史的偏离程度
+  - rolling_corr  # 滚动相关性，用于刻画两个序列关系是否同步变化
+  - rank          # 截面排序，用于比较同一天不同股票的相对位置
+  - zscore        # 截面标准化，用于消除量纲并保留相对偏离
+  - minmax        # 截面归一化，用于压缩到统一数值区间
+  - clip          # 数值截断，用于限制极端值
+  - winsorize     # 截面缩尾，用于降低极端样本对排序的干扰
+
+# 因子生成约束 (Generation Constraints): 用来收紧 LLM 的搜索空间，提升生产稳定性与可解释性
+generation_constraints:
+  max_call_depth: 3                # 算子嵌套最多 3 层，避免公式过度套娃
+  max_feature_count: 4             # 单个公式最多使用 4 个基础特征，保证逻辑清晰
+  max_operator_count: 4            # 单个公式最多调用 4 次算子，避免无意义复杂化
+  max_same_feature_reuse: 2        # 同一特征最多重复使用 2 次，避免围绕单一信号反复加工
+  max_same_operator_reuse: 2       # 同一算子最多重复使用 2 次，避免同类变换层层叠加
+  allowed_windows: [1, 5, 10, 20, 60, 120]  # 仅允许固定窗口，避免 LLM 随意发明奇怪周期
+  forbidden_operator_chains:
+    - [rank, zscore]               # 禁止排序后再做标准化，避免重复截面标准化
+    - [zscore, rank]               # 禁止标准化后再排序，避免信息重复压缩
+    - [rank, minmax]               # 禁止排序后再归一化，避免重复截面映射
+    - [minmax, rank]               # 禁止归一化后再排序，避免无效再加工
+    - [ts_rank, rank]              # 禁止时序排序后再截面排序，避免双重排序堆叠
+    - [rank, ts_rank]              # 禁止截面排序后再时序排序，避免排序链过长
+    - [rolling_mean, ema]          # 禁止均值后再做 EMA，避免重复平滑
+    - [ema, rolling_mean]          # 禁止 EMA 后再做均值，避免重复平滑
+    - [ema, ema]                   # 禁止 EMA 套 EMA，避免同类平滑反复叠加
+    - [rolling_mean, rolling_mean] # 禁止均值套均值，避免同类平滑反复叠加

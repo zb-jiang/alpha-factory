@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from collections import Counter
 import json
 import math
 import os
@@ -453,19 +454,113 @@ ALLOWED_AST_NODES = (
 )
 
 
+WINDOW_OPERATOR_ARG_INDEXES = {
+    "rolling_mean": [1],
+    "rolling_std": [1],
+    "rolling_sum": [1],
+    "rolling_max": [1],
+    "rolling_min": [1],
+    "delay": [1],
+    "delta": [1],
+    "pct_change": [1],
+    "ema": [1],
+    "ts_rank": [1],
+    "ts_zscore": [1],
+    "rolling_corr": [2],
+}
+
+
+def generation_constraints(feature_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    fp_cfg = feature_cfg or feature_pool_config()
+    return dict(fp_cfg.get("generation_constraints", {}))
+
+
+def _is_number_constant(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool)
+
+
+def _formula_call_depth(node: ast.AST) -> int:
+    child_depth = max((_formula_call_depth(child) for child in ast.iter_child_nodes(node)), default=0)
+    if isinstance(node, ast.Call):
+        return 1 + child_depth
+    return child_depth
+
+
+def _collect_formula_metadata(
+    tree: ast.AST,
+    allowed_features: set[str],
+) -> dict[str, Any]:
+    feature_counts: Counter[str] = Counter()
+    operator_counts: Counter[str] = Counter()
+    windows_used: list[int] = []
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in allowed_features:
+            feature_counts[node.id] += 1
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            operator_counts[node.func.id] += 1
+            for arg_index in WINDOW_OPERATOR_ARG_INDEXES.get(node.func.id, []):
+                if len(node.args) > arg_index and _is_number_constant(node.args[arg_index]):
+                    windows_used.append(int(node.args[arg_index].value))
+
+    return {
+        "feature_names": sorted(feature_counts.keys()),
+        "feature_counts": dict(feature_counts),
+        "operator_counts": dict(operator_counts),
+        "windows_used": sorted(set(windows_used)),
+        "call_depth": _formula_call_depth(tree),
+    }
+
+
+def formula_feature_names(formula: str, allowed_features: set[str]) -> set[str]:
+    tree = ast.parse(formula, mode="eval")
+    metadata = _collect_formula_metadata(tree, allowed_features)
+    return set(metadata["feature_names"])
+
+
+def _find_forbidden_operator_chains(
+    node: ast.AST,
+    forbidden_pairs: set[tuple[str, str]],
+    call_stack: list[str] | None = None,
+    violations: set[tuple[str, str]] | None = None,
+) -> set[tuple[str, str]]:
+    active_stack = list(call_stack or [])
+    found = violations if violations is not None else set()
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        current = node.func.id
+        for ancestor in active_stack:
+            pair = (ancestor, current)
+            if pair in forbidden_pairs:
+                found.add(pair)
+        active_stack.append(current)
+    for child in ast.iter_child_nodes(node):
+        _find_forbidden_operator_chains(child, forbidden_pairs, active_stack, found)
+    return found
+
+
 def validate_formula(
     formula: str,
     allowed_features: set[str],
     allowed_operators: set[str],
+    constraints: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     try:
         tree = ast.parse(formula, mode="eval")
     except SyntaxError as exc:
         return False, f"语法错误: {exc}"
 
+    active_constraints = constraints or {}
+    allowed_windows = {
+        int(value)
+        for value in active_constraints.get("allowed_windows", [])
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    }
+
     for node in ast.walk(tree):
         if not isinstance(node, ALLOWED_AST_NODES):
             return False, f"不支持的语法节点: {type(node).__name__}"
+        if isinstance(node, ast.Constant) and not _is_number_constant(node):
+            return False, "公式中只允许使用数字常量"
         if isinstance(node, ast.Name):
             name = node.id
             if name not in allowed_features and name not in allowed_operators:
@@ -475,6 +570,17 @@ def validate_formula(
                 return False, "只允许调用白名单函数"
             if node.func.id not in allowed_operators:
                 return False, f"使用了未授权算子: {node.func.id}"
+            for arg_index in WINDOW_OPERATOR_ARG_INDEXES.get(node.func.id, []):
+                if len(node.args) <= arg_index:
+                    return False, f"{node.func.id} 缺少窗口参数"
+                window_node = node.args[arg_index]
+                if not _is_number_constant(window_node) or not float(window_node.value).is_integer():
+                    return False, f"{node.func.id} 的窗口参数必须是整数常量"
+                window_value = int(window_node.value)
+                if window_value <= 0:
+                    return False, f"{node.func.id} 的窗口参数必须大于 0"
+                if allowed_windows and window_value not in allowed_windows:
+                    return False, f"{node.func.id} 的窗口 {window_value} 不在允许集合 {sorted(allowed_windows)}"
         if isinstance(node, ast.BinOp):
             if isinstance(node.op, ast.Add) and "add" not in allowed_operators:
                 return False, "当前不允许加法"
@@ -484,6 +590,47 @@ def validate_formula(
                 return False, "当前不允许乘法"
             if isinstance(node.op, ast.Div) and "div" not in allowed_operators:
                 return False, "当前不允许除法"
+
+    metadata = _collect_formula_metadata(tree, allowed_features)
+    if not metadata["feature_names"]:
+        return False, "公式至少需要使用 1 个基础特征"
+
+    max_depth = int(active_constraints.get("max_call_depth", 0) or 0)
+    if max_depth > 0 and metadata["call_depth"] > max_depth:
+        return False, f"公式算子嵌套层数为 {metadata['call_depth']}，超过限制 {max_depth}"
+
+    max_feature_count = int(active_constraints.get("max_feature_count", 0) or 0)
+    if max_feature_count > 0 and len(metadata["feature_names"]) > max_feature_count:
+        return False, f"公式使用特征数为 {len(metadata['feature_names'])}，超过限制 {max_feature_count}"
+
+    max_operator_count = int(active_constraints.get("max_operator_count", 0) or 0)
+    total_operator_count = sum(int(value) for value in metadata["operator_counts"].values())
+    if max_operator_count > 0 and total_operator_count > max_operator_count:
+        return False, f"公式算子调用次数为 {total_operator_count}，超过限制 {max_operator_count}"
+
+    max_same_feature_reuse = int(active_constraints.get("max_same_feature_reuse", 0) or 0)
+    if max_same_feature_reuse > 0:
+        for feature_name, use_count in metadata["feature_counts"].items():
+            if use_count > max_same_feature_reuse:
+                return False, f"特征 {feature_name} 在同一公式中重复使用 {use_count} 次，超过限制 {max_same_feature_reuse}"
+
+    max_same_operator_reuse = int(active_constraints.get("max_same_operator_reuse", 0) or 0)
+    if max_same_operator_reuse > 0:
+        for operator_name, use_count in metadata["operator_counts"].items():
+            if use_count > max_same_operator_reuse:
+                return False, f"算子 {operator_name} 在同一公式中重复使用 {use_count} 次，超过限制 {max_same_operator_reuse}"
+
+    forbidden_pairs = {
+        (str(item[0]), str(item[1]))
+        for item in active_constraints.get("forbidden_operator_chains", [])
+        if isinstance(item, list) and len(item) == 2
+    }
+    if forbidden_pairs:
+        violations = sorted(_find_forbidden_operator_chains(tree, forbidden_pairs))
+        if violations:
+            pair_text = "、".join(f"{left}->{right}" for left, right in violations)
+            return False, f"公式包含被禁止的算子嵌套链: {pair_text}"
+
     return True, "ok"
 
 
@@ -499,6 +646,63 @@ def rolling_std(series: pd.Series, window: int) -> pd.Series:
     return series.groupby(level="instrument").transform(
         lambda s: s.rolling(win, min_periods=win).std(ddof=0)
     )
+
+
+def rolling_sum(series: pd.Series, window: int) -> pd.Series:
+    win = int(window)
+    return series.groupby(level="instrument").transform(
+        lambda s: s.rolling(win, min_periods=win).sum()
+    )
+
+
+def delay(series: pd.Series, periods: int) -> pd.Series:
+    lag = int(periods)
+    return series.groupby(level="instrument").shift(lag)
+
+
+def delta(series: pd.Series, periods: int) -> pd.Series:
+    lag = int(periods)
+    return series - delay(series, lag)
+
+
+def pct_change(series: pd.Series, periods: int) -> pd.Series:
+    lag = int(periods)
+    return series.groupby(level="instrument").transform(lambda s: s.pct_change(lag))
+
+
+def ema(series: pd.Series, span: int) -> pd.Series:
+    win = int(span)
+    return series.groupby(level="instrument").transform(
+        lambda s: s.ewm(span=win, adjust=False, min_periods=win).mean()
+    )
+
+
+def ts_rank(series: pd.Series, window: int) -> pd.Series:
+    win = int(window)
+    return series.groupby(level="instrument").transform(
+        lambda s: s.rolling(win, min_periods=win).apply(
+            lambda values: pd.Series(values).rank(pct=True).iloc[-1],
+            raw=False,
+        )
+    )
+
+
+def ts_zscore(series: pd.Series, window: int) -> pd.Series:
+    win = int(window)
+    grouped = series.groupby(level="instrument")
+    mean = grouped.transform(lambda s: s.rolling(win, min_periods=win).mean())
+    std = grouped.transform(lambda s: s.rolling(win, min_periods=win).std(ddof=0))
+    return ((series - mean) / std.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
+
+
+def rolling_corr(left: pd.Series, right: pd.Series, window: int) -> pd.Series:
+    win = int(window)
+
+    def _calc(frame: pd.DataFrame) -> pd.Series:
+        return frame["left"].rolling(win, min_periods=win).corr(frame["right"])
+
+    frame = pd.concat([left.rename("left"), right.rename("right")], axis=1)
+    return frame.groupby(level="instrument", group_keys=False).apply(_calc)
 
 
 def rank(series: pd.Series) -> pd.Series:
@@ -526,6 +730,18 @@ def minmax(series: pd.Series) -> pd.Series:
     return series.groupby(level="datetime").transform(_normalize)
 
 
+def winsorize(series: pd.Series, lower_quantile: float, upper_quantile: float) -> pd.Series:
+    lower = float(lower_quantile)
+    upper = float(upper_quantile)
+
+    def _clip(group: pd.Series) -> pd.Series:
+        lower_bound = group.quantile(lower)
+        upper_bound = group.quantile(upper)
+        return group.clip(lower=lower_bound, upper=upper_bound)
+
+    return series.groupby(level="datetime").transform(_clip)
+
+
 OPERATOR_ENV = {
     "add": lambda left, right: left + right,
     "sub": lambda left, right: left - right,
@@ -537,12 +753,21 @@ OPERATOR_ENV = {
     "sign": lambda x: np.sign(x),
     "rolling_mean": rolling_mean,
     "rolling_std": rolling_std,
+    "rolling_sum": rolling_sum,
     "rolling_max": lambda series, window: series.groupby(level="instrument").rolling(window=window, min_periods=1).max().reset_index(level=0, drop=True),
     "rolling_min": lambda series, window: series.groupby(level="instrument").rolling(window=window, min_periods=1).min().reset_index(level=0, drop=True),
+    "delay": delay,
+    "delta": delta,
+    "pct_change": pct_change,
+    "ema": ema,
+    "ts_rank": ts_rank,
+    "ts_zscore": ts_zscore,
+    "rolling_corr": rolling_corr,
     "rank": rank,
     "zscore": zscore,
     "minmax": minmax,
     "clip": lambda series, lower, upper: series.clip(lower=lower, upper=upper),
+    "winsorize": winsorize,
 }
 
 

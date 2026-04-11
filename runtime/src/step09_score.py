@@ -63,7 +63,7 @@ def run() -> None:
             if fname in factor_details:
                 detail = factor_details[fname]
                 item["formula"] = detail.get("formula", "")
-                item["direction"] = detail.get("direction", "")
+                item["llm_direction"] = detail.get("llm_direction", "")
                 item["reason"] = detail.get("reason", "")
                 item["risk"] = detail.get("risk", "")
     except Exception as e:

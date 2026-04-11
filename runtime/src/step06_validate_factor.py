@@ -8,6 +8,8 @@ from common import (
     OUTPUT_DIR,
     backtest_rule_config,
     feature_pool_config,
+    formula_feature_names,
+    generation_constraints,
     parse_json_text,
     read_json,
     validate_formula,
@@ -36,21 +38,30 @@ def run() -> None:
     feature_cfg = feature_pool_config()
     allowed_features = {item["name"] for item in feature_cfg.get("base_features", [])}
     allowed_operators = set(feature_cfg.get("allowed_operators", []))
+    constraints = generation_constraints(feature_cfg)
     fixed_rule = backtest_rule_config()
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for candidate in factor_payload.factors:
         try:
             if candidate.direction not in {"higher_better", "lower_better"}:
-                raise ValueError("direction 只能是 higher_better 或 lower_better")
-            if set(candidate.fields) - allowed_features:
+                raise ValueError("LLM direction 只能是 higher_better 或 lower_better")
+            field_set = set(candidate.fields)
+            if field_set - allowed_features:
                 raise ValueError("fields 中包含未授权特征")
-            ok, reason = validate_formula(candidate.formula, allowed_features, allowed_operators)
+            ok, reason = validate_formula(candidate.formula, allowed_features, allowed_operators, constraints)
             if not ok:
                 raise ValueError(reason)
+            formula_fields = formula_feature_names(candidate.formula, allowed_features)
+            if field_set != formula_fields:
+                raise ValueError(
+                    f"fields 与公式实际使用特征不一致: fields={sorted(field_set)}, formula={sorted(formula_fields)}"
+                )
             if candidate.backtest_rule != fixed_rule:
                 raise ValueError("backtest_rule 与固定交易规则不一致")
-            accepted.append(candidate.model_dump())
+            factor_data = candidate.model_dump()
+            factor_data["llm_direction"] = factor_data.pop("direction")
+            accepted.append(factor_data)
         except Exception as exc:
             rejected.append(
                 {

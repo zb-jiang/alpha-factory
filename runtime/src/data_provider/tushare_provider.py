@@ -21,6 +21,9 @@ class TushareProvider(BaseDataProvider):
     
     文档: https://tushare.pro/document/2
     """
+
+    VWAP_AMOUNT_SCALE = 1000.0
+    VWAP_VOLUME_SCALE = 100.0
     
     # 字段映射：Qlib格式 -> Tushare格式
     FIELD_MAP = {
@@ -29,8 +32,27 @@ class TushareProvider(BaseDataProvider):
         "$low": "low",
         "$close": "close",
         "$volume": "vol",
+        "$amount": "amount",
         "$money": "amount",
+        "$turnover": "turnover_rate",
+        "$market_cap": "total_mv",
+        "$industry": "industry",
         "$factor": "adj_factor",  # 复权因子，需要从 adj_factor 接口获取
+    }
+
+    FIELD_SOURCE_MAP = {
+        "$open": "daily",
+        "$high": "daily",
+        "$low": "daily",
+        "$close": "daily",
+        "$volume": "daily",
+        "$amount": "daily",
+        "$money": "daily",
+        "$factor": "adj_factor",
+        "$vwap": "derived_price",
+        "$turnover": "daily_basic",
+        "$market_cap": "daily_basic",
+        "$industry": "stock_basic",
     }
     
     # 反向映射：Tushare格式 -> Qlib格式
@@ -318,12 +340,20 @@ class TushareProvider(BaseDataProvider):
         
         if not instruments:
             return pd.DataFrame()
+
+        requested_fields = list(fields)
+        fetch_fields = list(fields)
+        if "$vwap" in requested_fields:
+            if "$amount" not in fetch_fields and "$money" not in fetch_fields:
+                fetch_fields.append("$amount")
+            if "$volume" not in fetch_fields:
+                fetch_fields.append("$volume")
         
         # 生成缓存键
         cache_key = self._get_cache_key(
             "get_price_data",
             instruments=",".join(sorted(instruments)),
-            fields=",".join(sorted(fields)),
+            fields=",".join(sorted(requested_fields)),
             start_date=start_date,
             end_date=end_date,
             freq=freq
@@ -339,7 +369,9 @@ class TushareProvider(BaseDataProvider):
         ts_fields = []
         field_mapping = {}  # 用于后续转换回 Qlib 格式
         
-        for field in fields:
+        for field in fetch_fields:
+            if field == "$vwap":
+                continue
             if field in self.FIELD_MAP:
                 ts_field = self.FIELD_MAP[field]
                 ts_fields.append(ts_field)
@@ -412,12 +444,40 @@ class TushareProvider(BaseDataProvider):
         
         # 转换为 Qlib 格式
         result = self._to_qlib_format(data, field_mapping)
+        result = self._append_derived_price_fields(result, requested_fields)
         
         # 保存到缓存
         if not result.empty:
             self._save_to_cache(cache_key, result)
             print(f"  已缓存价格数据: {len(result)} 行")
         
+        return result
+
+    def _append_derived_price_fields(
+        self,
+        data: pd.DataFrame,
+        requested_fields: List[str]
+    ) -> pd.DataFrame:
+        if data.empty:
+            return data
+
+        result = data.copy()
+        if "$vwap" in requested_fields:
+            amount_column = "$amount" if "$amount" in result.columns else "$money" if "$money" in result.columns else None
+            volume_column = "$volume" if "$volume" in result.columns else None
+            if amount_column is None or volume_column is None:
+                raise ValueError("计算 VWAP 需要 amount/money 与 volume 字段")
+            safe_volume = result[volume_column].where(result[volume_column] > 0)
+            result["$vwap"] = (
+                result[amount_column] * self.VWAP_AMOUNT_SCALE
+            ).div(safe_volume * self.VWAP_VOLUME_SCALE).replace([np.inf, -np.inf], np.nan)
+
+        ordered_columns = [field for field in requested_fields if field in result.columns]
+        helper_columns = [column for column in result.columns if column not in ordered_columns]
+        if ordered_columns:
+            result = result[ordered_columns + helper_columns]
+        if helper_columns:
+            result = result.drop(columns=[column for column in helper_columns if column not in requested_fields])
         return result
     
     def _to_qlib_format(
@@ -471,6 +531,170 @@ class TushareProvider(BaseDataProvider):
             data = data[available_fields]
         
         return data
+
+    def _build_source_field_mapping(
+        self,
+        fields: List[str],
+        source_name: str
+    ) -> Dict[str, str]:
+        mapping: Dict[str, str] = {}
+        for field in fields:
+            source = self.FIELD_SOURCE_MAP.get(field)
+            if source != source_name:
+                continue
+            mapping[self.FIELD_MAP.get(field, field.lstrip("$"))] = field
+        return mapping
+
+    def _get_daily_basic_data(
+        self,
+        instruments: List[str],
+        fields: List[str],
+        start_date: str,
+        end_date: str
+    ) -> pd.DataFrame:
+        field_mapping = self._build_source_field_mapping(fields, "daily_basic")
+        if not field_mapping:
+            return pd.DataFrame()
+
+        cache_key = self._get_cache_key(
+            "get_daily_basic_data",
+            instruments=",".join(sorted(instruments)),
+            fields=",".join(sorted(field_mapping.values())),
+            start_date=start_date,
+            end_date=end_date,
+        )
+        cached_data = self._load_from_cache(cache_key)
+        if cached_data is not None:
+            print(f"  从缓存加载 daily_basic 数据: {len(cached_data)} 行")
+            return cached_data
+
+        rows = []
+        requested_fields = ["ts_code", "trade_date", *field_mapping.keys()]
+        unique_fields = ",".join(dict.fromkeys(requested_fields))
+
+        for qlib_code in instruments:
+            try:
+                ts_code = self._convert_to_ts_code(qlib_code)
+                df = self._pro.daily_basic(
+                    ts_code=ts_code,
+                    start_date=start_date.replace('-', ''),
+                    end_date=end_date.replace('-', ''),
+                    fields=unique_fields,
+                )
+                if df is None or df.empty:
+                    continue
+                df["instrument"] = qlib_code
+                rows.append(df)
+            except Exception as e:
+                print(f"获取 {qlib_code} daily_basic 数据失败: {e}")
+
+        if not rows:
+            return pd.DataFrame()
+
+        data = pd.concat(rows, ignore_index=True)
+        result = self._to_qlib_format(data, field_mapping)
+        if not result.empty:
+            self._save_to_cache(cache_key, result)
+            print(f"  已缓存 daily_basic 数据: {len(result)} 行")
+        return result
+
+    def _expand_static_fields(
+        self,
+        static_data: pd.DataFrame,
+        instruments: List[str],
+        start_date: str,
+        end_date: str
+    ) -> pd.DataFrame:
+        if static_data.empty:
+            return pd.DataFrame()
+
+        dates = self.get_trading_dates(start_date, end_date)
+        if not dates:
+            return pd.DataFrame()
+
+        date_index = pd.to_datetime(dates)
+        frames = []
+        for instrument in instruments:
+            if instrument not in static_data.index:
+                continue
+            values = static_data.loc[instrument]
+            if isinstance(values, pd.Series):
+                frame = pd.DataFrame([values.to_dict()] * len(date_index), index=date_index)
+            else:
+                frame = pd.DataFrame([values.iloc[0].to_dict()] * len(date_index), index=date_index)
+            frame["instrument"] = instrument
+            frame["datetime"] = date_index
+            frames.append(frame)
+
+        if not frames:
+            return pd.DataFrame()
+
+        result = pd.concat(frames, ignore_index=True).set_index(["instrument", "datetime"]).sort_index()
+        result.index = result.index.set_names(["instrument", "datetime"])
+        return result
+
+    def _get_static_feature_data(
+        self,
+        instruments: List[str],
+        fields: List[str],
+        start_date: str,
+        end_date: str
+    ) -> pd.DataFrame:
+        field_mapping = self._build_source_field_mapping(fields, "stock_basic")
+        if not field_mapping:
+            return pd.DataFrame()
+
+        cache_key = self._get_cache_key(
+            "get_static_feature_data",
+            instruments=",".join(sorted(instruments)),
+            fields=",".join(sorted(field_mapping.values())),
+            start_date=start_date,
+            end_date=end_date,
+        )
+        cached_data = self._load_from_cache(cache_key)
+        if cached_data is not None:
+            print(f"  从缓存加载 stock_basic 数据: {len(cached_data)} 行")
+            return cached_data
+
+        requested_fields = ["ts_code", *field_mapping.keys()]
+        unique_fields = ",".join(dict.fromkeys(requested_fields))
+
+        try:
+            stock_basic = self._pro.stock_basic(exchange='', list_status='L', fields=unique_fields)
+        except Exception as e:
+            print(f"获取 stock_basic 数据失败: {e}")
+            return pd.DataFrame()
+
+        if stock_basic is None or stock_basic.empty:
+            return pd.DataFrame()
+
+        stock_basic["instrument"] = stock_basic["ts_code"].apply(self._convert_from_ts_code)
+        stock_basic = stock_basic[stock_basic["instrument"].isin(instruments)]
+        if stock_basic.empty:
+            return pd.DataFrame()
+
+        rename_mapping = {source_name: target_name for source_name, target_name in field_mapping.items()}
+        static_data = stock_basic.rename(columns=rename_mapping).set_index("instrument")
+        selected_columns = list(rename_mapping.values())
+        static_data = static_data[selected_columns]
+        result = self._expand_static_fields(static_data, instruments, start_date, end_date)
+        if not result.empty:
+            self._save_to_cache(cache_key, result)
+            print(f"  已缓存 stock_basic 数据: {len(result)} 行")
+        return result
+
+    def _convert_from_ts_code(self, ts_code: str) -> str:
+        """将 Tushare 代码转换为 Qlib 代码"""
+        if not isinstance(ts_code, str) or "." not in ts_code:
+            return str(ts_code)
+        code, exchange = ts_code.split(".")
+        if exchange == "SH":
+            return f"SH{code}"
+        if exchange == "SZ":
+            return f"SZ{code}"
+        if exchange == "BJ":
+            return f"BJ{code}"
+        return ts_code
     
     def get_features(
         self,
@@ -482,25 +706,65 @@ class TushareProvider(BaseDataProvider):
     ) -> pd.DataFrame:
         """获取特征数据（兼容 Qlib 接口）
         
-        目前主要支持价格类字段，财务字段需要额外实现。
+        支持价格字段、每日指标字段和静态股票属性字段。
         """
-        # 分离价格字段和其他字段
-        price_fields = [f for f in fields if f.startswith("$")]
-        other_fields = [f for f in fields if not f.startswith("$")]
-        
-        # 获取价格数据
+        self.initialize()
+
+        if not instruments or not fields:
+            return pd.DataFrame()
+
+        unsupported_fields = [
+            field for field in fields
+            if self.FIELD_SOURCE_MAP.get(field) is None
+        ]
+        if unsupported_fields:
+            print(f"警告: 以下字段暂不支持: {unsupported_fields}")
+
+        price_fields = [
+            field for field in fields
+            if self.FIELD_SOURCE_MAP.get(field) in {"daily", "adj_factor", "derived_price"}
+        ]
+        daily_basic_fields = [
+            field for field in fields
+            if self.FIELD_SOURCE_MAP.get(field) == "daily_basic"
+        ]
+        static_fields = [
+            field for field in fields
+            if self.FIELD_SOURCE_MAP.get(field) == "stock_basic"
+        ]
+
+        frames = []
+
         if price_fields:
             price_data = self.get_price_data(
                 instruments, price_fields, start_date, end_date, freq
             )
-        else:
-            price_data = pd.DataFrame()
-        
-        # TODO: 实现财务指标等其他字段的获取
-        if other_fields:
-            print(f"警告: 以下字段暂不支持: {other_fields}")
-        
-        return price_data
+            if not price_data.empty:
+                frames.append(price_data)
+
+        if daily_basic_fields:
+            daily_basic_data = self._get_daily_basic_data(
+                instruments, daily_basic_fields, start_date, end_date
+            )
+            if not daily_basic_data.empty:
+                frames.append(daily_basic_data)
+
+        if static_fields:
+            static_data = self._get_static_feature_data(
+                instruments, static_fields, start_date, end_date
+            )
+            if not static_data.empty:
+                frames.append(static_data)
+
+        if not frames:
+            return pd.DataFrame()
+
+        merged = frames[0]
+        for frame in frames[1:]:
+            merged = merged.join(frame, how="outer")
+
+        merged = merged.sort_index()
+        return merged
     
     def get_trading_dates(self, start_date: str, end_date: str) -> List[str]:
         """获取交易日列表

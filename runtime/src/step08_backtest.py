@@ -62,7 +62,9 @@ def simulate_factor(
         exit_date = _next_available_date(dates, next_rebalance) if next_rebalance is not None else dates[-1]
         if trade_date is None or exit_date is None or trade_date >= exit_date:
             continue
-        score_slice = factor_frame.xs(rebalance_date, level="datetime")["score"].dropna()
+        factor_slice = factor_frame.xs(rebalance_date, level="datetime")
+        score_column = "raw_score" if "raw_score" in factor_slice.columns else "score"
+        score_slice = factor_slice[score_column].dropna()
         if is_negative_ic:
             score_slice = -score_slice
         score_slice = score_slice.sort_values(ascending=False)
@@ -151,6 +153,7 @@ def run() -> None:
     min_rank_ic_to_backtest = float(config.get("min_rank_ic_to_backtest", 0.01))
     min_rank_ic_ir_to_backtest = float(config.get("min_rank_ic_ir_to_backtest", 0.1))
     min_positive_ic_ratio = float(config.get("min_positive_ic_ratio", 0.4))
+    enable_direction_filter = bool(config.get("enable_direction_filter", False))
 
     rule = backtest_rule_config()
     metric_rows: list[dict[str, float]] = []
@@ -167,6 +170,8 @@ def run() -> None:
             mean_rank_ic = factor_metrics.loc[factor_name, "mean_rank_ic"]
             rank_ic_ir = factor_metrics.loc[factor_name, "rank_ic_ir"]
             pos_ratio = factor_metrics.loc[factor_name, "positive_ic_ratio"]
+            empirical_direction = factor_metrics.loc[factor_name, "empirical_direction"]
+            llm_direction = factor_metrics.loc[factor_name, "llm_direction"]
             
             # 使用 Rank IC 和 Rank IC IR 作为主要过滤指标（相比于普通 IC 更稳健）
             if abs(mean_rank_ic) < min_rank_ic_to_backtest:
@@ -177,6 +182,12 @@ def run() -> None:
                 
             if abs(rank_ic_ir) < min_rank_ic_ir_to_backtest:
                 reason = f"Rank IC IR too low (|{rank_ic_ir:.4f}| < {min_rank_ic_ir_to_backtest})"
+                print(f"Skipping {factor_name}: {reason}")
+                skipped_factors.append({"factor_name": factor_name, "reason": reason})
+                continue
+
+            if enable_direction_filter and llm_direction != empirical_direction:
+                reason = f"Direction mismatch (LLM={llm_direction}, empirical={empirical_direction})"
                 print(f"Skipping {factor_name}: {reason}")
                 skipped_factors.append({"factor_name": factor_name, "reason": reason})
                 continue

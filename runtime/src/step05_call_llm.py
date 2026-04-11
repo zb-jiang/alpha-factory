@@ -27,6 +27,7 @@ def build_messages() -> list[dict[str, str]]:
         summary["previous_round_skipped_factors"] = skipped_factors
     
     base_feature_names = [item["name"] for item in feature_cfg.get("base_features", [])]
+    generation_constraints = feature_cfg.get("generation_constraints", {})
     candidate_count = int(config.get("llm_candidate_count", 10))
     
     system_prompt = """你是一个顶级的量化交易策略研究员和金融数据科学家。你精通A股市场微观结构、多因子模型、行为金融学以及Alpha挖掘。
@@ -53,6 +54,10 @@ def build_messages() -> list[dict[str, str]]:
 {json.dumps(feature_cfg.get("allowed_operators", []), ensure_ascii=False)}
 注意：公式中仅允许使用加(+)、减(-)、乘(*)、除(/)等基本算数运算符，以及上述列表中的算子。
 
+3. 生产环境公式约束：
+{json.dumps(generation_constraints, ensure_ascii=False, indent=2)}
+请注意：以上约束不是建议，而是硬性校验规则。任何不满足规则的公式都会在验证阶段被直接拒绝。
+
 【特征体检与历史经验报告】
 以下是系统对当前可用特征在历史数据上的表现总结（llm_summary.json）：
 {json.dumps(summary, ensure_ascii=False, indent=2)}
@@ -64,6 +69,8 @@ def build_messages() -> list[dict[str, str]]:
 - unstable_features：历史表现不稳定的特征。使用时需极其谨慎，或者配以强力的信号过滤。
 - previous_round_top_factors（若有）：上一轮迭代中回测表现最好的因子。你可以参考它们的成功逻辑，或者寻找与它们截然不同的正交逻辑以丰富策略库。
 - previous_round_skipped_factors（若有）：上一轮由于预测能力弱（IC低）、稳定性差（ICIR低）或方向胜率不足而被自动淘汰的因子。请务必分析它们的失败原因（如逻辑过度拟合、使用了无意义的高波动特征等），并确保本轮不要生成类似或雷同的因子。
+- 优先生成“短公式、少特征、少层级、少重复加工”的因子。宁可简单清晰，也不要为了复杂而复杂。
+- 如果两个特征高度相似，不要用多个近似算子反复包装同一信号；优先通过差值、比值、分母惩罚等方式提取增量信息。
 
 【输出格式要求】
 你必须返回一个符合以下JSON Schema的纯JSON对象，绝对不能有任何其他字符！
@@ -73,7 +80,7 @@ def build_messages() -> list[dict[str, str]]:
       "factor_name": "字符串：因子的英文名称（要求见名知意，如 momentum_vol_ratio_v1）",
       "formula": "字符串：只使用【允许的基础特征】和【允许的算子】组成的Python表达式（例如：'(ret_20d * volume_ratio_5d) / (1 + volatility_20d)'）",
       "fields": ["列表：公式中实际使用到的特征名称，必须属于【允许的基础特征列表】"],
-      "direction": "枚举值：'higher_better'(因子值越大越看多) 或 'lower_better'(因子值越小越看多)",
+      "direction": "枚举值：'higher_better'(因子值越大越看多) 或 'lower_better'(因子值越小越看多)。这是你对因子经济含义的原始方向假设，系统后续会将其记录为 llm_direction，并再根据样本内数据计算 empirical_direction",
       "reason": "字符串：用中文简述该因子的金融学逻辑或设计意图（例如：'结合了短期动量和成交量放大的共振，同时剔除高波动率股票的风险'）",
       "risk": "字符串：用中文简述该因子在什么市场环境下可能失效（例如：'在市场风格急剧切换或低流动性环境下容易发生回撤'）",
       "backtest_rule": {json.dumps(backtest_rule, ensure_ascii=False)}

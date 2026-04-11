@@ -176,8 +176,29 @@ class StockPoolManager:
         industry_level = self.stock_pool_config.get("industry_level", 1)
         
         print(f"获取行业股票池: {industry_name} (级别: {industry_level})")
-        print("注意: 行业股票池需要具体数据源支持，当前返回空列表")
-        return []
+        if not industry_name:
+            print("警告: 未配置 industry_name，返回空列表")
+            return []
+
+        data_source = self.config.get("data_source", "qlib")
+        if data_source == "qlib":
+            print("警告: 当前 Qlib 股票池暂未实现行业筛选，返回空列表")
+            return []
+
+        try:
+            from data_provider import get_data_provider
+
+            provider = get_data_provider(self.config)
+            provider.initialize()
+            codes = provider.get_industry_stocks(industry_name, date=end_date or start_date)
+            print(f"从数据提供者获取行业 {industry_name} 股票: {len(codes)} 只")
+            return codes
+        except ImportError:
+            print("警告: 数据提供者模块未找到，无法获取行业股票池")
+            return []
+        except Exception as e:
+            print(f"警告: 获取行业股票池失败: {e}")
+            return []
     
     def _get_custom_list(self) -> List[str]:
         """
