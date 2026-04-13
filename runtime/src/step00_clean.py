@@ -7,8 +7,10 @@ Step 00: 清理临时输出文件
 清理内容包括:
 - health/ 目录下的特征体检文件
 - iter_*/ 目录下的迭代中间文件
+- train_windows/ 目录下的窗口归档文件
 - backtest/ 目录下的回测结果文件
 - llm/ 目录下的大模型输出文件
+- _runtime/active_context.json 运行态上下文文件
 
 保留内容:
 - config/ 目录下的配置文件（由用户维护）
@@ -58,10 +60,14 @@ def clean_outputs(dry_run: bool = False) -> dict[str, int]:
         ("health/*", "files"),
         # 迭代目录
         ("iter_*", "directories"),
+        # 训练窗口归档
+        ("train_windows", "directories"),
         # 回测结果
         ("backtest/*", "files"),
         # LLM 输出
         ("llm/*", "files"),
+        # 当前运行态上下文
+        ("_runtime/active_context.json", "files"),
     ]
     
     print(f"{'[预览模式] ' if dry_run else ''}开始清理 outputs 目录...")

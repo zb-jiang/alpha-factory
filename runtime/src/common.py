@@ -19,6 +19,23 @@ CONFIG_DIR = RUNTIME_ROOT / "config"
 DATA_DIR = RUNTIME_ROOT / "data"
 OUTPUT_DIR = RUNTIME_ROOT / "outputs"
 SRC_DIR = RUNTIME_ROOT / "src"
+RUNTIME_CONTEXT_PATH = OUTPUT_DIR / "_runtime" / "active_context.json"
+OUTPUT_ARTIFACTS = [
+    Path("health") / "sample_preview.csv",
+    Path("health") / "feature_stats.csv",
+    Path("health") / "feature_corr.csv",
+    Path("health") / "llm_summary.json",
+    Path("llm") / "raw_response.json",
+    Path("llm") / "factors_validated.json",
+    Path("llm") / "factors_rejected.json",
+    Path("backtest") / "factor_values.parquet",
+    Path("backtest") / "factor_metrics.csv",
+    Path("backtest") / "strategy_metrics.csv",
+    Path("backtest") / "final_score.csv",
+    Path("backtest") / "top3_factors.json",
+    Path("backtest") / "skipped_factors.json",
+    Path("backtest") / "iteration_context.json",
+]
 
 
 def ensure_runtime_dirs() -> None:
@@ -27,6 +44,8 @@ def ensure_runtime_dirs() -> None:
         OUTPUT_DIR / "health",
         OUTPUT_DIR / "llm",
         OUTPUT_DIR / "backtest",
+        OUTPUT_DIR / "_runtime",
+        OUTPUT_DIR / "train_windows",
         OUTPUT_DIR / "iter_01",
         OUTPUT_DIR / "iter_02",
         OUTPUT_DIR / "iter_03",
@@ -50,8 +69,37 @@ def load_yaml_file(path: Path) -> dict[str, Any]:
     return _substitute_env(payload)
 
 
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(dict(merged[key]), value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def runtime_context() -> dict[str, Any]:
+    if not RUNTIME_CONTEXT_PATH.exists():
+        return {}
+    return read_json(RUNTIME_CONTEXT_PATH)
+
+
+def set_runtime_context(payload: dict[str, Any]) -> None:
+    write_json(RUNTIME_CONTEXT_PATH, payload)
+
+
+def clear_runtime_context() -> None:
+    if RUNTIME_CONTEXT_PATH.exists():
+        RUNTIME_CONTEXT_PATH.unlink()
+
+
 def env_config() -> dict[str, Any]:
-    return load_yaml_file(CONFIG_DIR / "env.yaml")
+    config = load_yaml_file(CONFIG_DIR / "env.yaml")
+    context = runtime_context()
+    if context:
+        config = _deep_merge(config, context)
+    return config
 
 
 def feature_pool_config() -> dict[str, Any]:
@@ -71,6 +119,90 @@ def write_json(path: Path, payload: Any) -> None:
 def read_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as file:
         return json.load(file)
+
+
+def _to_timestamp(value: Any) -> pd.Timestamp:
+    return pd.Timestamp(str(value)).normalize()
+
+
+def _date_text(value: pd.Timestamp) -> str:
+    return value.strftime("%Y-%m-%d")
+
+
+def build_training_windows(config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    cfg = config or env_config()
+    workflow = dict(cfg.get("training_workflow", {}))
+    mode = str(workflow.get("mode", "static_split")).strip().lower()
+    train_start = _to_timestamp(cfg.get("train_start_date"))
+    train_end = _to_timestamp(cfg.get("train_end_date"))
+    if train_end <= train_start:
+        raise ValueError("train_end_date 必须晚于 train_start_date")
+    if mode == "disabled":
+        return [
+            {
+                "window_id": "window_01",
+                "mode": "disabled",
+                "discovery_start_date": _date_text(train_start),
+                "discovery_end_date": _date_text(train_end),
+                "validation_start_date": _date_text(train_start),
+                "validation_end_date": _date_text(train_end),
+            }
+        ]
+    if mode == "static_split":
+        static_cfg = dict(workflow.get("static_split", {}))
+        discovery_start = _to_timestamp(static_cfg.get("discovery_start_date", train_start))
+        discovery_end = _to_timestamp(static_cfg.get("discovery_end_date", train_end))
+        validation_start = _to_timestamp(static_cfg.get("validation_start_date", discovery_end + pd.Timedelta(days=1)))
+        validation_end = _to_timestamp(static_cfg.get("validation_end_date", train_end))
+        if discovery_start < train_start or validation_end > train_end:
+            raise ValueError("static_split 时间区间必须落在 train_start_date 与 train_end_date 内")
+        if not (discovery_start <= discovery_end < validation_start <= validation_end):
+            raise ValueError("static_split 要求 discovery 与 validation 时间区间顺序不重叠")
+        return [
+            {
+                "window_id": "window_01",
+                "mode": mode,
+                "discovery_start_date": _date_text(discovery_start),
+                "discovery_end_date": _date_text(discovery_end),
+                "validation_start_date": _date_text(validation_start),
+                "validation_end_date": _date_text(validation_end),
+            }
+        ]
+    if mode == "walk_forward":
+        walk_cfg = dict(workflow.get("walk_forward", {}))
+        discovery_months = int(walk_cfg.get("discovery_window_months", 24))
+        validation_months = int(walk_cfg.get("validation_window_months", 6))
+        step_months = int(walk_cfg.get("step_months", validation_months))
+        max_windows = int(walk_cfg.get("max_windows", 0))
+        if discovery_months <= 0 or validation_months <= 0 or step_months <= 0:
+            raise ValueError("walk_forward 的月份参数必须为正整数")
+        windows: list[dict[str, Any]] = []
+        cursor = train_start
+        index = 1
+        while True:
+            discovery_end = cursor + pd.DateOffset(months=discovery_months) - pd.Timedelta(days=1)
+            validation_start = discovery_end + pd.Timedelta(days=1)
+            validation_end = validation_start + pd.DateOffset(months=validation_months) - pd.Timedelta(days=1)
+            if validation_end > train_end:
+                break
+            windows.append(
+                {
+                    "window_id": f"window_{index:02d}",
+                    "mode": mode,
+                    "discovery_start_date": _date_text(cursor),
+                    "discovery_end_date": _date_text(discovery_end),
+                    "validation_start_date": _date_text(validation_start),
+                    "validation_end_date": _date_text(validation_end),
+                }
+            )
+            if max_windows > 0 and len(windows) >= max_windows:
+                break
+            cursor = cursor + pd.DateOffset(months=step_months)
+            index += 1
+        if not windows:
+            raise ValueError("walk_forward 未生成任何窗口，请检查 train 区间与月份配置")
+        return windows
+    raise ValueError(f"不支持的 training_workflow.mode: {mode}")
 
 
 def write_table(path: Path, frame: pd.DataFrame) -> None:
@@ -812,7 +944,7 @@ def factor_metrics_from_series(
         "mean_rank_ic": mean_rank_ic,
         "ic_ir": float(mean_ic / ic_std) if ic_std else 0.0,
         "rank_ic_ir": float(mean_rank_ic / rank_ic_std) if rank_ic_std else 0.0,
-        "positive_ic_ratio": float((ic_daily > 0).mean()) if not ic_daily.empty else 0.0,
+        "positive_ic_ratio": float((rank_ic_daily > 0).mean()) if not rank_ic_daily.empty else 0.0,
         "coverage": float(merged["score"].notna().mean()),
     }
 
@@ -847,25 +979,12 @@ def sharpe_ratio(period_returns: pd.Series) -> float:
     return float(period_returns.mean() / std * np.sqrt(52))
 
 
-def archive_iteration_outputs(iteration: int) -> None:
-    iter_dir = OUTPUT_DIR / f"iter_{iteration:02d}"
-    iter_dir.mkdir(parents=True, exist_ok=True)
-    for relative in [
-        Path("health") / "feature_stats.csv",
-        Path("health") / "feature_corr.csv",
-        Path("health") / "llm_summary.json",
-        Path("llm") / "raw_response.json",
-        Path("llm") / "factors_validated.json",
-        Path("llm") / "factors_rejected.json",
-        Path("backtest") / "factor_values.parquet",
-        Path("backtest") / "factor_metrics.csv",
-        Path("backtest") / "strategy_metrics.csv",
-        Path("backtest") / "final_score.csv",
-        Path("backtest") / "top3_factors.json",
-    ]:
+def archive_outputs_bundle(target_dir: Path) -> None:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for relative in OUTPUT_ARTIFACTS:
         source = OUTPUT_DIR / relative
         if source.exists():
-            target = iter_dir / relative
+            target = target_dir / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             if source.suffix == ".parquet":
                 pd.read_parquet(source).to_parquet(target, index=True)
@@ -873,3 +992,8 @@ def archive_iteration_outputs(iteration: int) -> None:
                 pd.read_csv(source).to_csv(target, index=False)
             else:
                 target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+
+
+def archive_iteration_outputs(iteration: int, scope: str | None = None) -> None:
+    relative_dir = Path(scope) / f"iter_{iteration:02d}" if scope else Path(f"iter_{iteration:02d}")
+    archive_outputs_bundle(OUTPUT_DIR / relative_dir)

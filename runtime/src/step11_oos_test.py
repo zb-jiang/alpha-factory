@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
-import pandas as pd
-
-from common import OUTPUT_DIR, ensure_runtime_dirs, env_config, write_json
+from common import OUTPUT_DIR, clear_runtime_context, ensure_runtime_dirs, env_config, write_json
 from step01_init_datasource import run as run_step01
 from step02_build_feature_pool import run as run_step02
 from step07_eval_factor import run as run_step07
@@ -14,45 +11,44 @@ from step09_score import run as run_step09
 
 
 def collect_train_top_factors() -> list[dict]:
-    """从之前的各个 iteration 中收集 Top3 因子"""
-    collected_factors = []
-    seen_formulas = set()
-    
-    # 遍历 iter_01, iter_02, ...
-    for iter_dir in OUTPUT_DIR.glob("iter_*"):
-        if not iter_dir.is_dir():
-            continue
-            
-        top3_path = iter_dir / "backtest" / "top3_factors.json"
+    """优先收集跨窗口汇总因子，其次回退到历史 iteration 的 Top3 因子"""
+    collected_factors: list[dict] = []
+    seen_formulas: set[str] = set()
+
+    summary_paths = [OUTPUT_DIR / "backtest" / "cross_window_top3_factors.json"]
+    summary_paths.extend(sorted(OUTPUT_DIR.glob("train_windows/*/validation/backtest/top3_factors.json")))
+    summary_paths.extend(sorted(OUTPUT_DIR.glob("iter_*/backtest/top3_factors.json")))
+
+    for top3_path in summary_paths:
         if not top3_path.exists():
             continue
-            
+
         with top3_path.open("r", encoding="utf-8") as f:
             data = json.load(f)
             top3 = data.get("top3", [])
-            
+
         for factor in top3:
             formula = factor.get("formula")
             if not formula or formula in seen_formulas:
                 continue
-                
+
             seen_formulas.add(formula)
-            empirical_direction = factor["empirical_direction"]
-            llm_direction = factor["llm_direction"]
-            collected_factors.append({
-                "factor_name": factor["factor_name"] + "_OOS",
-                "formula": formula,
-                "llm_direction": llm_direction,
-                "empirical_direction": empirical_direction,
-                "reason": factor.get("reason", "来自训练集的优秀因子"),
-                "risk": factor.get("risk", "样本外盲测阶段"),
-            })
-            
+            collected_factors.append(
+                {
+                    "factor_name": factor["factor_name"] + "_OOS",
+                    "formula": formula,
+                    "llm_direction": factor.get("llm_direction", ""),
+                    "empirical_direction": factor.get("empirical_direction", factor.get("llm_direction", "")),
+                    "reason": factor.get("reason", "来自训练集的优秀因子"),
+                    "risk": factor.get("risk", "样本外盲测阶段"),
+                }
+            )
     return collected_factors
 
 
 def run() -> None:
     ensure_runtime_dirs()
+    clear_runtime_context()
     config = env_config()
     
     if config.get("run_mode") != "test":

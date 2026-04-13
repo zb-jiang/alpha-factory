@@ -1,6 +1,22 @@
 from __future__ import annotations
 
-from common import archive_iteration_outputs, ensure_runtime_dirs, env_config, write_json
+from pathlib import Path
+
+import pandas as pd
+
+from common import (
+    OUTPUT_DIR,
+    archive_iteration_outputs,
+    archive_outputs_bundle,
+    build_training_windows,
+    clear_runtime_context,
+    ensure_runtime_dirs,
+    env_config,
+    read_json,
+    set_runtime_context,
+    write_json,
+)
+from step00_clean import clean_outputs
 from step01_init_datasource import run as run_step01
 from step02_build_feature_pool import run as run_step02
 from step03_health_check import run as run_step03
@@ -12,29 +28,256 @@ from step08_backtest import run as run_step08
 from step09_score import run as run_step09
 
 
+def _stage_context(window: dict[str, str], stage: str, iteration: int | None = None) -> dict:
+    start_key = f"{stage}_start_date"
+    end_key = f"{stage}_end_date"
+    return {
+        "run_mode": "train",
+        "train_start_date": window[start_key],
+        "train_end_date": window[end_key],
+        "workflow_state": {
+            "window_id": window["window_id"],
+            "stage": stage,
+            "iteration": iteration,
+            "window_config": window,
+        },
+    }
+
+
+def _safe_read_csv(path: Path) -> pd.DataFrame:
+    if not path.exists() or path.stat().st_size == 0:
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _metric_value(row: dict, *keys: str) -> float:
+    for key in keys:
+        value = row.get(key)
+        if value is None or pd.isna(value):
+            continue
+        return float(value)
+    return 0.0
+
+
+def _run_discovery_iteration(iteration: int, window: dict[str, str], scope: str) -> None:
+    set_runtime_context(_stage_context(window, "discovery", iteration))
+    run_step01()
+    run_step02()
+    run_step03()
+    run_step04()
+    run_step05()
+    run_step06()
+    run_step07()
+    run_step08()
+    run_step09()
+    write_json(
+        OUTPUT_DIR / "backtest" / "iteration_context.json",
+        {
+            "iteration": iteration,
+            "window_id": window["window_id"],
+            "stage": "discovery",
+            "status": "completed",
+            "date_range": {
+                "start": window["discovery_start_date"],
+                "end": window["discovery_end_date"],
+            },
+        },
+    )
+    archive_iteration_outputs(iteration, scope=scope)
+
+
+def _collect_discovery_passed_factors(scope: str) -> list[dict]:
+    scope_root = OUTPUT_DIR / scope
+    candidates_by_formula: dict[str, dict] = {}
+    for iter_dir in sorted(scope_root.glob("iter_*")):
+        final_score = _safe_read_csv(iter_dir / "backtest" / "final_score.csv")
+        if final_score.empty or "factor_name" not in final_score.columns:
+            continue
+        validated = read_json(iter_dir / "llm" / "factors_validated.json").get("factors", [])
+        validated_by_name = {str(item["factor_name"]): item for item in validated}
+        for row in final_score.to_dict(orient="records"):
+            factor_name = str(row.get("factor_name", ""))
+            detail = validated_by_name.get(factor_name)
+            if not detail:
+                continue
+            formula = str(detail.get("formula", "")).strip()
+            if not formula:
+                continue
+            candidate = dict(detail)
+            candidate["discovery_total_score"] = float(row.get("total_score", 0.0) or 0.0)
+            candidate["discovery_iteration"] = iter_dir.name
+            existing = candidates_by_formula.get(formula)
+            if existing is None or candidate["discovery_total_score"] > existing["discovery_total_score"]:
+                candidates_by_formula[formula] = candidate
+    candidates = sorted(
+        candidates_by_formula.values(),
+        key=lambda item: float(item.get("discovery_total_score", 0.0)),
+        reverse=True,
+    )
+    if not candidates:
+        raise RuntimeError("discovery 阶段没有任何通过回测筛选的候选因子，无法进入 validation")
+    return candidates
+
+
+def _run_validation(window: dict[str, str], candidates: list[dict]) -> list[dict]:
+    set_runtime_context(_stage_context(window, "validation"))
+    write_json(
+        OUTPUT_DIR / "llm" / "factors_validated.json",
+        {
+            "factors": candidates,
+            "source": {
+                "stage": "discovery",
+                "window_id": window["window_id"],
+                "candidate_count": len(candidates),
+            },
+        },
+    )
+    run_step01()
+    run_step02()
+    run_step07()
+    run_step08()
+    run_step09()
+    archive_outputs_bundle(OUTPUT_DIR / "train_windows" / window["window_id"] / "validation")
+
+    final_score = _safe_read_csv(OUTPUT_DIR / "backtest" / "final_score.csv")
+    factor_metrics = _safe_read_csv(OUTPUT_DIR / "backtest" / "factor_metrics.csv")
+    strategy_metrics = _safe_read_csv(OUTPUT_DIR / "backtest" / "strategy_metrics.csv")
+    if final_score.empty or "factor_name" not in final_score.columns:
+        return []
+
+    metrics = final_score.copy()
+    if not factor_metrics.empty and "factor_name" in factor_metrics.columns:
+        metrics = metrics.merge(
+            factor_metrics[["factor_name", "rank_ic_ir", "positive_ic_ratio"]],
+            on="factor_name",
+            how="left",
+        )
+    if not strategy_metrics.empty and "factor_name" in strategy_metrics.columns:
+        metrics = metrics.merge(
+            strategy_metrics[["factor_name", "annualized_return", "max_drawdown", "sharpe", "turnover"]],
+            on="factor_name",
+            how="left",
+        )
+    candidate_by_name = {str(item["factor_name"]): item for item in candidates}
+    rows: list[dict] = []
+    for row in metrics.to_dict(orient="records"):
+        factor_name = str(row.get("factor_name", ""))
+        candidate = candidate_by_name.get(factor_name)
+        if not candidate:
+            continue
+        rows.append(
+            {
+                "window_id": window["window_id"],
+                "factor_name": factor_name,
+                "formula": candidate.get("formula", ""),
+                "llm_direction": candidate.get("llm_direction", ""),
+                "reason": candidate.get("reason", ""),
+                "risk": candidate.get("risk", ""),
+                "discovery_total_score": float(candidate.get("discovery_total_score", 0.0) or 0.0),
+                "validation_total_score": _metric_value(row, "total_score"),
+                "annualized_return": _metric_value(row, "annualized_return", "annualized_return_x", "annualized_return_y"),
+                "rank_ic_ir": _metric_value(row, "rank_ic_ir", "rank_ic_ir_x", "rank_ic_ir_y"),
+                "positive_ic_ratio": _metric_value(row, "positive_ic_ratio", "positive_ic_ratio_x", "positive_ic_ratio_y"),
+                "max_drawdown": _metric_value(row, "max_drawdown", "max_drawdown_x", "max_drawdown_y"),
+                "sharpe": _metric_value(row, "sharpe", "sharpe_x", "sharpe_y"),
+                "turnover": _metric_value(row, "turnover", "turnover_x", "turnover_y"),
+            }
+        )
+    return rows
+
+
+def _aggregate_cross_window_results(validation_rows: list[dict], total_windows: int) -> pd.DataFrame:
+    if not validation_rows:
+        return pd.DataFrame()
+    frame = pd.DataFrame(validation_rows)
+    aggregated = (
+        frame.groupby("formula", as_index=False)
+        .agg(
+            factor_name=("factor_name", "first"),
+            llm_direction=("llm_direction", "first"),
+            reason=("reason", "first"),
+            risk=("risk", "first"),
+            windows_passed=("window_id", "nunique"),
+            mean_discovery_total_score=("discovery_total_score", "mean"),
+            mean_validation_total_score=("validation_total_score", "mean"),
+            min_validation_total_score=("validation_total_score", "min"),
+            mean_annualized_return=("annualized_return", "mean"),
+            mean_rank_ic_ir=("rank_ic_ir", "mean"),
+            mean_positive_ic_ratio=("positive_ic_ratio", "mean"),
+            mean_max_drawdown=("max_drawdown", "mean"),
+            mean_sharpe=("sharpe", "mean"),
+            mean_turnover=("turnover", "mean"),
+        )
+    )
+    aggregated["window_pass_ratio"] = aggregated["windows_passed"] / max(total_windows, 1)
+    aggregated = aggregated.sort_values(
+        ["window_pass_ratio", "mean_validation_total_score", "mean_annualized_return"],
+        ascending=[False, False, False],
+    )
+    return aggregated
+
+
+def _write_cross_window_outputs(validation_rows: list[dict], windows: list[dict[str, str]]) -> None:
+    detail_frame = pd.DataFrame(validation_rows)
+    detail_frame.to_csv(OUTPUT_DIR / "backtest" / "cross_window_validation_details.csv", index=False)
+    aggregated = _aggregate_cross_window_results(validation_rows, len(windows))
+    aggregated.to_csv(OUTPUT_DIR / "backtest" / "cross_window_factor_ranking.csv", index=False)
+    top3 = aggregated.head(3).to_dict(orient="records") if not aggregated.empty else []
+    write_json(
+        OUTPUT_DIR / "backtest" / "cross_window_summary.json",
+        {
+            "window_count": len(windows),
+            "windows": windows,
+            "validation_row_count": len(validation_rows),
+            "aggregated_factor_count": int(len(aggregated)),
+            "top3": top3,
+        },
+    )
+    write_json(OUTPUT_DIR / "backtest" / "cross_window_top3_factors.json", {"top3": top3})
+
+
 def run() -> None:
     ensure_runtime_dirs()
     config = env_config()
+    windows = build_training_windows(config)
     iterations = int(config.get("iteration_count", 3))
-    for iteration in range(1, iterations + 1):
-        run_step01()
-        run_step02()
-        run_step03()
-        run_step04()
-        run_step05()
-        run_step06()
-        run_step07()
-        run_step08()
-        run_step09()
-        write_json(
-            OUTPUT_DIR / "backtest" / "iteration_context.json",
-            {"iteration": iteration, "status": "completed"},
-        )
-        archive_iteration_outputs(iteration)
-        print(f"iteration {iteration} ok")
-
+    write_json(OUTPUT_DIR / "backtest" / "training_windows.json", {"windows": windows})
+    validation_rows: list[dict] = []
+    try:
+        for window in windows:
+            clean_outputs(dry_run=False)
+            discovery_scope = f"train_windows/{window['window_id']}/discovery"
+            for iteration in range(1, iterations + 1):
+                _run_discovery_iteration(iteration, window, discovery_scope)
+                print(f"{window['window_id']} discovery iteration {iteration} ok")
+            candidates = _collect_discovery_passed_factors(discovery_scope)
+            validation_result = _run_validation(window, candidates)
+            validation_rows.extend(validation_result)
+            write_json(
+                OUTPUT_DIR / "train_windows" / window["window_id"] / "window_summary.json",
+                {
+                    "window": window,
+                    "discovery_candidate_count": len(candidates),
+                    "validation_passed_count": len(validation_result),
+                },
+            )
+            print(
+                f"{window['window_id']} validation ok, "
+                f"candidates={len(candidates)}, passed={len(validation_result)}"
+            )
+    finally:
+        clear_runtime_context()
+    _write_cross_window_outputs(validation_rows, windows)
+    aggregated = _aggregate_cross_window_results(validation_rows, len(windows))
+    print(
+        "train workflow ok, "
+        f"windows={len(windows)}, "
+        f"validated_factors={len(validation_rows)}, "
+        f"aggregated={len(aggregated)}"
+    )
 
 if __name__ == "__main__":
-    from common import OUTPUT_DIR
-
     run()

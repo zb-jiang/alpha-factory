@@ -5,6 +5,7 @@ Tushare 数据提供者实现
 
 import hashlib
 import os
+import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import pandas as pd
@@ -84,6 +85,40 @@ class TushareProvider(BaseDataProvider):
         self._ts = None  # tushare 模块
         self._pro = None  # Tushare Pro 接口
         self._api_key = None
+        self._request_interval_seconds = max(float(self.ts_config.get("request_interval_seconds", 0.35) or 0.35), 0.0)
+        self._rate_limit_retry_seconds = max(float(self.ts_config.get("rate_limit_retry_seconds", 65.0) or 65.0), 0.0)
+        self._rate_limit_retries = max(int(self.ts_config.get("rate_limit_retries", 1) or 1), 0)
+        self._last_request_started_at = 0.0
+
+    def _wait_for_request_slot(self) -> None:
+        if self._request_interval_seconds <= 0:
+            return
+        now = time.monotonic()
+        elapsed = now - self._last_request_started_at
+        remaining = self._request_interval_seconds - elapsed
+        if remaining > 0:
+            time.sleep(remaining)
+
+    def _is_rate_limit_error(self, error: Exception) -> bool:
+        message = str(error)
+        return "每分钟最多访问该接口" in message or "频次" in message or "rate limit" in message.lower()
+
+    def _call_pro_api(self, method_name: str, **kwargs) -> Any:
+        if self._pro is None:
+            raise RuntimeError("Tushare Pro 接口尚未初始化")
+        method = getattr(self._pro, method_name)
+        for attempt in range(self._rate_limit_retries + 1):
+            self._wait_for_request_slot()
+            self._last_request_started_at = time.monotonic()
+            try:
+                return method(**kwargs)
+            except Exception as error:
+                if attempt >= self._rate_limit_retries or not self._is_rate_limit_error(error):
+                    raise
+                wait_seconds = max(self._rate_limit_retry_seconds, self._request_interval_seconds)
+                print(f"  Tushare 接口触发频率限制，{wait_seconds:.1f} 秒后重试 {method_name}")
+                time.sleep(wait_seconds)
+        raise RuntimeError(f"Tushare 接口调用失败: {method_name}")
     
     def initialize(self) -> None:
         """初始化 Tushare 连接
@@ -112,7 +147,7 @@ class TushareProvider(BaseDataProvider):
             # 验证 API Key 是否有效
             try:
                 # 尝试获取一条数据来验证
-                test_df = self._pro.trade_cal(exchange='SSE', limit=1)
+                test_df = self._call_pro_api("trade_cal", exchange='SSE', limit=1)
                 if test_df is None or test_df.empty:
                     raise RuntimeError("API Key 验证失败，请检查 API Key 是否有效")
             except Exception as e:
@@ -210,8 +245,12 @@ class TushareProvider(BaseDataProvider):
             print(f"  从 Tushare 获取股票列表...")
             
             # 获取所有A股股票基本信息
-            stocks = self._pro.stock_basic(exchange='', list_status='L', 
-                                            fields='ts_code,symbol,name,area,industry,list_date')
+            stocks = self._call_pro_api(
+                "stock_basic",
+                exchange='',
+                list_status='L',
+                fields='ts_code,symbol,name,area,industry,list_date',
+            )
             
             if stocks is None or stocks.empty:
                 return []
@@ -274,10 +313,10 @@ class TushareProvider(BaseDataProvider):
             # 获取成分股
             if date:
                 # 获取指定日期的成分股
-                df = self._pro.index_weight(index_code=ts_index_code, trade_date=date.replace('-', ''))
+                df = self._call_pro_api("index_weight", index_code=ts_index_code, trade_date=date.replace('-', ''))
             else:
                 # 获取最新成分股
-                df = self._pro.index_weight(index_code=ts_index_code)
+                df = self._call_pro_api("index_weight", index_code=ts_index_code)
             
             if df is None or df.empty:
                 print(f"警告: 无法获取指数 {index_code} 的成分股")
@@ -404,20 +443,22 @@ class TushareProvider(BaseDataProvider):
                     ts_code = self._convert_to_ts_code(qlib_code)
                     
                     # 获取日线数据
-                    df = self._pro.daily(
+                    df = self._call_pro_api(
+                        "daily",
                         ts_code=ts_code,
                         start_date=start_date.replace('-', ''),
-                        end_date=end_date.replace('-', '')
+                        end_date=end_date.replace('-', ''),
                     )
                     
                     if df is not None and not df.empty:
                         # 如果需要复权因子，额外获取
                         if need_factor:
                             try:
-                                factor_df = self._pro.adj_factor(
+                                factor_df = self._call_pro_api(
+                                    "adj_factor",
                                     ts_code=ts_code,
                                     start_date=start_date.replace('-', ''),
-                                    end_date=end_date.replace('-', '')
+                                    end_date=end_date.replace('-', ''),
                                 )
                                 if factor_df is not None and not factor_df.empty:
                                     # 合并复权因子数据
@@ -575,7 +616,8 @@ class TushareProvider(BaseDataProvider):
         for qlib_code in instruments:
             try:
                 ts_code = self._convert_to_ts_code(qlib_code)
-                df = self._pro.daily_basic(
+                df = self._call_pro_api(
+                    "daily_basic",
                     ts_code=ts_code,
                     start_date=start_date.replace('-', ''),
                     end_date=end_date.replace('-', ''),
@@ -660,7 +702,7 @@ class TushareProvider(BaseDataProvider):
         unique_fields = ",".join(dict.fromkeys(requested_fields))
 
         try:
-            stock_basic = self._pro.stock_basic(exchange='', list_status='L', fields=unique_fields)
+            stock_basic = self._call_pro_api("stock_basic", exchange='', list_status='L', fields=unique_fields)
         except Exception as e:
             print(f"获取 stock_basic 数据失败: {e}")
             return pd.DataFrame()
@@ -774,11 +816,12 @@ class TushareProvider(BaseDataProvider):
         self.initialize()
         
         try:
-            df = self._pro.trade_cal(
+            df = self._call_pro_api(
+                "trade_cal",
                 exchange='SSE',
                 start_date=start_date.replace('-', ''),
                 end_date=end_date.replace('-', ''),
-                is_open='1'
+                is_open='1',
             )
             
             if df is not None and not df.empty:
@@ -799,7 +842,7 @@ class TushareProvider(BaseDataProvider):
         self.initialize()
         
         try:
-            return self._pro.industry_list()
+            return self._call_pro_api("industry_list")
         except Exception as e:
             print(f"获取行业列表失败: {e}")
             return pd.DataFrame()
@@ -815,8 +858,12 @@ class TushareProvider(BaseDataProvider):
         
         try:
             # 通过股票基本信息中的 industry 字段筛选
-            stocks = self._pro.stock_basic(exchange='', list_status='L',
-                                            fields='ts_code,symbol,name,industry')
+            stocks = self._call_pro_api(
+                "stock_basic",
+                exchange='',
+                list_status='L',
+                fields='ts_code,symbol,name,industry',
+            )
             
             if stocks is None or stocks.empty:
                 return []

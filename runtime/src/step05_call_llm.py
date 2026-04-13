@@ -13,6 +13,7 @@ def build_messages() -> list[dict[str, str]]:
     feature_cfg = feature_pool_config()
     backtest_rule = backtest_rule_config()
     summary = read_json(OUTPUT_DIR / "health" / "llm_summary.json")
+    workflow_state = dict(config.get("workflow_state", {}))
     
     # 尝试读取上一轮表现最好的因子（若文件存在）
     top_factors_path = OUTPUT_DIR / "backtest" / "top3_factors.json"
@@ -45,6 +46,10 @@ def build_messages() -> list[dict[str, str]]:
     user_prompt = f"""【任务背景】
 我们需要你挖掘出 {candidate_count} 个全新的量化选股因子。
 当前模型的预测目标是：{config.get("target_label")}
+
+【当前流程上下文】
+{json.dumps(workflow_state, ensure_ascii=False, indent=2)}
+请注意：当前阶段只允许在 discovery 阶段生成新因子。如果后续系统进入 validation 阶段，则应复用 discovery 阶段已经产出的候选因子，而不是重新生成新公式。
 
 【数据资产与限制】
 1. 允许使用的基础特征列表：
@@ -102,6 +107,10 @@ def build_messages() -> list[dict[str, str]]:
 
 def run() -> None:
     config = env_config()
+    workflow_state = dict(config.get("workflow_state", {}))
+    stage = str(workflow_state.get("stage", "discovery"))
+    if stage != "discovery":
+        raise RuntimeError(f"step05_call_llm 只允许在 discovery 阶段运行，当前阶段是: {stage}")
     api_key = os.getenv("OPENAI_API_KEY", "")
     base_url = str(config.get("llm_base_url", "")).strip()
     model = str(config.get("llm_model", "")).strip()
