@@ -6,8 +6,6 @@
 from typing import Dict, Any, Type, List
 
 from .base_provider import BaseDataProvider
-from .qlib_provider import QlibProvider
-from .ricequant_provider import RicequantProvider
 from .tushare_provider import TushareProvider
 
 
@@ -15,19 +13,17 @@ class ProviderFactory:
     """数据提供者工厂类
     
     根据配置中的 data_source 字段创建对应的数据提供者。
-    支持扩展新的数据源，只需注册新的提供者类即可。
+    当前仅支持 tushare。
     
     示例:
         >>> from data_provider import ProviderFactory
-        >>> config = {"data_source": "ricequant", "ricequant": {...}}
+        >>> config = {"data_source": "tushare", "tushare": {...}}
         >>> provider = ProviderFactory.create_provider(config)
         >>> provider.initialize()
     """
     
     # 注册的数据提供者
     _providers: Dict[str, Type[BaseDataProvider]] = {
-        "qlib": QlibProvider,
-        "ricequant": RicequantProvider,
         "tushare": TushareProvider,
     }
     
@@ -44,14 +40,11 @@ class ProviderFactory:
         Raises:
             ValueError: 如果指定的数据源不支持
         """
-        source = config.get("data_source", "qlib").lower()
+        source = str(config.get("data_source", "tushare")).strip().lower()
         
         if source not in cls._providers:
             available = ", ".join(cls._providers.keys())
-            raise ValueError(
-                f"不支持的数据源: '{source}'。"
-                f"可选的数据源: {available}"
-            )
+            raise ValueError(f"当前仅支持 tushare，收到: '{source}'。可选的数据源: {available}")
         
         provider_class = cls._providers[source]
         return provider_class(config)

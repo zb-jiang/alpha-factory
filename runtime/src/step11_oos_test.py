@@ -11,13 +11,12 @@ from step09_score import run as run_step09
 
 
 def collect_train_top_factors() -> list[dict]:
-    """优先收集跨窗口汇总因子，其次回退到历史 iteration 的 Top3 因子"""
+    """优先收集跨窗口汇总因子，其次回退到各窗口 validation 的 Top3 因子"""
     collected_factors: list[dict] = []
     seen_formulas: set[str] = set()
 
     summary_paths = [OUTPUT_DIR / "backtest" / "cross_window_top3_factors.json"]
     summary_paths.extend(sorted(OUTPUT_DIR.glob("train_windows/*/validation/backtest/top3_factors.json")))
-    summary_paths.extend(sorted(OUTPUT_DIR.glob("iter_*/backtest/top3_factors.json")))
 
     for top3_path in summary_paths:
         if not top3_path.exists():

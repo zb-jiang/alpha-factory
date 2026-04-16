@@ -39,8 +39,6 @@ OUTPUT_ARTIFACTS = [
 CONFIG_OWNERSHIP: dict[str, set[str]] = {
     "env": {
         "data_source",
-        "provider_uri",
-        "ricequant",
         "tushare",
         "project_root",
         "region",
@@ -180,15 +178,12 @@ def _normalize_preprocess_block(config: dict[str, Any]) -> dict[str, Any]:
 
 def ensure_runtime_dirs() -> None:
     for path in [
-        DATA_DIR / "qlib_cn",
+        DATA_DIR / "tushare_cache",
         OUTPUT_DIR / "health",
         OUTPUT_DIR / "llm",
         OUTPUT_DIR / "backtest",
         OUTPUT_DIR / "_runtime",
         OUTPUT_DIR / "train_windows",
-        OUTPUT_DIR / "iter_01",
-        OUTPUT_DIR / "iter_02",
-        OUTPUT_DIR / "iter_03",
     ]:
         path.mkdir(parents=True, exist_ok=True)
 
@@ -354,8 +349,11 @@ def label_description(config: dict[str, Any] | None = None) -> str:
     label_cfg = label_config(cfg)
     rebalance = str(cfg.get("rebalance", "weekly")).strip().lower()
     interval = max(int(cfg.get("rebalance_interval", 1) or 1), 1)
-    default_anchor = "first_trading_day_of_month" if rebalance == "monthly" else "first_trading_day_of_week"
-    anchor = str(cfg.get("rebalance_anchor", default_anchor)).strip().lower()
+    if rebalance == "daily":
+        anchor = "n/a"
+    else:
+        default_anchor = "first_trading_day_of_month" if rebalance == "monthly" else "first_trading_day_of_week"
+        anchor = str(cfg.get("rebalance_anchor", default_anchor)).strip().lower()
     return (
         f"name={label_cfg.get('name')}, return_type={label_cfg.get('return_type')}, "
         f"price_field={label_cfg.get('price_field')}, rebalance={rebalance}, "
@@ -530,25 +528,20 @@ def build_training_windows(config: dict[str, Any] | None = None) -> list[dict[st
     train_end = _to_timestamp(cfg.get("train_end_date"))
     if train_end <= train_start:
         raise ValueError("train_end_date 必须晚于 train_start_date")
-    if mode == "disabled":
-        return [
-            {
-                "window_id": "window_01",
-                "mode": "disabled",
-                "discovery_start_date": _date_text(train_start),
-                "discovery_end_date": _date_text(train_end),
-                "validation_start_date": _date_text(train_start),
-                "validation_end_date": _date_text(train_end),
-            }
-        ]
     if mode == "static_split":
         static_cfg = dict(workflow.get("static_split", {}))
         discovery_start = _to_timestamp(static_cfg.get("discovery_start_date", train_start))
         discovery_end = _to_timestamp(static_cfg.get("discovery_end_date", train_end))
         validation_start = _to_timestamp(static_cfg.get("validation_start_date", discovery_end + pd.Timedelta(days=1)))
         validation_end = _to_timestamp(static_cfg.get("validation_end_date", train_end))
-        if discovery_start < train_start or validation_end > train_end:
-            raise ValueError("static_split 时间区间必须落在 train_start_date 与 train_end_date 内")
+        if discovery_start < train_start:
+            raise ValueError("static_split.discovery_start_date 不能早于 train_start_date")
+        if discovery_end > train_end:
+            raise ValueError("static_split.discovery_end_date 不能晚于 train_end_date")
+        if validation_start < train_start:
+            raise ValueError("static_split.validation_start_date 不能早于 train_start_date")
+        if validation_end > train_end:
+            raise ValueError("static_split.validation_end_date 不能晚于 train_end_date")
         if not (discovery_start <= discovery_end < validation_start <= validation_end):
             raise ValueError("static_split 要求 discovery 与 validation 时间区间顺序不重叠")
         return [
@@ -609,31 +602,11 @@ def write_table(path: Path, frame: pd.DataFrame) -> None:
     raise ValueError(f"Unsupported table format: {path}")
 
 
-def _qlib_region(region: str) -> str:
-    from qlib.constant import REG_CN, REG_US
-
-    return REG_CN if str(region).lower() == "cn" else REG_US
-
-
-def init_qlib(config: dict[str, Any] | None = None) -> dict[str, Any]:
-    import qlib
-
-    cfg = config or env_config()
-    provider_uri = str(cfg.get("provider_uri", "~/.qlib/qlib_data/cn_data"))
-    Path(provider_uri).mkdir(parents=True, exist_ok=True)
-    qlib.init(
-        provider_uri=provider_uri,
-        region=_qlib_region(str(cfg.get("region", "cn"))),
-        kernels=1,
-    )
-    return cfg
-
-
 def get_data_provider(config: dict[str, Any] | None = None) -> "BaseDataProvider":
     """获取数据提供者实例
     
     根据配置中的 data_source 字段创建对应的数据提供者。
-    支持 qlib 和 ricequant 两种数据源。
+    当前仅支持 tushare。
     
     Args:
         config: 配置字典，如果为 None 则加载默认配置
@@ -653,7 +626,7 @@ def get_data_provider(config: dict[str, Any] | None = None) -> "BaseDataProvider
 
 
 def init_data_source(config: dict[str, Any] | None = None) -> dict[str, Any]:
-    """初始化数据源（支持 Qlib 和米筐）
+    """初始化数据源（当前仅支持 Tushare）
     
     根据配置自动选择并初始化对应的数据源。
     
@@ -664,24 +637,16 @@ def init_data_source(config: dict[str, Any] | None = None) -> dict[str, Any]:
         配置字典
     """
     cfg = config or env_config()
-    data_source = cfg.get("data_source", "qlib")
-    
-    if data_source == "ricequant":
-        # 初始化米筐
-        provider = get_data_provider(cfg)
-        provider.initialize()
-    else:
-        # 默认使用 Qlib
-        init_qlib(cfg)
-    
+    data_source = str(cfg.get("data_source", "tushare")).strip().lower()
+    if data_source != "tushare":
+        raise ValueError(f"当前仅支持 data_source=tushare，收到: {data_source}")
+    provider = get_data_provider(cfg)
+    provider.initialize()
     return cfg
 
 
 def list_instruments(config: dict[str, Any] | None = None) -> list[str]:
     cfg = config or env_config()
-    
-    # 获取数据源类型
-    data_source = cfg.get("data_source", "qlib")
     
     # 检查是否使用新的股票池管理器
     stock_pool_config = cfg.get("stock_pool", {})
@@ -715,7 +680,6 @@ def list_instruments(config: dict[str, Any] | None = None) -> list[str]:
         except Exception as e:
             print(f"股票池管理器出错: {e}，使用默认方法")
     
-    # 根据数据源类型选择获取方式
     run_mode = cfg.get("run_mode", "train")
     if run_mode == "test":
         start_time = str(cfg.get("test_start_date"))
@@ -724,24 +688,10 @@ def list_instruments(config: dict[str, Any] | None = None) -> list[str]:
         start_time = str(cfg.get("train_start_date"))
         end_time = str(cfg.get("train_end_date"))
     
-    if data_source == "qlib":
-        # 使用 Qlib 本地数据
-        init_qlib(cfg)
-        from qlib.data import D
-        
-        instruments = D.instruments(market=str(cfg.get("market", "all")))
-        codes = D.list_instruments(
-            instruments=instruments,
-            start_time=start_time,
-            end_time=end_time,
-            as_list=True,
-        )
-    else:
-        # 使用数据提供者（Tushare、米筐等）
-        provider = get_data_provider(cfg)
-        provider.initialize()
-        codes = provider.get_instruments()
-        print(f"从 {data_source} 获取股票列表: {len(codes)} 只")
+    provider = get_data_provider(cfg)
+    provider.initialize()
+    codes = provider.get_instruments()
+    print(f"从 tushare 获取股票列表: {len(codes)} 只")
     
     # 只有在没有配置 stock_pool 时才使用 max_instruments
     max_instruments = int(cfg.get("max_instruments", 0) or 0)
@@ -766,9 +716,6 @@ def load_raw_data(
     fp_cfg = feature_pool_config()
     fields = raw_fields or list(fp_cfg.get("raw_fields", []))
     
-    # 获取数据源类型
-    data_source = cfg.get("data_source", "qlib")
-    
     start_timestamp, end_timestamp = active_run_window(cfg)
     if warmup_trading_days > 0:
         # 预热期只用于计算时序特征，不改变最终统计区间。
@@ -781,30 +728,15 @@ def load_raw_data(
     
     instruments = list_instruments(cfg)
     
-    if data_source == "qlib":
-        # 使用 Qlib 本地数据
-        init_qlib(cfg)
-        from qlib.data import D
-        
-        frame = D.features(
-            instruments=instruments,
-            fields=raw_field_tokens(fields),
-            start_time=start_time,
-            end_time=end_time,
-            freq=str(cfg.get("freq", "day")),
-        )
-    else:
-        # 使用数据提供者（Tushare、米筐等）
-        provider = get_data_provider(cfg)
-        provider.initialize()
-        
-        frame = provider.get_features(
-            instruments=instruments,
-            fields=raw_field_tokens(fields),
-            start_date=start_time,
-            end_date=end_time,
-            freq=str(cfg.get("freq", "day")),
-        )
+    provider = get_data_provider(cfg)
+    provider.initialize()
+    frame = provider.get_features(
+        instruments=instruments,
+        fields=raw_field_tokens(fields),
+        start_date=start_time,
+        end_date=end_time,
+        freq=str(cfg.get("freq", "day")),
+    )
     
     frame = frame.sort_index()
     frame.columns = [column.replace("$", "") for column in frame.columns]

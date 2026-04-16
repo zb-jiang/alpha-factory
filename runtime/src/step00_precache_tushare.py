@@ -49,10 +49,9 @@ def _collect_union_instruments(cfg: dict) -> list[str]:
 
 def run() -> None:
     cfg = env_config()
-    data_source = str(cfg.get("data_source", "qlib")).strip().lower()
+    data_source = str(cfg.get("data_source", "tushare")).strip().lower()
     if data_source != "tushare":
-        print(f"当前 data_source={data_source}，非 tushare，跳过预缓存。")
-        return
+        raise ValueError(f"当前仅支持 data_source=tushare，收到: {data_source}")
 
     feature_cfg = feature_pool_config()
     warmup_days = estimate_required_warmup(feature_cfg, formulas=[])

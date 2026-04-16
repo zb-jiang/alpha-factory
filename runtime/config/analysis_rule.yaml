@@ -7,7 +7,7 @@
 # run_mode 可选值:
 #   - train: 样本内训练模式。用于大模型迭代、因子特征体检、初筛回测。
 #   - test:  样本外盲测模式。因子定型后，在这段大模型没见过的数据上验证真实有效性。
-run_mode: test
+run_mode: train
 
 # 样本内 (In-Sample) 时间段
 # 方案一：近期滚动窗口 - 用最近 3.5 年数据训练，与当前市场环境更接近
@@ -23,22 +23,40 @@ test_end_date: 2026-04-10
 # mode 可选值:
 #   - static_split: 固定 discovery / validation 两段切分
 #   - walk_forward: 采用滚动 walk-forward，多窗口重复 discovery / validation
-#   - disabled: 不做切分，沿用整个 train 区间
 training_workflow:
   mode: static_split
   static_split:
+    # discovery_start_date / discovery_end_date:
+    # - 含义：海选阶段（discovery）的起止日期。该阶段会跑 step01~step09 产出候选因子。
+    # - 设置建议：通常覆盖 train 区间前 60%~80% 的时间；建议不少于 18~24 个月，避免样本太短。
     discovery_start_date: 2022-10-01
     discovery_end_date: 2024-12-31
+    # validation_start_date / validation_end_date:
+    # - 含义：复试阶段（validation）的起止日期。用 discovery 候选做二次验证与打分。
+    # - 设置建议：通常覆盖 train 区间后 20%~40% 的时间；建议不少于 6~12 个月。
+    # - 约束：必须满足 discovery_end_date < validation_start_date，且两段都在 train 区间内。
     validation_start_date: 2025-01-01
     validation_end_date: 2025-12-31
   walk_forward:
+    # discovery_window_months:
+    # - 含义：每个滚动窗口里 discovery 阶段长度（月）。
+    # - 设置建议：常用 18~36；市场切换较快用 18~24，追求稳健可用 24~36。
     discovery_window_months: 24
+    # validation_window_months:
+    # - 含义：每个滚动窗口里 validation 阶段长度（月）。
+    # - 设置建议：常用 3~12；建议不大于 discovery_window_months。
     validation_window_months: 6
+    # step_months:
+    # - 含义：窗口向前滚动的步长（月）。
+    # - 设置建议：常用等于 validation_window_months（不重叠）或其一半（允许重叠，提高样本数）。
     step_months: 6
+    # max_windows:
+    # - 含义：最多生成的滚动窗口数量；0 表示不设上限（直到 train_end_date）。
+    # - 设置建议：本地联调用 2~3，正式评估用 4~8（按算力与耗时平衡）。
     max_windows: 3
 
 # 【3. 分析股票池】
-# 股票池可选字段（参考米框常见设置）：
+# 股票池可选字段（当前 tushare-only 流程）：
 #   - include_st: 是否包含 ST 股票
 #   - include_new_stock: 是否包含次新股
 #   - new_stock_days: 判定“新股”的最小上市天数阈值（include_new_stock=false 时生效）
@@ -63,7 +81,7 @@ rebalance_anchor: first_trading_day_of_week
 # 说明：
 # - 本地 step03-step05 与 step07 统一使用该 label 口径。
 # - 收益标签由上面的 rebalance / rebalance_interval / rebalance_anchor 自动决定。
-# - 当前实现按相邻两次调仓观测日之间的持有期收益生成标签，便于与米框因子分析界面做 double check。
+# - 当前实现按相邻两次调仓观测日之间的持有期收益生成标签，便于本地评估口径一致性校验。
 label:
   # 标签列名与分析目标名称。
   name: rebalance_period_return
@@ -72,11 +90,11 @@ label:
   # 收益标签使用的价格列；当前 period_return 会按该价格列计算相邻调仓观测日之间的收益。
   price_field: close
 
-# 【6. 预处理设置（按日期截面执行，界面含义尽量贴近米框）】
+# 【6. 预处理设置（按日期截面执行）】
 # 说明：
 # - 这里只处理“候选因子值”，不改原始行情，也不改基础特征。
 # - 处理顺序固定为：离群值处理 -> 中性化处理。
-# - 米框界面没有单独的“标准化”选项，这里也不单独暴露该配置。
+# - 当前配置仅面向本地 tushare-only 流程，不单独暴露“标准化”选项。
 preprocess:
   # 离群值处理
   # 可选值：

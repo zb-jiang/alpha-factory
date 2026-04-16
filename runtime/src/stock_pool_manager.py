@@ -1,6 +1,6 @@
 """
 跨平台股票池管理器
-支持 Qlib、米筐、聚宽、Tushare 等多种数据源的统一股票池配置
+当前使用 Tushare 数据源的统一股票池配置
 """
 
 import random
@@ -49,14 +49,6 @@ class StockPoolManager:
         if include_st and include_new_stock:
             return codes
 
-        data_source = str(self.config.get("data_source", "qlib")).lower()
-        if data_source != "tushare":
-            print(
-                f"提示: 当前数据源 {data_source} 暂未实现 ST/新股过滤，"
-                "将按原股票池返回（可切换 tushare 启用）"
-            )
-            return codes
-
         try:
             from data_provider import get_data_provider
 
@@ -70,7 +62,7 @@ class StockPoolManager:
             )
             if stock_basic is None or stock_basic.empty:
                 return codes
-            stock_basic["instrument"] = stock_basic["ts_code"].apply(self._to_qlib_code)
+            stock_basic["instrument"] = stock_basic["ts_code"].apply(self._to_internal_code)
             meta = stock_basic.set_index("instrument")[["name", "list_date"]]
             cutoff = pd.Timestamp(end_date or self.config.get("train_end_date") or pd.Timestamp.today()).normalize()
             min_listed_date = (cutoff - pd.Timedelta(days=new_stock_days)).strftime("%Y%m%d")
@@ -97,7 +89,7 @@ class StockPoolManager:
             return codes
 
     @staticmethod
-    def _to_qlib_code(ts_code: str) -> str:
+    def _to_internal_code(ts_code: str) -> str:
         if "." not in ts_code:
             return ts_code
         code, exchange = ts_code.split(".")
@@ -112,32 +104,18 @@ class StockPoolManager:
         获取全市场股票池
         """
         try:
-            from qlib.data import D
-            
-            instruments = D.instruments(market=str(self.config.get("market", "all")))
-            codes = D.list_instruments(
-                instruments=instruments,
-                start_time=start_date or str(self.config.get("train_start_date")),
-                end_time=end_date or str(self.config.get("train_end_date")),
-                as_list=True,
-            )
-            
+            from data_provider import get_data_provider
+
+            provider = get_data_provider(self.config)
+            provider.initialize()
+            codes = provider.get_instruments(market=str(self.config.get("market", "all")))
             max_instruments = int(self.config.get("max_instruments", 0) or 0)
             if max_instruments > 0:
                 return self._apply_sampling(codes, max_instruments)
-            
             return codes
-            
-        except ImportError:
-            print("Qlib 未安装，尝试使用其他数据源")
-            return self._get_all_market_fallback(start_date, end_date)
-    
-    def _get_all_market_fallback(self, start_date: str = None, end_date: str = None) -> List[str]:
-        """
-        当 Qlib 不可用时的备用方案
-        """
-        print("警告: 无法获取全市场股票池，返回空列表")
-        return []
+        except Exception as e:
+            print(f"警告: 获取全市场股票池失败: {e}")
+            return []
     
     def _get_index_components(self, start_date: str = None, end_date: str = None) -> List[str]:
         """
@@ -153,62 +131,10 @@ class StockPoolManager:
         """
         index_code = self.stock_pool_config.get("index_code", "000300.XSHG")
         
-        # 检查数据源类型
-        data_source = self.config.get("data_source", "qlib")
-        
-        if data_source == "qlib":
-            # 使用 Qlib 获取指数成分股
-            return self._get_index_components_from_qlib(index_code, start_date, end_date)
-        else:
-            # 使用数据提供者获取指数成分股
-            return self._get_index_components_from_provider(index_code, start_date, end_date)
-    
-    def _get_index_components_from_qlib(self, index_code: str, start_date: str = None, end_date: str = None) -> List[str]:
-        """使用 Qlib 获取指数成分股"""
-        index_market_map = {
-            "000300.XSHG": "csi300",
-            "SH000300": "csi300",
-            "000905.XSHG": "csi500",
-            "SH000905": "csi500",
-            "000852.XSHG": "csi1000",
-            "SH000852": "csi1000",
-            "000016.XSHG": "sse50",
-            "SH000016": "sse50",
-            "399001.XSHE": "szse",
-            "SZ399001": "szse",
-            "399006.XSHE": "growth",
-            "SZ399006": "growth",
-        }
-        
-        market = index_market_map.get(index_code)
-        if not market:
-            print(f"警告: 不支持的指数代码 {index_code}")
-            print(f"支持的指数: {list(index_market_map.keys())}")
-            return []
-        
-        try:
-            from qlib.data import D
-            
-            instruments = D.instruments(market=market)
-            codes = D.list_instruments(
-                instruments=instruments,
-                start_time=start_date or str(self.config.get("train_start_date")),
-                end_time=end_date or str(self.config.get("train_end_date")),
-                as_list=True,
-            )
-            
-            print(f"从 Qlib 获取 {index_code} ({market}) 成分股: {len(codes)} 只")
-            return codes
-                
-        except ImportError:
-            print("警告: Qlib 未安装，无法获取指数成分股")
-            return []
-        except Exception as e:
-            print(f"警告: 从 Qlib 获取指数 {index_code} 成分股失败: {e}")
-            return []
-    
+        return self._get_index_components_from_provider(index_code, start_date, end_date)
+
     def _get_index_components_from_provider(self, index_code: str, start_date: str = None, end_date: str = None) -> List[str]:
-        """使用数据提供者获取指数成分股"""
+        """使用 Tushare 提供者获取指数成分股"""
         try:
             # 导入数据提供者工厂
             from data_provider import get_data_provider
@@ -245,11 +171,6 @@ class StockPoolManager:
         print(f"获取行业股票池: {industry_name} (级别: {industry_level})")
         if not industry_name:
             print("警告: 未配置 industry_name，返回空列表")
-            return []
-
-        data_source = self.config.get("data_source", "qlib")
-        if data_source == "qlib":
-            print("警告: 当前 Qlib 股票池暂未实现行业筛选，返回空列表")
             return []
 
         try:

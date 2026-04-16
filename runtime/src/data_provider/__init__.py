@@ -1,6 +1,6 @@
 """
 数据提供者模块
-支持 Qlib、米筐 RQData 和 Tushare 等多种数据源
+当前仅支持 Tushare
 """
 
 from .base_provider import BaseDataProvider

@@ -11,7 +11,7 @@ import pandas as pd
 class BaseDataProvider(ABC):
     """数据提供者抽象基类
     
-    提供统一的数据访问接口，支持 Qlib、米筐等多种数据源。
+    提供统一的数据访问接口（当前实现为 Tushare）。
     所有具体的数据提供者都需要实现这些方法。
     """
     
@@ -24,8 +24,7 @@ class BaseDataProvider(ABC):
         """初始化数据源
         
         在使用其他方法前必须先调用此方法进行初始化。
-        对于 Qlib，这会调用 qlib.init()；
-        对于米筐，这会调用 rqdatac.init() 并进行认证。
+        对于 Tushare，这会初始化 API 客户端并做可用性校验。
         """
         pass
     
