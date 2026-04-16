@@ -89,6 +89,184 @@ class TushareProvider(BaseDataProvider):
         self._rate_limit_retry_seconds = max(float(self.ts_config.get("rate_limit_retry_seconds", 65.0) or 65.0), 0.0)
         self._rate_limit_retries = max(int(self.ts_config.get("rate_limit_retries", 1) or 1), 0)
         self._last_request_started_at = 0.0
+        self._init_cache_meta()
+
+
+    def _init_cache_meta(self):
+        # v2 元数据文件：旧版本在批量请求被截断时可能记录了错误的“已完整缓存”区间
+        # 改名后会自动重建元数据并重新补拉区间内缺失交易日。
+        self.cache_meta_file = self.cache_dir / "cache_metadata_v2.json"
+        self.cache_meta = {}
+        if self.cache_meta_file.exists():
+            try:
+                import json
+                with open(self.cache_meta_file, 'r', encoding='utf-8') as f:
+                    self.cache_meta = json.load(f)
+            except Exception as e:
+                print(f"警告: 读取缓存元数据失败: {e}")
+                self.cache_meta = {}
+
+    def _save_cache_meta(self):
+        try:
+            import json
+            with open(self.cache_meta_file, 'w', encoding='utf-8') as f:
+                json.dump(self.cache_meta, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"警告: 保存缓存元数据失败: {e}")
+
+    def _get_unfetched_ranges(self, api_name: str, ts_code: str, start_date: str, end_date: str):
+        from datetime import datetime, timedelta
+        fetched = self.cache_meta.get(api_name, {}).get(ts_code, [])
+        t_start = datetime.strptime(start_date, '%Y%m%d')
+        t_end = datetime.strptime(end_date, '%Y%m%d')
+        f = [[datetime.strptime(s, '%Y%m%d'), datetime.strptime(e, '%Y%m%d')] for s, e in fetched]
+        f.sort()
+        u = []
+        c = t_start
+        for s, e in f:
+            if c < s:
+                u.append([c, min(t_end, s - timedelta(days=1))])
+            c = max(c, e + timedelta(days=1))
+            if c > t_end:
+                break
+        if c <= t_end:
+            u.append([c, t_end])
+        return [[d[0].strftime('%Y%m%d'), d[1].strftime('%Y%m%d')] for d in u]
+
+    def _add_fetched_range(self, api_name: str, ts_code: str, start_date: str, end_date: str):
+        from datetime import datetime, timedelta
+        if api_name not in self.cache_meta:
+            self.cache_meta[api_name] = {}
+        if ts_code not in self.cache_meta[api_name]:
+            self.cache_meta[api_name][ts_code] = []
+        fetched = self.cache_meta[api_name][ts_code]
+        f = [[datetime.strptime(s, '%Y%m%d'), datetime.strptime(e, '%Y%m%d')] for s, e in fetched]
+        f.append([datetime.strptime(start_date, '%Y%m%d'), datetime.strptime(end_date, '%Y%m%d')])
+        f.sort()
+        m = [f[0]]
+        for s, e in f[1:]:
+            p = m[-1]
+            if s <= p[1] + timedelta(days=1):
+                p[1] = max(p[1], e)
+            else:
+                m.append([s, e])
+        self.cache_meta[api_name][ts_code] = [[d[0].strftime('%Y%m%d'), d[1].strftime('%Y%m%d')] for d in m]
+
+    def _append_to_parquet(self, api_name: str, ts_code: str, df):
+        if df is None or df.empty:
+            return
+        file_path = self.cache_dir / f"{api_name}_{ts_code}.parquet"
+        if file_path.exists():
+            try:
+                old_df = pd.read_parquet(file_path)
+                old_effective_empty = old_df.empty or old_df.dropna(how='all').empty
+                new_effective_empty = df.empty or df.dropna(how='all').empty
+                if old_effective_empty:
+                    merged = df.copy()
+                elif new_effective_empty:
+                    merged = old_df.copy()
+                elif 'trade_date' in old_df.columns and 'trade_date' in df.columns:
+                    old_idx = old_df.drop_duplicates(subset=['trade_date'], keep='last').set_index('trade_date')
+                    new_idx = df.drop_duplicates(subset=['trade_date'], keep='last').set_index('trade_date')
+                    all_columns = old_idx.columns.union(new_idx.columns)
+                    merged_idx = old_idx.reindex(columns=all_columns)
+                    new_idx = new_idx.reindex(columns=all_columns)
+                    merged_idx.loc[new_idx.index, :] = new_idx.values
+                    merged = merged_idx.reset_index()
+                else:
+                    merged = pd.concat([old_df, df], ignore_index=True, sort=False)
+                if 'trade_date' in merged.columns:
+                    merged = merged.drop_duplicates(subset=['trade_date'], keep='last')
+                df = merged
+            except Exception:
+                pass
+        if 'trade_date' in df.columns:
+            df = df.sort_values('trade_date')
+        try:
+            df.to_parquet(file_path, index=False)
+        except Exception as e:
+            print(f"警告: 保存缓存文件失败 {file_path}: {e}")
+
+    def _load_from_ts_parquet(self, api_name: str, ts_code: str, start_date: str, end_date: str):
+        file_path = self.cache_dir / f"{api_name}_{ts_code}.parquet"
+        if not file_path.exists():
+            # 兼容旧版缓存命名：{api}_{SZ000001}_{hash}.parquet / {api}_{SH600000}_{hash}.parquet
+            if "." in ts_code:
+                code, exchange = ts_code.split(".", 1)
+                legacy_code = f"{exchange}{code}"
+                legacy_files = sorted(
+                    self.cache_dir.glob(f"{api_name}_{legacy_code}_*.parquet"),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                if legacy_files:
+                    file_path = legacy_files[0]
+                else:
+                    return pd.DataFrame()
+            else:
+                return pd.DataFrame()
+        try:
+            df = pd.read_parquet(file_path)
+            if 'trade_date' in df.columns:
+                df = df[(df['trade_date'] >= start_date) & (df['trade_date'] <= end_date)]
+            elif 'datetime' in df.columns:
+                dt = pd.to_datetime(df['datetime'])
+                mask = (dt >= pd.to_datetime(start_date)) & (dt <= pd.to_datetime(end_date))
+                df = df.loc[mask]
+            elif isinstance(df.index, pd.MultiIndex) and 'datetime' in (df.index.names or []):
+                dt = pd.to_datetime(df.index.get_level_values('datetime'))
+                mask = (dt >= pd.to_datetime(start_date)) & (dt <= pd.to_datetime(end_date))
+                df = df.loc[mask]
+            elif df.index.name == 'datetime':
+                dt = pd.to_datetime(df.index)
+                mask = (dt >= pd.to_datetime(start_date)) & (dt <= pd.to_datetime(end_date))
+                df = df.loc[mask]
+            return df
+        except Exception:
+            return pd.DataFrame()
+
+    def _ensure_data_cached(self, api_name: str, instruments: list, start_date: str, end_date: str):
+        missing_tasks = {}
+        overall_start = end_date
+        overall_end = start_date
+        for qlib_code in instruments:
+            ts_code = self._convert_to_ts_code(qlib_code)
+            unfetched = self._get_unfetched_ranges(api_name, ts_code, start_date, end_date)
+            if unfetched:
+                missing_tasks[ts_code] = unfetched
+                for s, e in unfetched:
+                    overall_start = min(overall_start, s)
+                    overall_end = max(overall_end, e)
+        if not missing_tasks:
+            return
+        print(f"  从 Tushare 获取缺失的 {api_name} 数据 ({overall_start} 至 {overall_end}), 涉及 {len(missing_tasks)} 只股票...")
+        fetched_count = 0
+        missing_codes = list(missing_tasks.keys())
+        total = len(missing_codes)
+        for i, ts_code in enumerate(missing_codes, start=1):
+            if api_name == "daily":
+                df = self._call_pro_api("daily", ts_code=ts_code, start_date=overall_start, end_date=overall_end)
+            elif api_name == "adj_factor":
+                df = self._call_pro_api("adj_factor", ts_code=ts_code, start_date=overall_start, end_date=overall_end)
+            elif api_name == "daily_basic":
+                df = self._call_pro_api("daily_basic", ts_code=ts_code, start_date=overall_start, end_date=overall_end)
+            else:
+                continue
+
+            if df is None:
+                continue
+
+            if not df.empty:
+                self._append_to_parquet(api_name, ts_code, df)
+                self._add_fetched_range(api_name, ts_code, overall_start, overall_end)
+                fetched_count += 1
+
+            if i % 50 == 0 or i == total:
+                print(f"  {api_name} 拉取进度: {i}/{total}")
+
+        if fetched_count < total:
+            print(f"  警告: {api_name} 仅成功更新 {fetched_count}/{total} 只股票缓存，未成功部分将在后续请求继续补拉")
+        self._save_cache_meta()
 
     def _wait_for_request_slot(self) -> None:
         if self._request_interval_seconds <= 0:
@@ -123,7 +301,7 @@ class TushareProvider(BaseDataProvider):
     def initialize(self) -> None:
         """初始化 Tushare 连接
         
-        从环境变量或配置文件中获取 API Key 进行初始化。
+        从配置文件中获取 API Key 进行初始化。
         """
         if self._initialized:
             return
@@ -133,12 +311,11 @@ class TushareProvider(BaseDataProvider):
             self._ts = ts
             
             # 获取 API Key
-            self._api_key = self.ts_config.get("api_key") or os.getenv("TUSHARE_API_KEY")
+            self._api_key = self.ts_config.get("api_key")
             
             if not self._api_key:
                 raise ValueError(
-                    "Tushare API Key 未配置，请设置环境变量 TUSHARE_API_KEY，"
-                    "或在 env.yaml 的 tushare 配置中指定"
+                    "Tushare API Key 未配置，请在 env.yaml 的 tushare 配置中指定 api_key"
                 )
             
             # 初始化 Pro 接口
@@ -370,129 +547,75 @@ class TushareProvider(BaseDataProvider):
         end_date: str,
         freq: str = "day"
     ) -> pd.DataFrame:
-        """获取行情数据
-        
-        从 Tushare 获取 OHLCV 等价格数据，并转换为 Qlib 格式。
-        支持缓存机制，避免重复调用 API。
-        """
+        """获取股票价格数据"""
         self.initialize()
         
-        if not instruments:
-            return pd.DataFrame()
-
-        requested_fields = list(fields)
-        fetch_fields = list(fields)
-        if "$vwap" in requested_fields:
-            if "$amount" not in fetch_fields and "$money" not in fetch_fields:
-                fetch_fields.append("$amount")
-            if "$volume" not in fetch_fields:
-                fetch_fields.append("$volume")
+        field_mapping = {
+            'open': 'open',
+            'high': 'high',
+            'low': 'low',
+            'close': 'close',
+            'vol': 'volume',
+            'amount': 'amount',
+            'vwap': 'vwap'
+        }
         
-        # 生成缓存键
-        cache_key = self._get_cache_key(
-            "get_price_data",
-            instruments=",".join(sorted(instruments)),
-            fields=",".join(sorted(requested_fields)),
-            start_date=start_date,
-            end_date=end_date,
-            freq=freq
-        )
+        requested_fields = fields if fields else list(field_mapping.values())
+        need_factor = 'factor' in requested_fields or '$factor' in requested_fields
         
-        # 尝试从缓存加载
-        cached_data = self._load_from_cache(cache_key)
-        if cached_data is not None:
-            print(f"  从缓存加载价格数据: {len(cached_data)} 行")
-            return cached_data
-        
-        # 转换字段名
-        ts_fields = []
-        field_mapping = {}  # 用于后续转换回 Qlib 格式
-        
-        for field in fetch_fields:
-            if field == "$vwap":
-                continue
-            if field in self.FIELD_MAP:
-                ts_field = self.FIELD_MAP[field]
-                ts_fields.append(ts_field)
-                field_mapping[ts_field] = field
-            elif field.startswith("$"):
-                # 去掉 $ 前缀
-                ts_field = field[1:]
-                ts_fields.append(ts_field)
-                field_mapping[ts_field] = field
-            else:
-                ts_fields.append(field)
-                field_mapping[field] = field
-        
-        # 检查是否需要获取复权因子
-        need_factor = "$factor" in fields or "adj_factor" in ts_fields
-        
-        # 批量获取数据
-        all_data = []
-        
-        # Tushare 有频率限制，需要分批获取
-        batch_size = 100  # 每批最多100只股票
-        
-        print(f"  从 Tushare 获取 {len(instruments)} 只股票的价格数据...")
-        
-        for i in range(0, len(instruments), batch_size):
-            batch = instruments[i:i+batch_size]
+        self._ensure_data_cached('daily', instruments, start_date.replace('-', ''), end_date.replace('-', ''))
+        if need_factor:
+            self._ensure_data_cached('adj_factor', instruments, start_date.replace('-', ''), end_date.replace('-', ''))
             
-            for qlib_code in batch:
-                try:
-                    ts_code = self._convert_to_ts_code(qlib_code)
+        cached_data_list = []
+        for qlib_code in instruments:
+            ts_code = self._convert_to_ts_code(qlib_code)
+            
+            daily_df = self._load_from_ts_parquet('daily', ts_code, start_date.replace('-', ''), end_date.replace('-', ''))
+            if daily_df.empty:
+                continue
+                
+            if need_factor:
+                adj_df = self._load_from_ts_parquet('adj_factor', ts_code, start_date.replace('-', ''), end_date.replace('-', ''))
+                if not adj_df.empty and 'adj_factor' in adj_df.columns:
+                    daily_df = pd.merge(daily_df, adj_df[['trade_date', 'adj_factor']], on='trade_date', how='left')
+                else:
+                    daily_df['adj_factor'] = 1.0
                     
-                    # 获取日线数据
-                    df = self._call_pro_api(
-                        "daily",
-                        ts_code=ts_code,
-                        start_date=start_date.replace('-', ''),
-                        end_date=end_date.replace('-', ''),
-                    )
-                    
-                    if df is not None and not df.empty:
-                        # 如果需要复权因子，额外获取
-                        if need_factor:
-                            try:
-                                factor_df = self._call_pro_api(
-                                    "adj_factor",
-                                    ts_code=ts_code,
-                                    start_date=start_date.replace('-', ''),
-                                    end_date=end_date.replace('-', ''),
-                                )
-                                if factor_df is not None and not factor_df.empty:
-                                    # 合并复权因子数据
-                                    df = df.merge(
-                                        factor_df[['trade_date', 'adj_factor']],
-                                        on='trade_date',
-                                        how='left'
-                                    )
-                            except Exception as e:
-                                print(f"获取 {qlib_code} 复权因子失败: {e}")
+            daily_df = daily_df.rename(columns={'trade_date': 'datetime'})
+            daily_df['datetime'] = pd.to_datetime(daily_df['datetime'])
+            daily_df['instrument'] = qlib_code
+            
+            if 'vwap' in requested_fields or '$vwap' in requested_fields:
+                daily_df['vwap'] = daily_df['amount'] * 1000 / (daily_df['vol'] * 100 + 1e-8)
+                
+            rename_dict = {k: v for k, v in field_mapping.items()}
+            if need_factor:
+                rename_dict['adj_factor'] = 'factor'
+            daily_df = daily_df.rename(columns=rename_dict)
+            
+            for req_field in requested_fields:
+                if req_field.startswith('$'):
+                    base_field = req_field[1:]
+                    if base_field in daily_df.columns:
+                        daily_df[req_field] = daily_df[base_field]
                         
-                        df['instrument'] = qlib_code
-                        all_data.append(df)
-                        
-                except Exception as e:
-                    print(f"获取 {qlib_code} 数据失败: {e}")
-                    continue
-        
-        if not all_data:
+            available_fields = ['datetime', 'instrument'] + [f for f in requested_fields if f in daily_df.columns]
+            daily_df = daily_df[available_fields]
+            cached_data_list.append(daily_df)
+            
+        if not cached_data_list:
             return pd.DataFrame()
+        final_df = pd.concat(cached_data_list, ignore_index=True)
+        final_df = final_df.set_index(['instrument', 'datetime']).sort_index()
+        # Ensure we return Qlib MultiIndex format
+        final_df.index = final_df.index.set_names(["instrument", "datetime"])
         
-        # 合并所有数据
-        data = pd.concat(all_data, ignore_index=True)
+        # apply requested fields ordering
+        ordered_columns = [field for field in requested_fields if field in final_df.columns]
+        final_df = final_df[ordered_columns]
         
-        # 转换为 Qlib 格式
-        result = self._to_qlib_format(data, field_mapping)
-        result = self._append_derived_price_fields(result, requested_fields)
-        
-        # 保存到缓存
-        if not result.empty:
-            self._save_to_cache(cache_key, result)
-            print(f"  已缓存价格数据: {len(result)} 行")
-        
-        return result
+        return final_df
 
     def _append_derived_price_fields(
         self,
@@ -596,49 +719,41 @@ class TushareProvider(BaseDataProvider):
         field_mapping = self._build_source_field_mapping(fields, "daily_basic")
         if not field_mapping:
             return pd.DataFrame()
-
-        cache_key = self._get_cache_key(
-            "get_daily_basic_data",
-            instruments=",".join(sorted(instruments)),
-            fields=",".join(sorted(field_mapping.values())),
-            start_date=start_date,
-            end_date=end_date,
-        )
-        cached_data = self._load_from_cache(cache_key)
-        if cached_data is not None:
-            print(f"  从缓存加载 daily_basic 数据: {len(cached_data)} 行")
-            return cached_data
-
-        rows = []
-        requested_fields = ["ts_code", "trade_date", *field_mapping.keys()]
-        unique_fields = ",".join(dict.fromkeys(requested_fields))
-
+            
+        self._ensure_data_cached('daily_basic', instruments, start_date.replace('-', ''), end_date.replace('-', ''))
+        
+        cached_data_list = []
         for qlib_code in instruments:
-            try:
-                ts_code = self._convert_to_ts_code(qlib_code)
-                df = self._call_pro_api(
-                    "daily_basic",
-                    ts_code=ts_code,
-                    start_date=start_date.replace('-', ''),
-                    end_date=end_date.replace('-', ''),
-                    fields=unique_fields,
-                )
-                if df is None or df.empty:
-                    continue
-                df["instrument"] = qlib_code
-                rows.append(df)
-            except Exception as e:
-                print(f"获取 {qlib_code} daily_basic 数据失败: {e}")
+            ts_code = self._convert_to_ts_code(qlib_code)
+            df = self._load_from_ts_parquet('daily_basic', ts_code, start_date.replace('-', ''), end_date.replace('-', ''))
+            if df.empty:
+                continue
 
-        if not rows:
+            if 'trade_date' in df.columns:
+                df = df.rename(columns={'trade_date': 'datetime'})
+            elif 'datetime' not in df.columns:
+                if isinstance(df.index, pd.MultiIndex) and 'datetime' in (df.index.names or []):
+                    df = df.reset_index()
+                elif df.index.name == 'datetime':
+                    df = df.reset_index()
+
+            if 'datetime' not in df.columns:
+                continue
+
+            df['datetime'] = pd.to_datetime(df['datetime'])
+            df['instrument'] = qlib_code
+            
+            df = df.rename(columns=field_mapping)
+            available_fields = ['datetime', 'instrument'] + [f for f in field_mapping.values() if f in df.columns]
+            df = df[available_fields]
+            cached_data_list.append(df)
+            
+        if not cached_data_list:
             return pd.DataFrame()
-
-        data = pd.concat(rows, ignore_index=True)
-        result = self._to_qlib_format(data, field_mapping)
-        if not result.empty:
-            self._save_to_cache(cache_key, result)
-            print(f"  已缓存 daily_basic 数据: {len(result)} 行")
-        return result
+        final_df = pd.concat(cached_data_list, ignore_index=True)
+        final_df = final_df.set_index(['instrument', 'datetime']).sort_index()
+        final_df.index = final_df.index.set_names(["instrument", "datetime"])
+        return final_df
 
     def _expand_static_fields(
         self,
@@ -752,6 +867,7 @@ class TushareProvider(BaseDataProvider):
         """
         self.initialize()
 
+        import pandas as pd
         if not instruments or not fields:
             return pd.DataFrame()
 

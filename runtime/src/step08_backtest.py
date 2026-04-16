@@ -7,6 +7,7 @@ import pandas as pd
 
 from common import (
     OUTPUT_DIR,
+    analysis_rule_config,
     annualized_return,
     backtest_rule_config,
     compute_drawdown,
@@ -34,21 +35,53 @@ def _next_available_date(all_dates: list[pd.Timestamp], date: pd.Timestamp) -> p
     return None
 
 
+def _resolve_trade_price_mode(rule: dict[str, float]) -> str:
+    trade_price = str(rule.get("trade_price", "next_open")).strip().lower()
+    if trade_price not in {"next_open", "next_close"}:
+        raise ValueError(f"不支持的 trade_price 配置: {trade_price}")
+    return trade_price
+
+
+def _trade_date_from_signal(
+    dates: list[pd.Timestamp],
+    signal_date: pd.Timestamp,
+    trade_price: str,
+) -> pd.Timestamp | None:
+    if trade_price == "next_open":
+        return _next_available_date(dates, signal_date)
+    if trade_price == "next_close":
+        return _next_available_date(dates, signal_date)
+    raise ValueError(f"不支持的 trade_price 配置: {trade_price}")
+
+
+def _load_factor_values() -> pd.DataFrame:
+    factor_values = pd.read_parquet(OUTPUT_DIR / "backtest" / "factor_values.parquet")
+    index_columns = ["factor_name", "instrument", "datetime"]
+    if set(index_columns).issubset(factor_values.columns):
+        factor_values["datetime"] = pd.to_datetime(factor_values["datetime"])
+        return factor_values.set_index(index_columns).sort_index()
+    return factor_values.reset_index().set_index(index_columns).sort_index()
+
+
 def simulate_factor(
     factor_name: str,
     factor_frame: pd.DataFrame,
-    open_prices: pd.DataFrame,
+    trade_prices: pd.DataFrame,
     rule: dict[str, float],
     is_negative_ic: bool = False,
 ) -> StrategyResult:
-    dates = sorted(pd.to_datetime(open_prices.index))
-    rebalance_dates = weekly_rebalance_dates(factor_frame.index.get_level_values("datetime"))
+    dates = sorted(pd.to_datetime(trade_prices.index))
+    rebalance_dates = weekly_rebalance_dates(
+        factor_frame.index.get_level_values("datetime"),
+        analysis_rule_config(),
+    )
     holding_count = int(rule["holding_count"])
     buy_top_n = int(rule["buy_top_n"])
     sell_drop_to = int(rule["sell_drop_to"])
     buy_cost = float(rule["buy_cost"])
     sell_cost = float(rule["sell_cost"])
     slippage = float(rule["slippage"])
+    trade_price = _resolve_trade_price_mode(rule)
     holdings: list[str] = []
     nav = 1.0
     nav_rows: list[dict[str, float]] = [{"datetime": dates[0], "nav": nav}]
@@ -57,13 +90,13 @@ def simulate_factor(
     period_returns: list[float] = []
 
     for rebalance_date in rebalance_dates:
-        trade_date = _next_available_date(dates, rebalance_date)
+        trade_date = _trade_date_from_signal(dates, rebalance_date, trade_price)
         next_rebalance = _next_available_date(rebalance_dates, rebalance_date)
-        exit_date = _next_available_date(dates, next_rebalance) if next_rebalance is not None else dates[-1]
+        exit_date = _trade_date_from_signal(dates, next_rebalance, trade_price) if next_rebalance is not None else dates[-1]
         if trade_date is None or exit_date is None or trade_date >= exit_date:
             continue
         factor_slice = factor_frame.xs(rebalance_date, level="datetime")
-        score_column = "raw_score" if "raw_score" in factor_slice.columns else "score"
+        score_column = "score" if "score" in factor_slice.columns else "raw_score"
         score_slice = factor_slice[score_column].dropna()
         if is_negative_ic:
             score_slice = -score_slice
@@ -84,9 +117,9 @@ def simulate_factor(
         if not holdings:
             nav_rows.append({"datetime": exit_date, "nav": nav})
             continue
-        start_open = open_prices.loc[trade_date, holdings].dropna()
-        end_open = open_prices.loc[exit_date, start_open.index].dropna()
-        aligned = pd.concat([start_open.rename("start"), end_open.rename("end")], axis=1).dropna()
+        start_price = trade_prices.loc[trade_date, holdings].dropna()
+        end_price = trade_prices.loc[exit_date, start_price.index].dropna()
+        aligned = pd.concat([start_price.rename("start"), end_price.rename("end")], axis=1).dropna()
         if aligned.empty:
             nav_rows.append({"datetime": exit_date, "nav": nav})
             continue
@@ -130,20 +163,24 @@ def run() -> None:
     config = env_config()
     feature_cfg = feature_pool_config()
     raw_frame = load_raw_data(config, list(feature_cfg.get("raw_fields", [])))
-    
+
     if "factor" in raw_frame.columns:
         raw_frame["adj_open"] = raw_frame["open"] / raw_frame["factor"]
+        raw_frame["adj_close"] = raw_frame["close"] / raw_frame["factor"]
     else:
         raw_frame["adj_open"] = raw_frame["open"]
-        
-    open_prices = (
-        raw_frame[["adj_open"]]
+        raw_frame["adj_close"] = raw_frame["close"]
+
+    rule = backtest_rule_config()
+    trade_price = _resolve_trade_price_mode(rule)
+    price_field = "adj_close" if trade_price == "next_close" else "adj_open"
+    trade_prices = (
+        raw_frame[[price_field]]
         .reset_index()
-        .pivot(index="datetime", columns="instrument", values="adj_open")
+        .pivot(index="datetime", columns="instrument", values=price_field)
         .sort_index()
     )
-    factor_values = pd.read_parquet(OUTPUT_DIR / "backtest" / "factor_values.parquet")
-    factor_values = factor_values.reset_index().set_index(["factor_name", "instrument", "datetime"]).sort_index()
+    factor_values = _load_factor_values()
     factor_metrics_path = OUTPUT_DIR / "backtest" / "factor_metrics.csv"
     if factor_metrics_path.exists():
         factor_metrics = pd.read_csv(factor_metrics_path).set_index("factor_name")
@@ -154,8 +191,6 @@ def run() -> None:
     min_rank_ic_ir_to_backtest = float(config.get("min_rank_ic_ir_to_backtest", 0.1))
     min_positive_ic_ratio = float(config.get("min_positive_ic_ratio", 0.4))
     enable_direction_filter = bool(config.get("enable_direction_filter", False))
-
-    rule = backtest_rule_config()
     metric_rows: list[dict[str, float]] = []
     position_frames: list[pd.DataFrame] = []
     order_frames: list[pd.DataFrame] = []
@@ -202,7 +237,7 @@ def run() -> None:
                 continue
 
         factor_frame = factor_values.xs(factor_name, level="factor_name")
-        result = simulate_factor(str(factor_name), factor_frame, open_prices, rule, is_negative_ic)
+        result = simulate_factor(str(factor_name), factor_frame, trade_prices, rule, is_negative_ic)
         metric_rows.append(result.metrics)
         if not result.positions.empty:
             position_frames.append(result.positions)

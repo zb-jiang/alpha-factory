@@ -5,7 +5,16 @@ import os
 
 from openai import OpenAI
 
-from common import OUTPUT_DIR, backtest_rule_config, env_config, feature_pool_config, read_json, write_json
+from common import (
+    OUTPUT_DIR,
+    backtest_rule_config,
+    env_config,
+    feature_pool_config,
+    label_description,
+    label_name,
+    read_json,
+    write_json,
+)
 
 
 def build_messages() -> list[dict[str, str]]:
@@ -14,6 +23,8 @@ def build_messages() -> list[dict[str, str]]:
     backtest_rule = backtest_rule_config()
     summary = read_json(OUTPUT_DIR / "health" / "llm_summary.json")
     workflow_state = dict(config.get("workflow_state", {}))
+    label_column = label_name(config)
+    label_spec = label_description(config)
     
     # 尝试读取上一轮表现最好的因子（若文件存在）
     top_factors_path = OUTPUT_DIR / "backtest" / "top3_factors.json"
@@ -45,7 +56,9 @@ def build_messages() -> list[dict[str, str]]:
 
     user_prompt = f"""【任务背景】
 我们需要你挖掘出 {candidate_count} 个全新的量化选股因子。
-当前模型的预测目标是：{config.get("target_label")}
+当前模型的预测目标是：{label_column}
+当前收益标签字段名是：{label_column}
+当前收益标签口径是：{label_spec}
 
 【当前流程上下文】
 {json.dumps(workflow_state, ensure_ascii=False, indent=2)}
@@ -111,7 +124,7 @@ def run() -> None:
     stage = str(workflow_state.get("stage", "discovery"))
     if stage != "discovery":
         raise RuntimeError(f"step05_call_llm 只允许在 discovery 阶段运行，当前阶段是: {stage}")
-    api_key = os.getenv("OPENAI_API_KEY", "")
+    api_key = str(config.get("llm_api_key", "")).strip()
     base_url = str(config.get("llm_base_url", "")).strip()
     model = str(config.get("llm_model", "")).strip()
     
@@ -120,7 +133,7 @@ def run() -> None:
     # os.environ.pop("https_proxy", None)
     
     if not api_key or not base_url or not model:
-        raise RuntimeError("请先设置 OPENAI_API_KEY、OPENAI_BASE_URL、OPENAI_MODEL")
+        raise RuntimeError("请先在 env.yaml 中配置 llm_api_key、llm_base_url、llm_model")
     
     import httpx
     # 使用自定义 httpx client 关闭系统代理，防止某些梯子软件导致 TLS 握手失败或请求无响应

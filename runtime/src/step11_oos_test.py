@@ -53,8 +53,8 @@ def run() -> None:
     
     if config.get("run_mode") != "test":
         print("================================================================")
-        print("警告: 当前 env.yaml 中的 run_mode 不是 'test'！")
-        print("请先将 env.yaml 中的 run_mode 修改为 'test'，然后再运行此脚本进行样本外盲测。")
+        print("警告: 当前 analysis_rule.yaml 中的 run_mode 不是 'test'！")
+        print("请先将 analysis_rule.yaml 中的 run_mode 修改为 'test'，然后再运行此脚本进行样本外盲测。")
         print("================================================================")
         return
 

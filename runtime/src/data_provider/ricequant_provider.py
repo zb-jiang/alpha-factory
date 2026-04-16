@@ -64,7 +64,7 @@ class RicequantProvider(BaseDataProvider):
     def initialize(self) -> None:
         """初始化米筐连接
         
-        从环境变量或配置文件中获取认证信息进行初始化。
+        从配置文件中获取认证信息进行初始化。
         """
         if self._initialized:
             return
@@ -74,13 +74,12 @@ class RicequantProvider(BaseDataProvider):
             self._rq = rqdatac
             
             # 获取认证信息
-            self._username = self.rq_config.get("username") or os.getenv("RICEQUANT_USERNAME")
-            self._password = self.rq_config.get("password") or os.getenv("RICEQUANT_PASSWORD")
+            self._username = self.rq_config.get("username")
+            self._password = self.rq_config.get("password")
             
             if not self._username or not self._password:
                 raise ValueError(
-                    "米筐账号未配置，请设置环境变量 RICEQUANT_USERNAME 和 RICEQUANT_PASSWORD，"
-                    "或在 env.yaml 的 ricequant 配置中指定"
+                    "米筐账号未配置，请在 env.yaml 的 ricequant 配置中指定 username 和 password"
                 )
             
             # 初始化连接

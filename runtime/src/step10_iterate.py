@@ -241,7 +241,14 @@ def _write_cross_window_outputs(validation_rows: list[dict], windows: list[dict[
 
 def run() -> None:
     ensure_runtime_dirs()
+    clear_runtime_context()
     config = env_config()
+    if config.get("run_mode") != "train":
+        print("================================================================")
+        print("警告: 当前 analysis_rule.yaml 中的 run_mode 不是 'train'！")
+        print("请先将 analysis_rule.yaml 中的 run_mode 修改为 'train'，然后再运行此脚本。")
+        print("================================================================")
+        return
     windows = build_training_windows(config)
     iterations = int(config.get("iteration_count", 3))
     write_json(OUTPUT_DIR / "backtest" / "training_windows.json", {"windows": windows})

@@ -27,19 +27,85 @@ class StockPoolManager:
             股票代码列表
         """
         if self.pool_type == "all_market":
-            return self._get_all_market(start_date, end_date)
+            codes = self._get_all_market(start_date, end_date)
         elif self.pool_type == "index_components":
-            return self._get_index_components(start_date, end_date)
+            codes = self._get_index_components(start_date, end_date)
         elif self.pool_type == "industry":
-            return self._get_industry_stocks(start_date, end_date)
+            codes = self._get_industry_stocks(start_date, end_date)
         elif self.pool_type == "custom_list":
-            return self._get_custom_list()
+            codes = self._get_custom_list()
         elif self.pool_type == "random_sample":
-            return self._get_random_sample(start_date, end_date)
+            codes = self._get_random_sample(start_date, end_date)
         elif self.pool_type == "stratified_sample":
-            return self._get_stratified_sample(start_date, end_date)
+            codes = self._get_stratified_sample(start_date, end_date)
         else:
             raise ValueError(f"不支持的股票池类型: {self.pool_type}")
+        return self._apply_universe_filters(codes, end_date=end_date or start_date)
+
+    def _apply_universe_filters(self, codes: List[str], end_date: str = None) -> List[str]:
+        include_st = bool(self.stock_pool_config.get("include_st", True))
+        include_new_stock = bool(self.stock_pool_config.get("include_new_stock", True))
+        new_stock_days = int(self.stock_pool_config.get("new_stock_days", 60) or 60)
+        if include_st and include_new_stock:
+            return codes
+
+        data_source = str(self.config.get("data_source", "qlib")).lower()
+        if data_source != "tushare":
+            print(
+                f"提示: 当前数据源 {data_source} 暂未实现 ST/新股过滤，"
+                "将按原股票池返回（可切换 tushare 启用）"
+            )
+            return codes
+
+        try:
+            from data_provider import get_data_provider
+
+            provider = get_data_provider(self.config)
+            provider.initialize()
+            stock_basic = provider._call_pro_api(  # type: ignore[attr-defined]
+                "stock_basic",
+                exchange="",
+                list_status="L",
+                fields="ts_code,name,list_date",
+            )
+            if stock_basic is None or stock_basic.empty:
+                return codes
+            stock_basic["instrument"] = stock_basic["ts_code"].apply(self._to_qlib_code)
+            meta = stock_basic.set_index("instrument")[["name", "list_date"]]
+            cutoff = pd.Timestamp(end_date or self.config.get("train_end_date") or pd.Timestamp.today()).normalize()
+            min_listed_date = (cutoff - pd.Timedelta(days=new_stock_days)).strftime("%Y%m%d")
+
+            filtered: list[str] = []
+            for code in codes:
+                if code not in meta.index:
+                    filtered.append(code)
+                    continue
+                name = str(meta.loc[code, "name"])
+                list_date = str(meta.loc[code, "list_date"])
+                if not include_st and "ST" in name.upper():
+                    continue
+                if not include_new_stock and list_date and list_date > min_listed_date:
+                    continue
+                filtered.append(code)
+            print(
+                f"股票池过滤完成: 原始 {len(codes)} 只 -> 过滤后 {len(filtered)} 只 "
+                f"(include_st={include_st}, include_new_stock={include_new_stock}, new_stock_days={new_stock_days})"
+            )
+            return filtered
+        except Exception as exc:
+            print(f"警告: 股票池 ST/新股过滤失败，回退原股票池: {exc}")
+            return codes
+
+    @staticmethod
+    def _to_qlib_code(ts_code: str) -> str:
+        if "." not in ts_code:
+            return ts_code
+        code, exchange = ts_code.split(".")
+        if exchange.upper() == "SH":
+            return f"SH{code}"
+        if exchange.upper() == "SZ":
+            return f"SZ{code}"
+        return ts_code
     
     def _get_all_market(self, start_date: str = None, end_date: str = None) -> List[str]:
         """
@@ -150,10 +216,11 @@ class StockPoolManager:
             provider = get_data_provider(self.config)
             provider.initialize()
             
-            # 获取指数成分股
-            codes = provider.get_index_components(index_code)
+            # 优先按当前运行区间结束日取成分股，避免“最新成分”接口在部分数据源下返回空集。
+            query_date = end_date or start_date
+            codes = provider.get_index_components(index_code, date=query_date)
             
-            print(f"从数据提供者获取 {index_code} 成分股: {len(codes)} 只")
+            print(f"从数据提供者获取 {index_code} 成分股: {len(codes)} 只 (date={query_date or 'latest'})")
             return codes
             
         except ImportError:

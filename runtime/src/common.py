@@ -4,7 +4,6 @@ import ast
 from collections import Counter
 import json
 import math
-import os
 import re
 from pathlib import Path
 from typing import Any
@@ -37,6 +36,147 @@ OUTPUT_ARTIFACTS = [
     Path("backtest") / "iteration_context.json",
 ]
 
+CONFIG_OWNERSHIP: dict[str, set[str]] = {
+    "env": {
+        "data_source",
+        "provider_uri",
+        "ricequant",
+        "tushare",
+        "project_root",
+        "region",
+        "market",
+        "freq",
+        "sample_instrument",
+        "max_instruments",
+        "llm_model",
+        "llm_base_url",
+        "llm_api_key",
+        "iteration_count",
+        "llm_candidate_count",
+        "summary_top_k",
+        "unstable_top_k",
+        "high_corr_threshold",
+        "max_missing_ratio",
+        "min_rank_ic_to_backtest",
+        "min_rank_ic_ir_to_backtest",
+        "min_positive_ic_ratio",
+        "enable_direction_filter",
+    },
+    "analysis_rule": {
+        "run_mode",
+        "train_start_date",
+        "train_end_date",
+        "test_start_date",
+        "test_end_date",
+        "training_workflow",
+        "stock_pool",
+        "rebalance",
+        "rebalance_interval",
+        "rebalance_anchor",
+        "label",
+        "preprocess",
+    },
+    "backtest_rule": {
+        "buy_top_n",
+        "sell_drop_to",
+        "holding_count",
+        "weight_mode",
+        "trade_price",
+        "buy_cost",
+        "sell_cost",
+        "slippage",
+        "suspend_action",
+        "limit_up_action",
+        "limit_down_action",
+    },
+}
+
+LABEL_DEFAULTS: dict[str, Any] = {
+    "name": "rebalance_period_return",
+    "return_type": "period_return",
+    "price_field": "close",
+}
+
+PREPROCESS_DEFAULTS: dict[str, Any] = {
+    "outlier_method": "none",
+    "outlier_options": {
+        "n": 3.0,
+        "lower_quantile": 0.01,
+        "upper_quantile": 0.99,
+    },
+    "neutralization": "none",
+    "neutralization_options": {
+        "industry_field": "industry",
+        "market_cap_field": "market_cap",
+    },
+}
+
+
+def _normalize_label_block(config: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(config)
+    raw_label = normalized.get("label", {})
+    if raw_label and not isinstance(raw_label, dict):
+        raise ValueError("analysis_rule.label 必须是字典结构")
+    label_cfg = _deep_merge(dict(LABEL_DEFAULTS), raw_label if isinstance(raw_label, dict) else {})
+
+    label_cfg["name"] = str(label_cfg.get("name", LABEL_DEFAULTS["name"]) or LABEL_DEFAULTS["name"])
+    label_cfg["return_type"] = str(label_cfg.get("return_type", LABEL_DEFAULTS["return_type"]) or LABEL_DEFAULTS["return_type"])
+    label_cfg["price_field"] = str(label_cfg.get("price_field", LABEL_DEFAULTS["price_field"]) or LABEL_DEFAULTS["price_field"])
+    label_cfg.pop("start_shift", None)
+    label_cfg.pop("horizon", None)
+    label_cfg.pop("end_shift", None)
+
+    normalized["label"] = label_cfg
+    return normalized
+
+
+def _normalize_preprocess_block(config: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(config)
+    raw_preprocess = normalized.get("preprocess", {})
+    if raw_preprocess and not isinstance(raw_preprocess, dict):
+        raise ValueError("analysis_rule.preprocess 必须是字典结构")
+    preprocess_cfg = _deep_merge(dict(PREPROCESS_DEFAULTS), raw_preprocess if isinstance(raw_preprocess, dict) else {})
+
+    outlier_method = str(preprocess_cfg.get("outlier_method", "none") or "none").strip().lower()
+    allowed_outlier_methods = {"none", "mad", "quantile", "sigma"}
+    if outlier_method not in allowed_outlier_methods:
+        allowed_text = ", ".join(sorted(allowed_outlier_methods))
+        raise ValueError(f"preprocess.outlier_method 必须是: {allowed_text}")
+
+    outlier_options = dict(preprocess_cfg.get("outlier_options", {}))
+    n_value = outlier_options.get("n", 3.0)
+    lower_quantile = outlier_options.get("lower_quantile", 0.01)
+    upper_quantile = outlier_options.get("upper_quantile", 0.99)
+    outlier_options["n"] = float(3.0 if n_value is None else n_value)
+    outlier_options["lower_quantile"] = float(0.01 if lower_quantile is None else lower_quantile)
+    outlier_options["upper_quantile"] = float(0.99 if upper_quantile is None else upper_quantile)
+    if outlier_options["n"] <= 0:
+        raise ValueError("preprocess.outlier_options.n 必须大于 0")
+    if not 0 <= outlier_options["lower_quantile"] < outlier_options["upper_quantile"] <= 1:
+        raise ValueError("preprocess.outlier_options 的 lower_quantile / upper_quantile 必须满足 0 <= lower < upper <= 1")
+
+    neutralization = str(preprocess_cfg.get("neutralization", "none") or "none").strip().lower()
+    allowed_neutralizations = {"none", "industry", "market_cap", "industry_market_cap"}
+    if neutralization not in allowed_neutralizations:
+        allowed_text = ", ".join(sorted(allowed_neutralizations))
+        raise ValueError(f"preprocess.neutralization 必须是: {allowed_text}")
+
+    neutralization_options = dict(preprocess_cfg.get("neutralization_options", {}))
+    neutralization_options["industry_field"] = str(
+        neutralization_options.get("industry_field", "industry") or "industry"
+    ).strip()
+    neutralization_options["market_cap_field"] = str(
+        neutralization_options.get("market_cap_field", "market_cap") or "market_cap"
+    ).strip()
+
+    normalized["preprocess"] = {
+        "outlier_method": outlier_method,
+        "outlier_options": outlier_options,
+        "neutralization": neutralization,
+        "neutralization_options": neutralization_options,
+    }
+    return normalized
+
 
 def ensure_runtime_dirs() -> None:
     for path in [
@@ -55,7 +195,7 @@ def ensure_runtime_dirs() -> None:
 
 def _substitute_env(value: Any) -> Any:
     if isinstance(value, str):
-        return re.sub(r"\$\{([^}]+)\}", lambda m: os.getenv(m.group(1), ""), value)
+        return value
     if isinstance(value, list):
         return [_substitute_env(item) for item in value]
     if isinstance(value, dict):
@@ -94,12 +234,177 @@ def clear_runtime_context() -> None:
         RUNTIME_CONTEXT_PATH.unlink()
 
 
+def _flatten_config_keys(payload: dict[str, Any], prefix: str = "") -> set[str]:
+    keys: set[str] = set()
+    for key, value in payload.items():
+        full_key = f"{prefix}.{key}" if prefix else str(key)
+        keys.add(full_key)
+        if isinstance(value, dict):
+            keys.update(_flatten_config_keys(value, full_key))
+    return keys
+
+
+def _validate_config_ownership(
+    env_cfg: dict[str, Any],
+    analysis_cfg: dict[str, Any],
+    backtest_cfg: dict[str, Any],
+) -> None:
+    file_items = [
+        ("env.yaml", env_cfg, "env"),
+        ("analysis_rule.yaml", analysis_cfg, "analysis_rule"),
+        ("backtest_rule.yaml", backtest_cfg, "backtest_rule"),
+    ]
+
+    # 校验同名键（完整路径）是否在多份配置中重复定义。
+    key_to_files: dict[str, list[str]] = {}
+    for file_name, cfg, _ in file_items:
+        for key in _flatten_config_keys(cfg):
+            key_to_files.setdefault(key, []).append(file_name)
+    duplicates = {key: names for key, names in key_to_files.items() if len(names) > 1}
+    if duplicates:
+        details = "; ".join(
+            f"{key} -> {', '.join(sorted(names))}" for key, names in sorted(duplicates.items())
+        )
+        raise ValueError(f"配置归属冲突：存在跨 YAML 重复定义参数：{details}")
+
+    # 校验顶层参数是否落在其归属文件中。
+    expected_files: dict[str, str] = {}
+    for owner_name, owner_keys in CONFIG_OWNERSHIP.items():
+        owner_file = f"{owner_name}.yaml" if owner_name != "analysis_rule" else "analysis_rule.yaml"
+        for key in owner_keys:
+            expected_files[key] = owner_file
+
+    violations: list[str] = []
+    for file_name, cfg, owner_name in file_items:
+        for key in cfg.keys():
+            expected = expected_files.get(str(key))
+            if expected and expected != file_name:
+                violations.append(f"{key} 应定义在 {expected}，当前位于 {file_name}")
+        unknown = sorted(set(str(key) for key in cfg.keys()) - CONFIG_OWNERSHIP[owner_name])
+        if unknown:
+            violations.append(f"{file_name} 包含未登记归属参数: {', '.join(unknown)}")
+    if violations:
+        raise ValueError("配置归属校验失败：" + " | ".join(violations))
+
+
+def _load_layered_configs() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    env_cfg = load_yaml_file(CONFIG_DIR / "env.yaml")
+    analysis_cfg = load_yaml_file(CONFIG_DIR / "analysis_rule.yaml")
+    backtest_cfg = load_yaml_file(CONFIG_DIR / "backtest_rule.yaml")
+    _validate_config_ownership(env_cfg, analysis_cfg, backtest_cfg)
+    return env_cfg, analysis_cfg, backtest_cfg
+
+
 def env_config() -> dict[str, Any]:
-    config = load_yaml_file(CONFIG_DIR / "env.yaml")
+    env_cfg, analysis_cfg, _ = _load_layered_configs()
+    config = _deep_merge(env_cfg, analysis_cfg)
     context = runtime_context()
     if context:
         config = _deep_merge(config, context)
-    return config
+    return _normalize_preprocess_block(_normalize_label_block(config))
+
+
+def analysis_rule_config() -> dict[str, Any]:
+    _, analysis_cfg, _ = _load_layered_configs()
+    context = runtime_context()
+    if context:
+        analysis_keys = set(analysis_cfg.keys())
+        analysis_context = {key: value for key, value in context.items() if key in analysis_keys}
+        if analysis_context:
+            analysis_cfg = _deep_merge(analysis_cfg, analysis_context)
+    return _normalize_preprocess_block(_normalize_label_block(analysis_cfg))
+
+
+def label_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    cfg = config or env_config()
+    return dict(_normalize_label_block(cfg).get("label", {}))
+
+
+def preprocess_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    cfg = config or env_config()
+    return dict(_normalize_preprocess_block(cfg).get("preprocess", {}))
+
+
+def label_name(config: dict[str, Any] | None = None) -> str:
+    return str(label_config(config).get("name", "label"))
+
+
+def label_signature(config: dict[str, Any] | None = None) -> str:
+    cfg = config or env_config()
+    label_cfg = label_config(cfg)
+    rebalance = str(cfg.get("rebalance", "weekly")).strip().lower()
+    interval = max(int(cfg.get("rebalance_interval", 1) or 1), 1)
+    default_anchor = "first_trading_day_of_month" if rebalance == "monthly" else "first_trading_day_of_week"
+    anchor = str(cfg.get("rebalance_anchor", default_anchor)).strip().lower()
+    return (
+        f"{label_cfg.get('return_type', 'period_return')}("
+        f"{label_cfg.get('price_field', 'close')},"
+        f"rebalance={rebalance},"
+        f"interval={interval},"
+        f"anchor={anchor})"
+    )
+
+
+def analysis_label_signature(config: dict[str, Any] | None = None) -> str:
+    return label_signature(config)
+
+
+def label_description(config: dict[str, Any] | None = None) -> str:
+    cfg = config or env_config()
+    label_cfg = label_config(cfg)
+    rebalance = str(cfg.get("rebalance", "weekly")).strip().lower()
+    interval = max(int(cfg.get("rebalance_interval", 1) or 1), 1)
+    default_anchor = "first_trading_day_of_month" if rebalance == "monthly" else "first_trading_day_of_week"
+    anchor = str(cfg.get("rebalance_anchor", default_anchor)).strip().lower()
+    return (
+        f"name={label_cfg.get('name')}, return_type={label_cfg.get('return_type')}, "
+        f"price_field={label_cfg.get('price_field')}, rebalance={rebalance}, "
+        f"interval={interval}, anchor={anchor}"
+    )
+
+
+def preprocess_signature(config: dict[str, Any] | None = None) -> str:
+    cfg = preprocess_config(config)
+    steps: list[str] = []
+    outlier_method = str(cfg.get("outlier_method", "none"))
+    outlier_options = dict(cfg.get("outlier_options", {}))
+    if outlier_method == "mad":
+        steps.append(f"mad(n={outlier_options.get('n', 3.0):.2f})")
+    elif outlier_method == "quantile":
+        steps.append(
+            "quantile"
+            f"({outlier_options.get('lower_quantile', 0.01):.2f},{outlier_options.get('upper_quantile', 0.99):.2f})"
+        )
+    elif outlier_method == "sigma":
+        steps.append(f"3sigma(n={outlier_options.get('n', 3.0):.2f})")
+
+    neutralization = str(cfg.get("neutralization", "none"))
+    neutralization_options = dict(cfg.get("neutralization_options", {}))
+    if neutralization == "industry":
+        steps.append(f"industry({neutralization_options.get('industry_field', 'industry')})")
+    elif neutralization == "market_cap":
+        steps.append(f"market_cap({neutralization_options.get('market_cap_field', 'market_cap')})")
+    elif neutralization == "industry_market_cap":
+        steps.append(
+            "industry_market_cap("
+            f"{neutralization_options.get('industry_field', 'industry')},"
+            f"{neutralization_options.get('market_cap_field', 'market_cap')})"
+        )
+    return "disabled" if not steps else " -> ".join(steps)
+
+
+def analysis_profile(config: dict[str, Any] | None = None) -> str:
+    cfg = config or env_config()
+    rebalance = str(cfg.get("rebalance", "weekly")).strip().lower()
+    interval = max(int(cfg.get("rebalance_interval", 1) or 1), 1)
+    default_anchor = "first_trading_day_of_month" if rebalance == "monthly" else "first_trading_day_of_week"
+    anchor = str(cfg.get("rebalance_anchor", default_anchor)).strip().lower()
+    return (
+        f"profile=period_return_ic("
+        f"rebalance={rebalance},"
+        f"interval={interval},"
+        f"anchor={anchor})"
+    )
 
 
 def feature_pool_config() -> dict[str, Any]:
@@ -107,7 +412,8 @@ def feature_pool_config() -> dict[str, Any]:
 
 
 def backtest_rule_config() -> dict[str, Any]:
-    return load_yaml_file(CONFIG_DIR / "backtest_rule.yaml")
+    _, _, backtest_cfg = _load_layered_configs()
+    return backtest_cfg
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -127,6 +433,93 @@ def _to_timestamp(value: Any) -> pd.Timestamp:
 
 def _date_text(value: pd.Timestamp) -> str:
     return value.strftime("%Y-%m-%d")
+
+
+def active_run_window(config: dict[str, Any] | None = None) -> tuple[pd.Timestamp, pd.Timestamp]:
+    cfg = config or env_config()
+    run_mode = str(cfg.get("run_mode", "train")).strip().lower()
+    if run_mode == "test":
+        start_time = _to_timestamp(cfg.get("test_start_date"))
+        end_time = _to_timestamp(cfg.get("test_end_date"))
+    else:
+        start_time = _to_timestamp(cfg.get("train_start_date"))
+        end_time = _to_timestamp(cfg.get("train_end_date"))
+    return start_time, end_time
+
+
+def clip_to_active_window(
+    frame: pd.DataFrame | pd.Series,
+    config: dict[str, Any] | None = None,
+) -> pd.DataFrame | pd.Series:
+    start_time, end_time = active_run_window(config)
+    datetime_index = frame.index.get_level_values("datetime")
+    mask = (datetime_index >= start_time) & (datetime_index <= end_time)
+    return frame.loc[mask]
+
+
+def _base_feature_expr_warmup(expr: str, known_feature_warmups: dict[str, int]) -> int:
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError:
+        return 0
+
+    direct_windows = 0
+    dependency_warmup = 0
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            dependency_warmup = max(dependency_warmup, known_feature_warmups.get(node.id, 0))
+            continue
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        method_name = node.func.attr
+        if method_name == "pct_change":
+            if not node.args:
+                direct_windows += 1
+            elif _is_number_constant(node.args[0]):
+                direct_windows += int(node.args[0].value)
+        elif method_name in {"rolling", "shift"}:
+            if node.args and _is_number_constant(node.args[0]):
+                direct_windows += int(node.args[0].value)
+    return direct_windows + dependency_warmup
+
+
+def estimate_feature_pool_warmup(feature_cfg: dict[str, Any] | None = None) -> int:
+    fp_cfg = feature_cfg or feature_pool_config()
+    feature_warmups: dict[str, int] = {}
+    for item in fp_cfg.get("base_features", []):
+        name = str(item.get("name", ""))
+        expr = str(item.get("expr", ""))
+        if not name:
+            continue
+        feature_warmups[name] = _base_feature_expr_warmup(expr, feature_warmups)
+    return max(feature_warmups.values(), default=0)
+
+
+def estimate_formula_warmup(formula: str) -> int:
+    if not formula:
+        return 0
+    try:
+        tree = ast.parse(formula, mode="eval")
+    except SyntaxError:
+        return 0
+
+    total_windows = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        for arg_index in WINDOW_OPERATOR_ARG_INDEXES.get(node.func.id, []):
+            if len(node.args) > arg_index and _is_number_constant(node.args[arg_index]):
+                total_windows += int(node.args[arg_index].value)
+    return total_windows
+
+
+def estimate_required_warmup(
+    feature_cfg: dict[str, Any] | None = None,
+    formulas: list[str] | None = None,
+) -> int:
+    feature_warmup = estimate_feature_pool_warmup(feature_cfg)
+    formula_warmup = max((estimate_formula_warmup(formula) for formula in (formulas or [])), default=0)
+    return max(feature_warmup, formula_warmup + feature_warmup)
 
 
 def build_training_windows(config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -366,6 +759,8 @@ def raw_field_tokens(raw_fields: list[str]) -> list[str]:
 def load_raw_data(
     config: dict[str, Any] | None = None,
     raw_fields: list[str] | None = None,
+    warmup_trading_days: int = 0,
+    forward_trading_days: int = 0,
 ) -> pd.DataFrame:
     cfg = config or env_config()
     fp_cfg = feature_pool_config()
@@ -374,13 +769,15 @@ def load_raw_data(
     # 获取数据源类型
     data_source = cfg.get("data_source", "qlib")
     
-    run_mode = cfg.get("run_mode", "train")
-    if run_mode == "test":
-        start_time = str(cfg.get("test_start_date"))
-        end_time = str(cfg.get("test_end_date"))
-    else:
-        start_time = str(cfg.get("train_start_date"))
-        end_time = str(cfg.get("train_end_date"))
+    start_timestamp, end_timestamp = active_run_window(cfg)
+    if warmup_trading_days > 0:
+        # 预热期只用于计算时序特征，不改变最终统计区间。
+        start_timestamp = (start_timestamp - pd.offsets.BDay(int(warmup_trading_days) + 5)).normalize()
+    if forward_trading_days > 0:
+        # 向后缓冲仅用于构建“下一期收益标签”，最终评估窗口仍由 clip_to_active_window 控制。
+        end_timestamp = (end_timestamp + pd.offsets.BDay(int(forward_trading_days) + 5)).normalize()
+    start_time = _date_text(start_timestamp)
+    end_time = _date_text(end_timestamp)
     
     instruments = list_instruments(cfg)
     
@@ -425,13 +822,27 @@ def load_raw_data(
     return frame
 
 
+def estimate_label_forward_days(config: dict[str, Any] | None = None) -> int:
+    """估算为标签构建所需的向后交易日缓冲天数。"""
+    cfg = config or env_config()
+    rebalance = str(cfg.get("rebalance", "weekly")).strip().lower()
+    interval = max(int(cfg.get("rebalance_interval", 1) or 1), 1)
+    if rebalance == "daily":
+        return interval
+    if rebalance == "weekly":
+        return 5 * interval
+    if rebalance == "monthly":
+        return 22 * interval
+    return 5 * interval
+
+
 def _compute_group_features(group: pd.DataFrame, base_features: list[dict[str, str]]) -> pd.DataFrame:
     local = group.droplevel("instrument").copy()
     env = {column: local[column] for column in local.columns}
     values: dict[str, pd.Series] = {}
     for item in base_features:
         name = str(item["name"])
-        expr = str(item["expr"])
+        expr = _normalize_pct_change_expr(str(item["expr"]))
         values[name] = eval(expr, {"__builtins__": {}}, env)
         env[name] = values[name]
     result = pd.DataFrame(values, index=local.index)
@@ -453,11 +864,45 @@ def build_feature_frame(
     for _, group in raw_frame.groupby(level="instrument", sort=False):
         frames.append(_compute_group_features(group, base_features))
     feature_frame = pd.concat(frames).sort_index()
-    horizon = int(cfg.get("label_horizon", 5))
-    close = raw_frame["close"]
-    label = close.groupby(level="instrument").shift(-horizon) / close - 1
-    feature_frame[str(cfg.get("target_label", "future_5d_return"))] = label
-    return feature_frame
+    label = build_label_series(raw_frame, cfg)
+    feature_frame[label.name] = label
+    return clip_to_active_window(feature_frame, cfg)
+
+
+def build_label_series(
+    raw_frame: pd.DataFrame,
+    config: dict[str, Any] | None = None,
+) -> pd.Series:
+    cfg = config or env_config()
+    label_cfg = label_config(cfg)
+    return_type = str(label_cfg.get("return_type", "period_return")).strip().lower()
+    price_field = str(label_cfg.get("price_field", "close")).strip()
+    if return_type != "period_return":
+        raise ValueError(f"暂不支持的 label.return_type: {return_type}")
+    if price_field not in raw_frame.columns:
+        raise KeyError(f"构建收益标签失败：原始数据中不存在价格列 {price_field}")
+
+    prices = raw_frame[price_field].sort_index()
+    observation_dates = analysis_observation_dates(
+        prices.index.get_level_values("datetime"),
+        cfg,
+    )
+    if len(observation_dates) < 2:
+        return pd.Series(index=prices.index, dtype=float, name=label_name(cfg))
+
+    observation_index = pd.Index(pd.to_datetime(observation_dates))
+    observation_prices = prices.loc[prices.index.get_level_values("datetime").isin(observation_index)]
+    period_return = observation_prices.groupby(level="instrument").shift(-1) / observation_prices - 1
+    label = pd.Series(index=prices.index, dtype=float, name=label_name(cfg))
+    label.loc[period_return.index] = period_return
+    return label.rename(label_name(cfg))
+
+
+def build_analysis_label_series(
+    raw_frame: pd.DataFrame,
+    config: dict[str, Any] | None = None,
+) -> pd.Series:
+    return build_label_series(raw_frame, config)
 
 
 def yearly_stability(series: pd.Series, label: pd.Series) -> float:
@@ -465,7 +910,9 @@ def yearly_stability(series: pd.Series, label: pd.Series) -> float:
     if merged.empty:
         return 0.0
     merged["year"] = merged.index.get_level_values("datetime").year
-    yearly_corr = merged.groupby("year").apply(lambda frame: frame["feature"].corr(frame["label"]))
+    yearly_corr = merged.groupby("year")[["feature", "label"]].apply(
+        lambda frame: frame["feature"].corr(frame["label"])
+    )
     yearly_corr = yearly_corr.dropna()
     if yearly_corr.empty:
         return 0.0
@@ -799,7 +1246,9 @@ def delta(series: pd.Series, periods: int) -> pd.Series:
 
 def pct_change(series: pd.Series, periods: int) -> pd.Series:
     lag = int(periods)
-    return series.groupby(level="instrument").transform(lambda s: s.pct_change(lag))
+    return series.groupby(level="instrument").transform(
+        lambda s: s.pct_change(periods=lag, fill_method=None)
+    )
 
 
 def ema(series: pd.Series, span: int) -> pd.Series:
@@ -874,6 +1323,157 @@ def winsorize(series: pd.Series, lower_quantile: float, upper_quantile: float) -
     return series.groupby(level="datetime").transform(_clip)
 
 
+def mad_clip(series: pd.Series, n: float) -> pd.Series:
+    threshold = float(n)
+
+    def _clip(group: pd.Series) -> pd.Series:
+        median = group.median()
+        mad = (group - median).abs().median()
+        scaled_mad = 1.4826 * mad
+        if pd.isna(scaled_mad) or scaled_mad == 0:
+            return group
+        lower_bound = median - threshold * scaled_mad
+        upper_bound = median + threshold * scaled_mad
+        return group.clip(lower=lower_bound, upper=upper_bound)
+
+    return series.groupby(level="datetime").transform(_clip)
+
+
+def sigma_clip(series: pd.Series, n: float) -> pd.Series:
+    threshold = float(n)
+
+    def _clip(group: pd.Series) -> pd.Series:
+        std = group.std(ddof=0)
+        if pd.isna(std) or std == 0:
+            return group
+        mean = group.mean()
+        lower_bound = mean - threshold * std
+        upper_bound = mean + threshold * std
+        return group.clip(lower=lower_bound, upper=upper_bound)
+
+    return series.groupby(level="datetime").transform(_clip)
+
+
+def _cross_section_regression_residual(
+    score: pd.Series,
+    design: pd.DataFrame,
+) -> pd.Series:
+    frame = pd.concat([score.rename("score"), design], axis=1)
+    pieces: list[pd.Series] = []
+
+    def _regress(group: pd.DataFrame) -> pd.Series:
+        design_columns = [column for column in group.columns if column != "score"]
+        valid = group[["score", *design_columns]].notna().all(axis=1)
+        if valid.sum() <= len(design_columns):
+            return group["score"]
+        y = group.loc[valid, "score"].to_numpy(dtype=float)
+        x = group.loc[valid, design_columns].to_numpy(dtype=float)
+        if x.ndim != 2 or x.shape[0] == 0:
+            return group["score"]
+        beta, _, _, _ = np.linalg.lstsq(x, y, rcond=None)
+        fitted = x @ beta
+        residual = pd.Series(np.nan, index=group.index, dtype=float)
+        residual.loc[valid] = y - fitted
+        return residual
+
+    for _, group in frame.groupby(level="datetime", sort=False):
+        pieces.append(_regress(group))
+    if not pieces:
+        return pd.Series(np.nan, index=frame.index, dtype=float)
+    return pd.concat(pieces).sort_index()
+
+
+def neutralize_by_industry(
+    series: pd.Series,
+    industry_series: pd.Series,
+) -> pd.Series:
+    aligned = pd.concat(
+        [series.rename("score"), industry_series.rename("industry")],
+        axis=1,
+    )
+
+    datetime_index = aligned.index.get_level_values("datetime")
+    group_mean = aligned.groupby([datetime_index, aligned["industry"]])["score"].transform("mean")
+    result = aligned["score"].copy()
+    valid = aligned["industry"].notna()
+    result.loc[valid] = aligned.loc[valid, "score"] - group_mean.loc[valid]
+    return result
+
+
+def neutralize_by_market_cap(
+    series: pd.Series,
+    market_cap_series: pd.Series,
+) -> pd.Series:
+    log_market_cap = np.log(market_cap_series.where(market_cap_series > 0))
+    design = pd.DataFrame(
+        {
+            "const": 1.0,
+            "log_market_cap": log_market_cap,
+        },
+        index=series.index,
+    )
+    return _cross_section_regression_residual(series, design)
+
+
+def neutralize_by_industry_and_market_cap(
+    series: pd.Series,
+    industry_series: pd.Series,
+    market_cap_series: pd.Series,
+) -> pd.Series:
+    log_market_cap = np.log(market_cap_series.where(market_cap_series > 0))
+    industry_dummies = pd.get_dummies(industry_series, prefix="industry", dummy_na=False, drop_first=True)
+    design = pd.concat(
+        [
+            pd.Series(1.0, index=series.index, name="const"),
+            log_market_cap.rename("log_market_cap"),
+            industry_dummies.astype(float),
+        ],
+        axis=1,
+    )
+    return _cross_section_regression_residual(series, design)
+
+
+def apply_factor_preprocess(
+    factor_series: pd.Series,
+    raw_frame: pd.DataFrame,
+    config: dict[str, Any] | None = None,
+) -> pd.Series:
+    cfg = preprocess_config(config)
+    score = factor_series.astype(float).copy()
+    outlier_method = str(cfg.get("outlier_method", "none"))
+    outlier_options = dict(cfg.get("outlier_options", {}))
+    if outlier_method == "mad":
+        score = mad_clip(score, float(outlier_options.get("n", 3.0)))
+    elif outlier_method == "quantile":
+        score = winsorize(
+            score,
+            float(outlier_options.get("lower_quantile", 0.01)),
+            float(outlier_options.get("upper_quantile", 0.99)),
+        )
+    elif outlier_method == "sigma":
+        score = sigma_clip(score, float(outlier_options.get("n", 3.0)))
+
+    neutralization = str(cfg.get("neutralization", "none"))
+    neutralization_options = dict(cfg.get("neutralization_options", {}))
+    industry_field = str(neutralization_options.get("industry_field", "industry") or "industry").strip()
+    market_cap_field = str(neutralization_options.get("market_cap_field", "market_cap") or "market_cap").strip()
+    if neutralization == "industry":
+        if industry_field not in raw_frame.columns:
+            raise KeyError(f"行业中性化失败：原始数据中不存在字段 {industry_field}")
+        score = neutralize_by_industry(score, raw_frame[industry_field])
+    elif neutralization == "market_cap":
+        if market_cap_field not in raw_frame.columns:
+            raise KeyError(f"市值中性化失败：原始数据中不存在字段 {market_cap_field}")
+        score = neutralize_by_market_cap(score, raw_frame[market_cap_field])
+    elif neutralization == "industry_market_cap":
+        if industry_field not in raw_frame.columns:
+            raise KeyError(f"行业市值中性化失败：原始数据中不存在字段 {industry_field}")
+        if market_cap_field not in raw_frame.columns:
+            raise KeyError(f"行业市值中性化失败：原始数据中不存在字段 {market_cap_field}")
+        score = neutralize_by_industry_and_market_cap(score, raw_frame[industry_field], raw_frame[market_cap_field])
+    return score.rename(factor_series.name)
+
+
 OPERATOR_ENV = {
     "add": lambda left, right: left + right,
     "sub": lambda left, right: left - right,
@@ -904,6 +1504,7 @@ OPERATOR_ENV = {
 
 
 def evaluate_formula(formula: str, data_frame: pd.DataFrame) -> pd.Series:
+    formula = _normalize_pct_change_expr(formula)
     env = {column: data_frame[column] for column in data_frame.columns}
     env.update(OPERATOR_ENV)
     result = eval(formula, {"__builtins__": {}}, env)
@@ -912,12 +1513,53 @@ def evaluate_formula(formula: str, data_frame: pd.DataFrame) -> pd.Series:
     return result
 
 
+def _normalize_pct_change_expr(expr: str) -> str:
+    """为表达式中的 Series.pct_change 显式补充 fill_method=None，避免 pandas FutureWarning。"""
+    pattern = re.compile(r"\.pct_change\(([^)]*)\)")
+
+    def _replace(match: re.Match[str]) -> str:
+        args = match.group(1).strip()
+        if "fill_method" in args:
+            return match.group(0)
+        if not args:
+            return ".pct_change(fill_method=None)"
+        return f".pct_change({args}, fill_method=None)"
+
+    return pattern.sub(_replace, expr)
+
+
+def _cross_section_corr(
+    score: pd.Series,
+    label: pd.Series,
+    method: str = "pearson",
+) -> float:
+    frame = pd.concat([score.rename("score"), label.rename("label")], axis=1).dropna()
+    if len(frame) < 2:
+        return float("nan")
+    x = frame["score"].astype(float)
+    y = frame["label"].astype(float)
+    if method == "spearman":
+        x = x.rank(method="average")
+        y = y.rank(method="average")
+    if x.nunique(dropna=True) < 2 or y.nunique(dropna=True) < 2:
+        return float("nan")
+    return float(x.corr(y))
+
+
+def analysis_observation_dates(
+    dates: pd.Index,
+    analysis_config: dict[str, Any] | None = None,
+) -> list[pd.Timestamp]:
+    return weekly_rebalance_dates(dates, analysis_config)
+
+
 def factor_metrics_from_series(
     factor_name: str,
     factor_series: pd.Series,
     label_series: pd.Series,
+    analysis_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    merged = pd.concat([factor_series.rename("score"), label_series.rename("label")], axis=1).dropna()
+    merged = pd.concat([factor_series.rename("score"), label_series.rename("label")], axis=1)
     if merged.empty:
         return {
             "factor_name": factor_name,
@@ -927,33 +1569,82 @@ def factor_metrics_from_series(
             "rank_ic_ir": 0.0,
             "positive_ic_ratio": 0.0,
             "coverage": 0.0,
+            "observation_count": 0,
         }
-    ic_daily = merged.groupby(level="datetime").apply(lambda frame: frame["score"].corr(frame["label"]))
-    rank_ic_daily = merged.groupby(level="datetime").apply(
-        lambda frame: frame["score"].corr(frame["label"], method="spearman")
+    observation_dates = analysis_observation_dates(
+        merged.index.get_level_values("datetime"),
+        analysis_config,
     )
-    ic_daily = ic_daily.dropna()
-    rank_ic_daily = rank_ic_daily.dropna()
-    mean_ic = float(ic_daily.mean() or 0.0) if not ic_daily.empty else 0.0
-    mean_rank_ic = float(rank_ic_daily.mean() or 0.0) if not rank_ic_daily.empty else 0.0
-    ic_std = float(ic_daily.std(ddof=0) or 0.0) if not ic_daily.empty else 0.0
-    rank_ic_std = float(rank_ic_daily.std(ddof=0) or 0.0) if not rank_ic_daily.empty else 0.0
+    observation_mask = merged.index.get_level_values("datetime").isin(observation_dates)
+    observation_frame = merged.loc[observation_mask]
+    if observation_frame.empty:
+        return {
+            "factor_name": factor_name,
+            "mean_ic": 0.0,
+            "mean_rank_ic": 0.0,
+            "ic_ir": 0.0,
+            "rank_ic_ir": 0.0,
+            "positive_ic_ratio": 0.0,
+            "coverage": 0.0,
+            "observation_count": 0,
+        }
+
+    label_available_count = int(observation_frame["label"].notna().sum())
+    valid_pair_count = int(observation_frame[["score", "label"]].notna().all(axis=1).sum())
+    ic_series = observation_frame.groupby(level="datetime").apply(
+        lambda frame: _cross_section_corr(frame["score"], frame["label"], method="pearson")
+    ).dropna()
+    rank_ic_series = observation_frame.groupby(level="datetime").apply(
+        lambda frame: _cross_section_corr(frame["score"], frame["label"], method="spearman")
+    ).dropna()
+    mean_ic = float(ic_series.mean() or 0.0) if not ic_series.empty else 0.0
+    mean_rank_ic = float(rank_ic_series.mean() or 0.0) if not rank_ic_series.empty else 0.0
+    ic_std = float(ic_series.std(ddof=0) or 0.0) if not ic_series.empty else 0.0
+    rank_ic_std = float(rank_ic_series.std(ddof=0) or 0.0) if not rank_ic_series.empty else 0.0
     return {
         "factor_name": factor_name,
         "mean_ic": mean_ic,
         "mean_rank_ic": mean_rank_ic,
         "ic_ir": float(mean_ic / ic_std) if ic_std else 0.0,
         "rank_ic_ir": float(mean_rank_ic / rank_ic_std) if rank_ic_std else 0.0,
-        "positive_ic_ratio": float((rank_ic_daily > 0).mean()) if not rank_ic_daily.empty else 0.0,
-        "coverage": float(merged["score"].notna().mean()),
+        "positive_ic_ratio": float((rank_ic_series > 0).mean()) if not rank_ic_series.empty else 0.0,
+        "coverage": float(valid_pair_count / label_available_count) if label_available_count else 0.0,
+        "observation_count": int(rank_ic_series.count()),
     }
 
 
-def weekly_rebalance_dates(dates: pd.Index) -> list[pd.Timestamp]:
+def weekly_rebalance_dates(
+    dates: pd.Index,
+    analysis_config: dict[str, Any] | None = None,
+) -> list[pd.Timestamp]:
+    cfg = analysis_config or analysis_rule_config()
+    rebalance = str(cfg.get("rebalance", "weekly")).strip().lower()
+    rebalance_interval = max(int(cfg.get("rebalance_interval", 1) or 1), 1)
+    default_anchor = "first_trading_day_of_month" if rebalance == "monthly" else "first_trading_day_of_week"
+    rebalance_anchor = str(cfg.get("rebalance_anchor", default_anchor)).strip().lower()
     unique_dates = pd.Index(pd.to_datetime(sorted(pd.unique(dates))))
-    periods = unique_dates.to_period("W-MON")
-    rebalance = unique_dates.to_series().groupby(periods).first().tolist()
-    return [pd.Timestamp(item) for item in rebalance]
+
+    if rebalance == "daily":
+        selected = [pd.Timestamp(item) for item in unique_dates.tolist()]
+        return selected[::rebalance_interval]
+
+    if rebalance == "weekly":
+        allowed_anchors = {"first_trading_day_of_week", "last_trading_day_of_week"}
+        week_starts = (unique_dates - pd.to_timedelta(unique_dates.weekday, unit="D")).normalize()
+        grouped = unique_dates.to_series().groupby(week_starts)
+    elif rebalance == "monthly":
+        allowed_anchors = {"first_trading_day_of_month", "last_trading_day_of_month"}
+        grouped = unique_dates.to_series().groupby(unique_dates.to_period("M"))
+    else:
+        raise ValueError(f"不支持的 rebalance 配置: {rebalance}")
+    if rebalance_anchor not in allowed_anchors:
+        allowed_text = ", ".join(sorted(allowed_anchors))
+        raise ValueError(f"{rebalance} 模式下 rebalance_anchor 必须是: {allowed_text}")
+
+    use_first = rebalance_anchor.startswith("first")
+    selected = grouped.first().tolist() if use_first else grouped.last().tolist()
+    rebalance_dates = [pd.Timestamp(item) for item in selected]
+    return rebalance_dates[::rebalance_interval]
 
 
 def compute_drawdown(nav_series: pd.Series) -> float:
