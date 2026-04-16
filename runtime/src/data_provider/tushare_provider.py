@@ -561,10 +561,22 @@ class TushareProvider(BaseDataProvider):
         }
         
         requested_fields = fields if fields else list(field_mapping.values())
+        price_adjust = str(self.config.get("price_adjust", "none") or "none").strip().lower()
+        price_adjust_reference_date = str(
+            self.config.get("price_adjust_reference_date", "") or ""
+        ).strip()
+        base_price_fields = {"open", "high", "low", "close"}
+        has_price_fields = any(
+            (isinstance(field, str) and field in base_price_fields)
+            or (isinstance(field, str) and field.startswith("$") and field[1:] in base_price_fields)
+            for field in requested_fields
+        )
         need_factor = 'factor' in requested_fields or '$factor' in requested_fields
+        need_adjust = price_adjust in {"pre", "post"} and has_price_fields
+        need_adj_factor = need_factor or need_adjust
         
         self._ensure_data_cached('daily', instruments, start_date.replace('-', ''), end_date.replace('-', ''))
-        if need_factor:
+        if need_adj_factor:
             self._ensure_data_cached('adj_factor', instruments, start_date.replace('-', ''), end_date.replace('-', ''))
             
         cached_data_list = []
@@ -575,12 +587,33 @@ class TushareProvider(BaseDataProvider):
             if daily_df.empty:
                 continue
                 
-            if need_factor:
+            if need_adj_factor:
                 adj_df = self._load_from_ts_parquet('adj_factor', ts_code, start_date.replace('-', ''), end_date.replace('-', ''))
                 if not adj_df.empty and 'adj_factor' in adj_df.columns:
                     daily_df = pd.merge(daily_df, adj_df[['trade_date', 'adj_factor']], on='trade_date', how='left')
                 else:
                     daily_df['adj_factor'] = 1.0
+            if need_adjust:
+                daily_df = daily_df.sort_values("trade_date")
+                trade_dates = pd.to_datetime(daily_df["trade_date"])
+                adjust_series = pd.to_numeric(daily_df.get("adj_factor"), errors="coerce").ffill().bfill()
+                ref_factor = float("nan")
+                if price_adjust == "pre" and price_adjust_reference_date:
+                    reference_date = pd.Timestamp(price_adjust_reference_date).normalize()
+                    reference_mask = trade_dates <= reference_date
+                    if reference_mask.any():
+                        ref_factor = adjust_series.loc[reference_mask].iloc[-1]
+                    elif not adjust_series.empty:
+                        # 极端情况下如果参考日前没有数据，退化为首个可用交易日。
+                        ref_factor = adjust_series.iloc[0]
+                elif price_adjust == "pre":
+                    ref_factor = adjust_series.iloc[-1]
+                else:
+                    ref_factor = adjust_series.iloc[0]
+                if pd.notna(ref_factor) and float(ref_factor) != 0.0:
+                    for col in base_price_fields:
+                        if col in daily_df.columns:
+                            daily_df[col] = pd.to_numeric(daily_df[col], errors="coerce") * adjust_series / float(ref_factor)
                     
             daily_df = daily_df.rename(columns={'trade_date': 'datetime'})
             daily_df['datetime'] = pd.to_datetime(daily_df['datetime'])

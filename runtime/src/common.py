@@ -68,6 +68,8 @@ CONFIG_OWNERSHIP: dict[str, set[str]] = {
         "test_end_date",
         "training_workflow",
         "stock_pool",
+        "price_adjust",
+        "price_adjust_reference_date",
         "rebalance",
         "rebalance_interval",
         "rebalance_anchor",
@@ -173,6 +175,23 @@ def _normalize_preprocess_block(config: dict[str, Any]) -> dict[str, Any]:
         "neutralization": neutralization,
         "neutralization_options": neutralization_options,
     }
+    return normalized
+
+
+def _normalize_price_adjust_block(config: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(config)
+    price_adjust = str(normalized.get("price_adjust", "none") or "none").strip().lower()
+    allowed_modes = {"none", "pre", "post"}
+    if price_adjust not in allowed_modes:
+        allowed_text = ", ".join(sorted(allowed_modes))
+        raise ValueError(f"price_adjust 必须是: {allowed_text}")
+    normalized["price_adjust"] = price_adjust
+    raw_reference_date = normalized.get("price_adjust_reference_date", "auto")
+    reference_date_text = str(raw_reference_date or "auto").strip().lower()
+    if reference_date_text == "auto":
+        normalized["price_adjust_reference_date"] = "auto"
+        return normalized
+    normalized["price_adjust_reference_date"] = _date_text(_to_timestamp(raw_reference_date))
     return normalized
 
 
@@ -296,7 +315,9 @@ def env_config() -> dict[str, Any]:
     context = runtime_context()
     if context:
         config = _deep_merge(config, context)
-    return _normalize_preprocess_block(_normalize_label_block(config))
+    return _normalize_price_adjust_block(
+        _normalize_preprocess_block(_normalize_label_block(config))
+    )
 
 
 def analysis_rule_config() -> dict[str, Any]:
@@ -307,7 +328,9 @@ def analysis_rule_config() -> dict[str, Any]:
         analysis_context = {key: value for key, value in context.items() if key in analysis_keys}
         if analysis_context:
             analysis_cfg = _deep_merge(analysis_cfg, analysis_context)
-    return _normalize_preprocess_block(_normalize_label_block(analysis_cfg))
+    return _normalize_price_adjust_block(
+        _normalize_preprocess_block(_normalize_label_block(analysis_cfg))
+    )
 
 
 def label_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -712,7 +735,7 @@ def load_raw_data(
     warmup_trading_days: int = 0,
     forward_trading_days: int = 0,
 ) -> pd.DataFrame:
-    cfg = config or env_config()
+    cfg = dict(config or env_config())
     fp_cfg = feature_pool_config()
     fields = raw_fields or list(fp_cfg.get("raw_fields", []))
     
@@ -725,6 +748,9 @@ def load_raw_data(
         end_timestamp = (end_timestamp + pd.offsets.BDay(int(forward_trading_days) + 5)).normalize()
     start_time = _date_text(start_timestamp)
     end_time = _date_text(end_timestamp)
+    if str(cfg.get("price_adjust_reference_date", "auto") or "auto").strip().lower() == "auto":
+        # 默认把前复权参考日固定到本次任务的 load_end，避免随运行日期漂移。
+        cfg["price_adjust_reference_date"] = end_time
     
     instruments = list_instruments(cfg)
     

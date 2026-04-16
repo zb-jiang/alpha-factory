@@ -67,6 +67,18 @@ stock_pool:
   include_new_stock: false
   new_stock_days: 60
 
+# 【3.1 价格复权口径（影响因子与标签）】
+# 可选值：
+# - none: 不复权（原始价格）
+# - pre: 前复权（固定最新日价格，调整历史）
+# - post: 后复权（固定最早日价格，调整未来）
+# 说明：不同平台默认值可能不同；做对照时务必显式指定
+price_adjust: pre
+# 前复权统一参考日：
+# - auto: 自动取本次任务的 load_end（推荐，结果可复现）
+# - YYYY-MM-DD: 显式固定到某一天
+price_adjust_reference_date: auto
+
 # 【4. 分析调仓节奏（用于因子分析口径）】
 # rebalance 可选值: daily / weekly / monthly
 rebalance: weekly
