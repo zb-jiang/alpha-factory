@@ -36,6 +36,11 @@ OUTPUT_ARTIFACTS = [
     Path("backtest") / "iteration_context.json",
 ]
 
+DYNAMIC_INDEX_COMPONENT_CACHE: dict[
+    tuple[str, tuple[str, ...], bool, bool, int],
+    dict[pd.Timestamp, set[str]],
+] = {}
+
 CONFIG_OWNERSHIP: dict[str, set[str]] = {
     "env": {
         "data_source",
@@ -668,6 +673,146 @@ def init_data_source(config: dict[str, Any] | None = None) -> dict[str, Any]:
     return cfg
 
 
+def _dynamic_index_pool_enabled(config: dict[str, Any]) -> bool:
+    stock_pool_cfg = dict(config.get("stock_pool", {}))
+    pool_type = str(stock_pool_cfg.get("type", "all_market") or "all_market").strip().lower()
+    dynamic_membership = bool(stock_pool_cfg.get("dynamic_membership", False))
+    return pool_type == "index_components" and dynamic_membership
+
+
+def _observation_dates_from_run_window(config: dict[str, Any]) -> list[pd.Timestamp]:
+    start_time, end_time = active_run_window(config)
+    provider = get_data_provider(config)
+    provider.initialize()
+    trading_dates = provider.get_trading_dates(_date_text(start_time), _date_text(end_time))
+    if not trading_dates:
+        return []
+    date_index = pd.Index(pd.to_datetime(trading_dates))
+    return analysis_observation_dates(date_index, config)
+
+
+def _dynamic_index_components_by_observation_date(
+    config: dict[str, Any],
+    observation_dates: list[pd.Timestamp],
+) -> dict[pd.Timestamp, set[str]]:
+    stock_pool_cfg = dict(config.get("stock_pool", {}))
+    index_code = str(stock_pool_cfg.get("index_code", "000300.XSHG") or "000300.XSHG").strip()
+    include_st = bool(stock_pool_cfg.get("include_st", True))
+    include_new_stock = bool(stock_pool_cfg.get("include_new_stock", True))
+    new_stock_days = int(stock_pool_cfg.get("new_stock_days", 60) or 60)
+    date_keys = tuple(pd.Timestamp(item).normalize().strftime("%Y-%m-%d") for item in observation_dates)
+    cache_key = (index_code, date_keys, include_st, include_new_stock, new_stock_days)
+    cached = DYNAMIC_INDEX_COMPONENT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    provider = get_data_provider(config)
+    provider.initialize()
+    component_map: dict[pd.Timestamp, set[str]] = {}
+    latest_snapshot = set(provider.get_index_components(index_code))
+    last_valid_snapshot = set(latest_snapshot)
+    empty_fetch_count = 0
+    for date in observation_dates:
+        normalized_date = pd.Timestamp(date).normalize()
+        codes = provider.get_index_components(index_code, date=_date_text(normalized_date))
+        snapshot = set(codes)
+        if snapshot:
+            last_valid_snapshot = snapshot
+            component_map[normalized_date] = snapshot
+            continue
+        empty_fetch_count += 1
+        if last_valid_snapshot:
+            component_map[normalized_date] = set(last_valid_snapshot)
+        else:
+            component_map[normalized_date] = set(latest_snapshot)
+    component_map = _apply_dynamic_universe_filters(config, component_map)
+    if empty_fetch_count:
+        print(
+            f"动态指数成分股有 {empty_fetch_count} 个观测日返回空集，"
+            "已自动回退为最近可用成分"
+        )
+    DYNAMIC_INDEX_COMPONENT_CACHE[cache_key] = component_map
+    return component_map
+
+
+def _apply_dynamic_universe_filters(
+    config: dict[str, Any],
+    component_map: dict[pd.Timestamp, set[str]],
+) -> dict[pd.Timestamp, set[str]]:
+    stock_pool_cfg = dict(config.get("stock_pool", {}))
+    include_st = bool(stock_pool_cfg.get("include_st", True))
+    include_new_stock = bool(stock_pool_cfg.get("include_new_stock", True))
+    new_stock_days = int(stock_pool_cfg.get("new_stock_days", 60) or 60)
+    if include_st and include_new_stock:
+        return component_map
+    provider = get_data_provider(config)
+    provider.initialize()
+    try:
+        stock_basic = provider._call_pro_api(  # type: ignore[attr-defined]
+            "stock_basic",
+            exchange="",
+            list_status="L",
+            fields="ts_code,name,list_date",
+        )
+    except Exception:
+        return component_map
+    if stock_basic is None or stock_basic.empty:
+        return component_map
+    stock_basic = stock_basic.copy()
+    stock_basic["instrument"] = stock_basic["ts_code"].map(
+        lambda code: code if "." not in str(code) else (
+            f"SH{str(code).split('.')[0]}" if str(code).endswith(".SH") else (
+                f"SZ{str(code).split('.')[0]}" if str(code).endswith(".SZ") else str(code)
+            )
+        )
+    )
+    meta = stock_basic.set_index("instrument")[["name", "list_date"]]
+    filtered_map: dict[pd.Timestamp, set[str]] = {}
+    for date, codes in component_map.items():
+        cutoff = pd.Timestamp(date).normalize()
+        min_listed_date = (cutoff - pd.Timedelta(days=new_stock_days)).strftime("%Y%m%d")
+        filtered_codes: set[str] = set()
+        for code in codes:
+            if code not in meta.index:
+                filtered_codes.add(code)
+                continue
+            name = str(meta.loc[code, "name"])
+            list_date = str(meta.loc[code, "list_date"])
+            if not include_st and "ST" in name.upper():
+                continue
+            if not include_new_stock and list_date and list_date > min_listed_date:
+                continue
+            filtered_codes.add(code)
+        filtered_map[date] = filtered_codes
+    return filtered_map
+
+
+def _membership_mask_for_index(
+    index: pd.MultiIndex,
+    component_map: dict[pd.Timestamp, set[str]],
+) -> pd.Series:
+    datetimes = pd.to_datetime(index.get_level_values("datetime")).normalize()
+    instruments = index.get_level_values("instrument")
+    membership = [
+        instrument in component_map.get(date, set())
+        for instrument, date in zip(instruments, datetimes)
+    ]
+    return pd.Series(membership, index=index, dtype=bool)
+
+
+def build_dynamic_universe_mask(
+    index: pd.MultiIndex,
+    config: dict[str, Any] | None = None,
+) -> pd.Series:
+    cfg = config or env_config()
+    if not _dynamic_index_pool_enabled(cfg):
+        return pd.Series(True, index=index, dtype=bool)
+    observation_dates = analysis_observation_dates(index.get_level_values("datetime"), cfg)
+    if not observation_dates:
+        return pd.Series(False, index=index, dtype=bool)
+    component_map = _dynamic_index_components_by_observation_date(cfg, observation_dates)
+    return _membership_mask_for_index(index, component_map)
+
+
 def list_instruments(config: dict[str, Any] | None = None) -> list[str]:
     cfg = config or env_config()
     
@@ -752,7 +897,16 @@ def load_raw_data(
         # 默认把前复权参考日固定到本次任务的 load_end，避免随运行日期漂移。
         cfg["price_adjust_reference_date"] = end_time
     
-    instruments = list_instruments(cfg)
+    if _dynamic_index_pool_enabled(cfg):
+        observation_dates = _observation_dates_from_run_window(cfg)
+        component_map = _dynamic_index_components_by_observation_date(cfg, observation_dates)
+        instruments = sorted({code for codes in component_map.values() for code in codes})
+        print(
+            f"使用动态股票池: 指数成分股按观测日变化，共 {len(observation_dates)} 个观测日，"
+            f"合并后 {len(instruments)} 只股票"
+        )
+    else:
+        instruments = list_instruments(cfg)
     
     provider = get_data_provider(cfg)
     provider.initialize()
@@ -851,6 +1005,9 @@ def build_label_series(
     observation_index = pd.Index(pd.to_datetime(observation_dates))
     observation_prices = prices.loc[prices.index.get_level_values("datetime").isin(observation_index)]
     period_return = observation_prices.groupby(level="instrument").shift(-1) / observation_prices - 1
+    if _dynamic_index_pool_enabled(cfg):
+        dynamic_mask = build_dynamic_universe_mask(period_return.index, cfg)
+        period_return = period_return.loc[dynamic_mask]
     label = pd.Series(index=prices.index, dtype=float, name=label_name(cfg))
     label.loc[period_return.index] = period_return
     return label.rename(label_name(cfg))
@@ -1535,6 +1692,10 @@ def factor_metrics_from_series(
     )
     observation_mask = merged.index.get_level_values("datetime").isin(observation_dates)
     observation_frame = merged.loc[observation_mask]
+    cfg = analysis_config or analysis_rule_config()
+    if _dynamic_index_pool_enabled(cfg):
+        dynamic_mask = build_dynamic_universe_mask(observation_frame.index, cfg)
+        observation_frame = observation_frame.loc[dynamic_mask]
     if observation_frame.empty:
         return {
             "factor_name": factor_name,

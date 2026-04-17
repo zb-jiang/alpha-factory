@@ -63,6 +63,8 @@ training_workflow:
 stock_pool:
   type: index_components
   index_code: SH000300
+  # true: 按每个观测日动态更新指数成分（更贴近米框口径）
+  dynamic_membership: true
   include_st: false
   include_new_stock: false
   new_stock_days: 60
