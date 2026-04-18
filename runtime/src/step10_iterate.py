@@ -16,7 +16,8 @@ from common import (
     set_runtime_context,
     write_json,
 )
-from step00_clean import clean_outputs
+from step00a_clean import clean_outputs, run as run_step00a
+from step00b_precache_tushare import run as run_step00b
 from step01_init_datasource import run as run_step01
 from step02_build_feature_pool import run as run_step02
 from step03_health_check import run as run_step03
@@ -249,6 +250,8 @@ def run() -> None:
         print("请先将 analysis_rule.yaml 中的 run_mode 修改为 'train'，然后再运行此脚本。")
         print("================================================================")
         return
+    run_step00a()
+    run_step00b()
     windows = build_training_windows(config)
     iterations = int(config.get("iteration_count", 3))
     write_json(OUTPUT_DIR / "backtest" / "training_windows.json", {"windows": windows})
