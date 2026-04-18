@@ -25,7 +25,9 @@ INTERNAL_FIELD_ALIAS: dict[str, str] = {
     # Real VWAP is derived later from amount/volume when needed.
     "vwap": "total_turnover",
     "amount": "total_turnover",
-    "turnover": "turnover_rate",
+    # Native daily `turnover_rate` may be unavailable on some RQ accounts.
+    # `turnover` is derived in `_build_raw_frame` from total_turnover / market_cap.
+    "turnover": "total_turnover",
 }
 INTERNAL_LOOKBACK_DAYS = 80
 BASE_DATA_FIELDS = set(INTERNAL_FIELD_ALIAS.keys()) | {"market_cap", "industry"}
@@ -155,17 +157,17 @@ def active_window(config: dict[str, Any]) -> tuple[pd.Timestamp, pd.Timestamp]:
 
 
 def _rolling_group(series: pd.Series, window: int, method: str) -> pd.Series:
-    grouped = series.groupby(level="instrument").rolling(window=int(window), min_periods=1)
-    result = getattr(grouped, method)().reset_index(level=0, drop=True)
-    return result
+    window = int(window)
+    return series.groupby(level="instrument", group_keys=False).apply(
+        lambda s: getattr(s.rolling(window=window, min_periods=1), method)()
+    )
 
 
 def _rolling_rank(series: pd.Series, window: int) -> pd.Series:
-    return (
-        series.groupby(level="instrument")
-        .rolling(window=window, min_periods=1)
-        .apply(lambda x: pd.Series(x).rank(method="average").iloc[-1], raw=False)
-        .reset_index(level=0, drop=True)
+    return series.groupby(level="instrument", group_keys=False).apply(
+        lambda s: s.rolling(window=window, min_periods=1).apply(
+            lambda x: pd.Series(x).rank(method="average").iloc[-1], raw=False
+        )
     )
 
 
@@ -361,6 +363,25 @@ def _extract_formula_tokens(formula: str) -> set[str]:
 
 
 def _to_frame_date_stock(obj: Any, value_name: str) -> pd.DataFrame:
+    def _is_date_like_index(idx: pd.Index) -> bool:
+        sample = pd.Index(idx[: min(len(idx), 50)])
+        parsed = pd.to_datetime(sample, errors="coerce")
+        return bool(parsed.notna().mean() >= 0.8) if len(sample) else False
+
+    # Unwrap common container payloads from rqdatac (dict/xarray-like wrappers).
+    if isinstance(obj, dict) and obj:
+        # Prefer exact key hit, otherwise first value.
+        if value_name in obj:
+            obj = obj[value_name]
+        else:
+            obj = next(iter(obj.values()))
+
+    if hasattr(obj, "to_pandas") and not isinstance(obj, (pd.Series, pd.DataFrame)):
+        try:
+            obj = obj.to_pandas()
+        except Exception:
+            pass
+
     if isinstance(obj, pd.Series):
         if isinstance(obj.index, pd.MultiIndex):
             names = [str(n).lower() for n in obj.index.names]
@@ -369,10 +390,28 @@ def _to_frame_date_stock(obj: Any, value_name: str) -> pd.DataFrame:
                 id_level = [i for i, n in enumerate(names) if n == "order_book_id"][0]
                 s = obj.reorder_levels([date_level, id_level]).sort_index()
                 return s.unstack(level=1)
+            if obj.index.nlevels == 2:
+                lv0 = obj.index.get_level_values(0)
+                lv1 = obj.index.get_level_values(1)
+                if _is_date_like_index(pd.Index(lv0)) and not _is_date_like_index(pd.Index(lv1)):
+                    return obj.unstack(level=1).sort_index()
+                if _is_date_like_index(pd.Index(lv1)) and not _is_date_like_index(pd.Index(lv0)):
+                    s = obj.reorder_levels([1, 0]).sort_index()
+                    return s.unstack(level=1)
         return obj.to_frame(name=value_name)
 
     if isinstance(obj, pd.DataFrame):
+        # Common case: date index x instrument columns.
         if not isinstance(obj.index, pd.MultiIndex):
+            if isinstance(obj.columns, pd.MultiIndex):
+                col_names = [str(n).lower() for n in obj.columns.names]
+                # Try to select the instrument level if one level is factor-like.
+                if "order_book_id" in col_names:
+                    id_level = [i for i, n in enumerate(col_names) if n == "order_book_id"][0]
+                    if obj.columns.nlevels == 2:
+                        if id_level == 0:
+                            return obj.droplevel(1, axis=1).sort_index()
+                        return obj.droplevel(0, axis=1).sort_index()
             return obj.sort_index()
         names = [str(n).lower() for n in obj.index.names]
         if "order_book_id" in names and ("date" in names or "datetime" in names):
@@ -381,7 +420,27 @@ def _to_frame_date_stock(obj: Any, value_name: str) -> pd.DataFrame:
             s = obj.iloc[:, 0]
             s = s.reorder_levels([date_level, id_level]).sort_index()
             return s.unstack(level=1)
-    raise ValueError(f"Unsupported data shape for {value_name}")
+        # Fallback for unnamed 2-level MultiIndex payloads from some rq.get_factor responses.
+        if obj.index.nlevels == 2:
+            lv0 = obj.index.get_level_values(0)
+            lv1 = obj.index.get_level_values(1)
+            if _is_date_like_index(pd.Index(lv0)) and not _is_date_like_index(pd.Index(lv1)):
+                s = obj.iloc[:, 0]
+                return s.unstack(level=1).sort_index()
+            if _is_date_like_index(pd.Index(lv1)) and not _is_date_like_index(pd.Index(lv0)):
+                s = obj.iloc[:, 0]
+                s = s.reorder_levels([1, 0]).sort_index()
+                return s.unstack(level=1)
+    # Last-resort attempt for custom objects exposing `.to_frame()`.
+    if hasattr(obj, "to_frame"):
+        try:
+            casted = obj.to_frame()
+            if isinstance(casted, pd.DataFrame):
+                return _to_frame_date_stock(casted, value_name)
+        except Exception:
+            pass
+
+    raise ValueError(f"Unsupported data shape for {value_name}: type={type(obj)}")
 
 
 def _get_price_field(order_book_ids: list[str], start_date: str, end_date: str, field_name: str, adjust_type: str) -> pd.DataFrame:
@@ -417,25 +476,28 @@ def _get_price_field(order_book_ids: list[str], start_date: str, end_date: str, 
     return frame.sort_index()
 
 
-def _resolve_vwap_mode(config: dict[str, Any] | None) -> str:
-    if not config:
-        return "rq"
-    mode = str(config.get("vwap_mode", "rq")).strip().lower()
-    supported = {"rq", "tushare_scaled"}
-    if mode not in supported:
-        raise ValueError(f"Unsupported vwap_mode: {mode}. choose one of: {sorted(supported)}")
-    return mode
+def _derive_vwap(amount: pd.DataFrame, volume: pd.DataFrame) -> pd.DataFrame:
+    safe_volume = volume.apply(pd.to_numeric, errors="coerce")
+    # Fixed RQ logic: total_turnover / volume
+    return amount / (safe_volume + 1e-8)
 
 
-def _derive_vwap(amount: pd.DataFrame, volume: pd.DataFrame, mode: str) -> pd.DataFrame:
-    safe_volume = volume.replace(0, np.nan)
-    if mode == "rq":
-        # RQ default: total_turnover / volume
-        return amount / safe_volume
-    if mode == "tushare_scaled":
-        # Align to local Tushare-style scaling logic: amount*1000/(vol*100)
-        return amount * 1000.0 / (safe_volume * 100.0 + 1e-8)
-    raise ValueError(f"Unsupported vwap_mode: {mode}")
+def _get_adjust_multiplier(
+    order_book_ids: list[str],
+    start_date: str,
+    end_date: str,
+    adjust_type: str,
+) -> pd.DataFrame:
+    mode = str(adjust_type or "none").strip().lower()
+    if mode not in {"pre", "post"}:
+        base_close = _get_price_field(order_book_ids, start_date, end_date, "close", "none")
+        return pd.DataFrame(1.0, index=base_close.index, columns=base_close.columns)
+
+    close_raw = _get_price_field(order_book_ids, start_date, end_date, "close", "none")
+    close_adj = _get_price_field(order_book_ids, start_date, end_date, "close", mode)
+    multiplier = close_adj.div(close_raw.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
+    # Align with local logic: missing adjustment factors are filled within each instrument timeline.
+    return multiplier.ffill().bfill()
 
 
 def _get_vwap_field(
@@ -443,14 +505,14 @@ def _get_vwap_field(
     start_date: str,
     end_date: str,
     adjust_type: str,
-    config: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
     # Some RQ accounts do not expose native `vwap` in daily fields.
-    # Fallback to derived VWAP from total_turnover / volume.
-    amount = _get_price_field(order_book_ids, start_date, end_date, "total_turnover", adjust_type)
-    volume = _get_price_field(order_book_ids, start_date, end_date, "volume", adjust_type)
-    mode = _resolve_vwap_mode(config)
-    vwap = _derive_vwap(amount, volume, mode)
+    # Fallback to derived VWAP from raw total_turnover / volume, then apply explicit adjustment.
+    amount = _get_price_field(order_book_ids, start_date, end_date, "total_turnover", "none")
+    volume = _get_price_field(order_book_ids, start_date, end_date, "volume", "none")
+    vwap = _derive_vwap(amount, volume)
+    multiplier = _get_adjust_multiplier(order_book_ids, start_date, end_date, adjust_type)
+    vwap = vwap * multiplier
     return vwap.sort_index()
 
 
@@ -464,6 +526,24 @@ def _get_market_cap(order_book_ids: list[str], start_date: str, end_date: str) -
         except Exception as exc:  # pragma: no cover
             last_error = exc
     raise RuntimeError("Cannot fetch market_cap from rqdatac.get_factor") from last_error
+
+
+def _get_turnover_field(order_book_ids: list[str], start_date: str, end_date: str) -> pd.DataFrame:
+    # Prefer native turnover factor to align with local `turnover_rate` semantics.
+    factor_candidates = ["turnover_rate", "free_turnover_rate", "turnover"]
+    for factor_name in factor_candidates:
+        try:
+            payload = rq.get_factor(order_book_ids, factor_name, start_date, end_date)
+            frame = _to_frame_date_stock(payload, factor_name)
+            if not frame.empty:
+                return frame.sort_index()
+        except Exception:
+            continue
+
+    # Fallback for accounts without turnover factors: amount / market_cap * 100.
+    amount = _get_price_field(order_book_ids, start_date, end_date, "total_turnover", "none")
+    cap = _get_market_cap(order_book_ids, start_date, end_date)
+    return amount.div(cap.replace(0, np.nan)).mul(100.0).sort_index()
 
 
 def _get_industry_map(order_book_ids: list[str], date: pd.Timestamp) -> dict[str, str]:
@@ -582,7 +662,12 @@ def factor_metrics_from_series(
     config: dict[str, Any],
     component_map: dict[pd.Timestamp, set[str]],
 ) -> dict[str, Any]:
+    start_date, end_date = active_window(config)
     merged = pd.concat([factor_series.rename("score"), label_series.rename("label")], axis=1)
+    window_mask = (merged.index.get_level_values("datetime") >= start_date) & (
+        merged.index.get_level_values("datetime") <= end_date
+    )
+    merged = merged.loc[window_mask]
     if merged.empty:
         return {
             "factor_name": factor_name,
@@ -641,17 +726,93 @@ def evaluate_formula(formula: str, data_frame: pd.DataFrame) -> pd.Series:
 
 
 def _normalize_pct_change_expr(expr: str) -> str:
-    pattern = re.compile(r"\.pct_change\(([^)]*)\)")
+    # Convert pandas method-chain calls into operator-form calls so all
+    # time-series operations use instrument-wise grouping in OPERATOR_ENV.
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError:
+        return expr
 
-    def _replace(match: re.Match[str]) -> str:
-        args = match.group(1).strip()
-        if "fill_method" in args:
-            return match.group(0)
-        if not args:
-            return ".pct_change(fill_method=None)"
-        return f".pct_change({args}, fill_method=None)"
+    class _PctChangeRewriter(ast.NodeTransformer):
+        def visit_Call(self, node: ast.Call) -> ast.AST:
+            node = self.generic_visit(node)
+            if not isinstance(node.func, ast.Attribute):
+                return node
+            attr = node.func.attr
 
-    return pattern.sub(_replace, expr)
+            if attr == "pct_change":
+                period_arg: ast.AST = ast.Constant(value=1)
+                if node.args:
+                    period_arg = node.args[0]
+                else:
+                    for kw in node.keywords:
+                        if kw.arg == "periods":
+                            period_arg = kw.value
+                            break
+                return ast.copy_location(
+                    ast.Call(
+                        func=ast.Name(id="pct_change", ctx=ast.Load()),
+                        args=[node.func.value, period_arg],
+                        keywords=[],
+                    ),
+                    node,
+                )
+
+            if attr == "shift":
+                period_arg: ast.AST = ast.Constant(value=1)
+                if node.args:
+                    period_arg = node.args[0]
+                else:
+                    for kw in node.keywords:
+                        if kw.arg == "periods":
+                            period_arg = kw.value
+                            break
+                return ast.copy_location(
+                    ast.Call(
+                        func=ast.Name(id="delay", ctx=ast.Load()),
+                        args=[node.func.value, period_arg],
+                        keywords=[],
+                    ),
+                    node,
+                )
+
+            agg_to_op = {
+                "mean": "rolling_mean",
+                "std": "rolling_std",
+                "sum": "rolling_sum",
+                "max": "rolling_max",
+                "min": "rolling_min",
+            }
+            op_name = agg_to_op.get(attr)
+            if op_name and isinstance(node.func.value, ast.Call) and isinstance(node.func.value.func, ast.Attribute):
+                rolling_call = node.func.value
+                if rolling_call.func.attr == "rolling":
+                    series_expr = rolling_call.func.value
+                    window_arg: ast.AST | None = None
+                    if rolling_call.args:
+                        window_arg = rolling_call.args[0]
+                    else:
+                        for kw in rolling_call.keywords:
+                            if kw.arg == "window":
+                                window_arg = kw.value
+                                break
+                    if window_arg is not None:
+                        return ast.copy_location(
+                            ast.Call(
+                                func=ast.Name(id=op_name, ctx=ast.Load()),
+                                args=[series_expr, window_arg],
+                                keywords=[],
+                            ),
+                            node,
+                        )
+            return node
+
+    rewritten = _PctChangeRewriter().visit(tree)
+    ast.fix_missing_locations(rewritten)
+    try:
+        return ast.unparse(rewritten)
+    except Exception:
+        return expr
 
 
 def _load_feature_formula_map() -> dict[str, str]:
@@ -754,10 +915,18 @@ def _build_raw_frame(
 
     field_alias = dict(INTERNAL_FIELD_ALIAS)
     adjust_type = str(config.get("price_adjust", "none")).strip().lower()
-    vwap_mode = _resolve_vwap_mode(config)
+    non_adjust_fields = {"amount", "volume", "turnover"}
     lookback = int(INTERNAL_LOOKBACK_DAYS)
+    rebalance = str(config.get("rebalance", "weekly")).strip().lower()
+    interval = max(int(config.get("rebalance_interval", 1) or 1), 1)
+    if rebalance == "daily":
+        forward_days = interval
+    elif rebalance == "monthly":
+        forward_days = 22 * interval
+    else:
+        forward_days = 5 * interval
     fetch_start = (start_date - pd.Timedelta(days=lookback)).strftime("%Y-%m-%d")
-    fetch_end = end_date.strftime("%Y-%m-%d")
+    fetch_end = (end_date + pd.offsets.BDay(int(forward_days) + 5)).strftime("%Y-%m-%d")
 
     raw_cols: dict[str, pd.Series] = {}
     for local_name in sorted(fields):
@@ -765,8 +934,12 @@ def _build_raw_frame(
             cap = _get_market_cap(instruments, fetch_start, fetch_end)
             raw_cols[local_name] = cap.stack(dropna=False).rename(local_name)
             continue
+        if local_name == "turnover":
+            turnover = _get_turnover_field(instruments, fetch_start, fetch_end)
+            raw_cols[local_name] = turnover.stack(dropna=False).rename(local_name)
+            continue
         if local_name == "vwap":
-            vwap = _get_vwap_field(instruments, fetch_start, fetch_end, adjust_type, config)
+            vwap = _get_vwap_field(instruments, fetch_start, fetch_end, adjust_type)
             raw_cols[local_name] = vwap.stack(dropna=False).rename(local_name)
             continue
         if local_name == "industry":
@@ -782,21 +955,20 @@ def _build_raw_frame(
 
         rq_field = field_alias.get(local_name, local_name)
         if str(rq_field).strip().lower() == "vwap":
-            vwap = _get_vwap_field(instruments, fetch_start, fetch_end, adjust_type, config)
+            vwap = _get_vwap_field(instruments, fetch_start, fetch_end, adjust_type)
             raw_cols[local_name] = vwap.stack(dropna=False).rename(local_name)
             continue
-        price_frame = _get_price_field(instruments, fetch_start, fetch_end, rq_field, adjust_type)
+        field_adjust_type = "none" if local_name in non_adjust_fields else adjust_type
+        price_frame = _get_price_field(instruments, fetch_start, fetch_end, rq_field, field_adjust_type)
         raw_cols[local_name] = price_frame.stack(dropna=False).rename(local_name)
 
     raw_frame = pd.concat(raw_cols.values(), axis=1)
     raw_frame.index = raw_frame.index.set_names(["datetime", "instrument"])
     raw_frame = raw_frame.sort_index()
     if needs_vwap:
-        raw_frame["vwap"] = _derive_vwap(raw_frame["amount"], raw_frame["volume"], vwap_mode)
-    clip_mask = (raw_frame.index.get_level_values("datetime") >= start_date) & (
-        raw_frame.index.get_level_values("datetime") <= end_date
-    )
-    return raw_frame.loc[clip_mask]
+        vwap = _get_vwap_field(instruments, fetch_start, fetch_end, adjust_type)
+        raw_frame["vwap"] = vwap.stack(dropna=False).reindex(raw_frame.index)
+    return raw_frame
 
 
 def run_validation(
@@ -825,7 +997,6 @@ def run_validation(
         raise ValueError("formula is required. Please pass the factor formula explicitly.")
     use_formula = _expand_formula_dependencies(str(formula), feature_map)
     raw_frame = _build_raw_frame(config, use_formula, start_date, end_date, instruments)
-    raw_frame = raw_frame.loc[_build_membership_mask(raw_frame.index, component_map)]
     raw_frame = raw_frame.sort_index()
 
     factor_series = evaluate_formula(use_formula, raw_frame).rename(factor_name)

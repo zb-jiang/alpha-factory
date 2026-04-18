@@ -1674,7 +1674,11 @@ def factor_metrics_from_series(
     label_series: pd.Series,
     analysis_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    cfg = analysis_config or analysis_rule_config()
     merged = pd.concat([factor_series.rename("score"), label_series.rename("label")], axis=1)
+    # Keep metric calculation strictly inside active run window.
+    # This avoids warmup/forward-buffer labels diluting coverage statistics.
+    merged = clip_to_active_window(merged, cfg)
     if merged.empty:
         return {
             "factor_name": factor_name,
@@ -1692,7 +1696,6 @@ def factor_metrics_from_series(
     )
     observation_mask = merged.index.get_level_values("datetime").isin(observation_dates)
     observation_frame = merged.loc[observation_mask]
-    cfg = analysis_config or analysis_rule_config()
     if _dynamic_index_pool_enabled(cfg):
         dynamic_mask = build_dynamic_universe_mask(observation_frame.index, cfg)
         observation_frame = observation_frame.loc[dynamic_mask]

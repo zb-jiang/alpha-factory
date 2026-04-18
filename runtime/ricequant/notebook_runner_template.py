@@ -10,7 +10,13 @@ Usage:
 import pandas as pd
 import rqdatac as rq
 
-from rq_factor_validator import run_validation
+from rq_factor_validator import (
+    BASE_DATA_FIELDS,
+    _expand_formula_dependencies,
+    _extract_formula_tokens,
+    _load_feature_formula_map,
+    run_validation,
+)
 
 
 # -----------------------------
@@ -70,7 +76,6 @@ CONFIG = {
         "custom_instruments": [],
     },
     "price_adjust": "pre",  # none | pre | post
-    "vwap_mode": "rq",  # rq | tushare_scaled
     "rebalance": "weekly",  # daily | weekly | monthly
     "rebalance_interval": 1,
     "rebalance_anchor": "first_trading_day_of_week",
@@ -105,15 +110,166 @@ FACTORS = [
     ("volume_volatility_penalty_v1", "ret_20d / (1 + volume_vol_20d)"),
 ]
 
+# -----------------------------
+# 2.5) Raw-field availability guard
+# -----------------------------
+# Probe local raw fields against current RQ account capability and
+# block factors that depend on unsupported raw fields.
+ENABLE_RAW_FIELD_GUARD = True
+_FEATURE_FORMULA_MAP = _load_feature_formula_map()
+_RAW_FIELDS = sorted(set(BASE_DATA_FIELDS))
+
+
+def _pick_probe_instrument(config: dict) -> str:
+    stock_pool = config.get("stock_pool", {})
+    custom = stock_pool.get("custom_instruments") or []
+    if custom:
+        return str(custom[0])
+    index_code = stock_pool.get("index_code", "SH000300")
+    probe_date = pd.Timestamp(config.get("end_date", "2025-12-31")).strftime("%Y-%m-%d")
+    try:
+        members = rq.index_components(index_code, date=probe_date)
+        if members:
+            return str(members[0])
+    except Exception:
+        pass
+    return "000001.XSHE"
+
+
+def _can_get_price_field(order_book_id: str, date_str: str, field: str) -> tuple[bool, str]:
+    try:
+        payload = rq.get_price(
+            [order_book_id],
+            start_date=date_str,
+            end_date=date_str,
+            frequency="1d",
+            fields=[field],
+            expect_df=True,
+        )
+    except Exception as exc:
+        return False, f"get_price({field}) failed: {exc}"
+    if payload is None:
+        return False, f"get_price({field}) returned None"
+    return True, "ok"
+
+
+def _can_get_factor(order_book_id: str, start_date: str, end_date: str, factor_name: str) -> tuple[bool, str]:
+    try:
+        payload = rq.get_factor([order_book_id], factor_name, start_date, end_date)
+    except Exception as exc:
+        return False, f"get_factor({factor_name}) failed: {exc}"
+    if payload is None:
+        return False, f"get_factor({factor_name}) returned None"
+    return True, "ok"
+
+
+def _probe_raw_field_support(config: dict) -> dict[str, dict[str, str]]:
+    probe_id = _pick_probe_instrument(config)
+    probe_end = pd.Timestamp(config.get("end_date", "2025-12-31"))
+    probe_start = (probe_end - pd.Timedelta(days=5)).strftime("%Y-%m-%d")
+    probe_date = probe_end.strftime("%Y-%m-%d")
+
+    support: dict[str, dict[str, str]] = {}
+
+    for f in ["open", "high", "low", "close", "volume"]:
+        ok, reason = _can_get_price_field(probe_id, probe_date, f)
+        support[f] = {"status": "supported" if ok else "unsupported", "reason": reason}
+
+    ok_amount, reason_amount = _can_get_price_field(probe_id, probe_date, "total_turnover")
+    support["amount"] = {"status": "supported" if ok_amount else "unsupported", "reason": reason_amount}
+
+    # Local VWAP is derived from amount/volume.
+    if support["amount"]["status"] == "supported" and support["volume"]["status"] == "supported":
+        support["vwap"] = {"status": "supported", "reason": "derived from total_turnover and volume"}
+    else:
+        support["vwap"] = {"status": "unsupported", "reason": "requires total_turnover and volume"}
+
+    turnover_candidates = ["turnover_rate", "free_turnover_rate", "turnover"]
+    turnover_reasons = []
+    turnover_ok = False
+    for name in turnover_candidates:
+        ok, reason = _can_get_factor(probe_id, probe_start, probe_date, name)
+        if ok:
+            turnover_ok = True
+            turnover_reasons.append(f"{name}: ok")
+            break
+        turnover_reasons.append(f"{name}: {reason}")
+    support["turnover"] = {
+        "status": "supported" if turnover_ok else "unsupported",
+        "reason": "; ".join(turnover_reasons),
+    }
+
+    market_cap_candidates = ["market_cap", "a_share_market_val", "total_market_cap"]
+    market_cap_reasons = []
+    market_cap_ok = False
+    for name in market_cap_candidates:
+        ok, reason = _can_get_factor(probe_id, probe_start, probe_date, name)
+        if ok:
+            market_cap_ok = True
+            market_cap_reasons.append(f"{name}: ok")
+            break
+        market_cap_reasons.append(f"{name}: {reason}")
+    support["market_cap"] = {
+        "status": "supported" if market_cap_ok else "unsupported",
+        "reason": "; ".join(market_cap_reasons),
+    }
+
+    # Industry via shenwan API.
+    if hasattr(rq, "shenwan_instrument_industry"):
+        try:
+            payload = rq.shenwan_instrument_industry([probe_id], date=probe_date)
+            if payload is None:
+                support["industry"] = {"status": "unsupported", "reason": "shenwan_instrument_industry returned None"}
+            else:
+                support["industry"] = {"status": "supported", "reason": "ok"}
+        except Exception as exc:
+            support["industry"] = {"status": "unsupported", "reason": f"shenwan_instrument_industry failed: {exc}"}
+    else:
+        support["industry"] = {"status": "unsupported", "reason": "rq has no shenwan_instrument_industry"}
+
+    return support
+
+
+def _collect_raw_dependencies(formula: str) -> tuple[str, list[str]]:
+    try:
+        expanded = _expand_formula_dependencies(formula, _FEATURE_FORMULA_MAP)
+    except Exception:
+        expanded = formula
+    tokens = sorted(_extract_formula_tokens(expanded))
+    raw_tokens = sorted([t for t in tokens if t in _RAW_FIELDS])
+    return expanded, raw_tokens
+
 
 # -----------------------------
 # 3) Run (batch)
 # -----------------------------
 results: list[tuple[str, object]] = []
 failed: list[tuple[str, str]] = []
+raw_field_support = _probe_raw_field_support(CONFIG) if ENABLE_RAW_FIELD_GUARD else {}
+
+if ENABLE_RAW_FIELD_GUARD:
+    print("\n=== Raw Field Availability (RQ) ===")
+    support_rows = []
+    for f in _RAW_FIELDS:
+        meta = raw_field_support.get(f, {"status": "unsupported", "reason": "not probed"})
+        support_rows.append({"field": f, "status": meta["status"], "reason": meta["reason"]})
+    print(pd.DataFrame(support_rows))
 
 for factor_name, factor_formula in FACTORS:
     print(f"\n[RUN] {factor_name}")
+    if ENABLE_RAW_FIELD_GUARD:
+        _, raw_tokens = _collect_raw_dependencies(str(factor_formula))
+        unsupported = [f for f in raw_tokens if raw_field_support.get(f, {}).get("status") != "supported"]
+        if unsupported:
+            detail = " | ".join([f"{f}: {raw_field_support[f]['reason']}" for f in unsupported])
+            msg = (
+                "Factor is blocked because it depends on unsupported raw fields in current RQ environment. "
+                f"Detected raw tokens: {', '.join(raw_tokens) if raw_tokens else 'None'}. "
+                f"Unsupported details: {detail}"
+            )
+            failed.append((factor_name, msg))
+            print(f"[ERR] {factor_name}: {msg}")
+            continue
     try:
         result = run_validation(
             factor_name=factor_name,

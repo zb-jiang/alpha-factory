@@ -571,8 +571,14 @@ class TushareProvider(BaseDataProvider):
             or (isinstance(field, str) and field.startswith("$") and field[1:] in base_price_fields)
             for field in requested_fields
         )
+        has_vwap_fields = any(
+            (isinstance(field, str) and field == "vwap")
+            or (isinstance(field, str) and field.startswith("$") and field[1:] == "vwap")
+            for field in requested_fields
+        )
         need_factor = 'factor' in requested_fields or '$factor' in requested_fields
-        need_adjust = price_adjust in {"pre", "post"} and has_price_fields
+        # Keep VWAP on the same adjustment basis as close/open/high/low when requested.
+        need_adjust = price_adjust in {"pre", "post"} and (has_price_fields or has_vwap_fields)
         need_adj_factor = need_factor or need_adjust
         
         self._ensure_data_cached('daily', instruments, start_date.replace('-', ''), end_date.replace('-', ''))
@@ -593,6 +599,7 @@ class TushareProvider(BaseDataProvider):
                     daily_df = pd.merge(daily_df, adj_df[['trade_date', 'adj_factor']], on='trade_date', how='left')
                 else:
                     daily_df['adj_factor'] = 1.0
+            vwap_adjust_multiplier: pd.Series | None = None
             if need_adjust:
                 daily_df = daily_df.sort_values("trade_date")
                 trade_dates = pd.to_datetime(daily_df["trade_date"])
@@ -611,9 +618,10 @@ class TushareProvider(BaseDataProvider):
                 else:
                     ref_factor = adjust_series.iloc[0]
                 if pd.notna(ref_factor) and float(ref_factor) != 0.0:
+                    vwap_adjust_multiplier = adjust_series / float(ref_factor)
                     for col in base_price_fields:
                         if col in daily_df.columns:
-                            daily_df[col] = pd.to_numeric(daily_df[col], errors="coerce") * adjust_series / float(ref_factor)
+                            daily_df[col] = pd.to_numeric(daily_df[col], errors="coerce") * vwap_adjust_multiplier
                     
             daily_df = daily_df.rename(columns={'trade_date': 'datetime'})
             daily_df['datetime'] = pd.to_datetime(daily_df['datetime'])
@@ -621,6 +629,8 @@ class TushareProvider(BaseDataProvider):
             
             if 'vwap' in requested_fields or '$vwap' in requested_fields:
                 daily_df['vwap'] = daily_df['amount'] * 1000 / (daily_df['vol'] * 100 + 1e-8)
+                if vwap_adjust_multiplier is not None:
+                    daily_df['vwap'] = pd.to_numeric(daily_df['vwap'], errors="coerce") * vwap_adjust_multiplier
                 
             rename_dict = {k: v for k, v in field_mapping.items()}
             if need_factor:

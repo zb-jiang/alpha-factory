@@ -12,7 +12,6 @@ raw_fields:
   - turnover  # 换手率，来自 Tushare daily_basic.turnover_rate，可用于衡量筹码交换速度
   - market_cap  # 总市值，来自 Tushare daily_basic.total_mv，可用于容量与风格约束
   - industry  # 行业分类，来自 Tushare stock_basic.industry，可用于行业分组或中性化处理
-  - factor  # 复权因子，用于价格前复权/后复权处理，保证历史连续性
 
 # 基础特征 (Features): 相当于“切好、腌制好的半成品”，是基于原始数据经过简单计算得出的指标
 base_features:

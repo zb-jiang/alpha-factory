@@ -44,7 +44,7 @@ def _run_with_tushare(config: dict) -> None:
     try:
         preview = provider.get_price_data(
             instruments=[sample_instrument],
-            fields=["$open", "$close", "$high", "$low", "$volume", "$factor"],
+            fields=["$open", "$close", "$high", "$low", "$volume"],
             start_date=start_date,
             end_date=end_date,
         )
