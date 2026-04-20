@@ -24,6 +24,7 @@ class FactorCandidate(BaseModel):
     direction: str
     reason: str
     risk: str
+    expected_failure_regime: str = ""
     backtest_rule: Dict[str, Any]
 
 

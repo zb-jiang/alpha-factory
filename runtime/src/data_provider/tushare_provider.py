@@ -23,8 +23,9 @@ class TushareProvider(BaseDataProvider):
     文档: https://tushare.pro/document/2
     """
 
-    VWAP_AMOUNT_SCALE = 1000.0
-    VWAP_VOLUME_SCALE = 100.0
+    # Internal units are normalized to amount=RMB, volume=shares.
+    VWAP_AMOUNT_SCALE = 1.0
+    VWAP_VOLUME_SCALE = 1.0
     
     # 字段映射：Qlib格式 -> Tushare格式
     FIELD_MAP = {
@@ -241,6 +242,7 @@ class TushareProvider(BaseDataProvider):
             return
         print(f"  从 Tushare 获取缺失的 {api_name} 数据 ({overall_start} 至 {overall_end}), 涉及 {len(missing_tasks)} 只股票...")
         fetched_count = 0
+        partial_tail_count = 0
         missing_codes = list(missing_tasks.keys())
         total = len(missing_codes)
         for i, ts_code in enumerate(missing_codes, start=1):
@@ -258,7 +260,20 @@ class TushareProvider(BaseDataProvider):
 
             if not df.empty:
                 self._append_to_parquet(api_name, ts_code, df)
-                self._add_fetched_range(api_name, ts_code, overall_start, overall_end)
+                # IMPORTANT: only mark the actually returned date span as fetched.
+                # Some upstream responses may stop before requested end_date.
+                if "trade_date" in df.columns:
+                    trade_dates = pd.to_datetime(df["trade_date"], errors="coerce").dropna()
+                    if not trade_dates.empty:
+                        actual_start = trade_dates.min().strftime("%Y%m%d")
+                        actual_end = trade_dates.max().strftime("%Y%m%d")
+                        self._add_fetched_range(api_name, ts_code, actual_start, actual_end)
+                        if actual_end < end_date:
+                            partial_tail_count += 1
+                    else:
+                        self._add_fetched_range(api_name, ts_code, overall_start, overall_end)
+                else:
+                    self._add_fetched_range(api_name, ts_code, overall_start, overall_end)
                 fetched_count += 1
 
             if i % 50 == 0 or i == total:
@@ -266,6 +281,11 @@ class TushareProvider(BaseDataProvider):
 
         if fetched_count < total:
             print(f"  警告: {api_name} 仅成功更新 {fetched_count}/{total} 只股票缓存，未成功部分将在后续请求继续补拉")
+        if partial_tail_count > 0:
+            print(
+                f"  提示: {api_name} 有 {partial_tail_count} 只股票返回数据未覆盖请求末日 {end_date}，"
+                "这些股票会在后续请求中继续尝试补拉"
+            )
         self._save_cache_meta()
 
     def _wait_for_request_slot(self) -> None:
@@ -626,9 +646,20 @@ class TushareProvider(BaseDataProvider):
             daily_df = daily_df.rename(columns={'trade_date': 'datetime'})
             daily_df['datetime'] = pd.to_datetime(daily_df['datetime'])
             daily_df['instrument'] = qlib_code
+            if "vol" in daily_df.columns:
+                # Tushare daily.vol is in lots (100 shares). Normalize to shares.
+                daily_df["vol"] = pd.to_numeric(daily_df["vol"], errors="coerce") * 100.0
+            if "amount" in daily_df.columns:
+                # Tushare daily.amount is in thousand RMB. Normalize to RMB.
+                daily_df["amount"] = pd.to_numeric(daily_df["amount"], errors="coerce") * 1000.0
             
             if 'vwap' in requested_fields or '$vwap' in requested_fields:
-                daily_df['vwap'] = daily_df['amount'] * 1000 / (daily_df['vol'] * 100 + 1e-8)
+                safe_volume = pd.to_numeric(daily_df["vol"], errors="coerce").where(lambda s: s > 0)
+                daily_df["vwap"] = (
+                    pd.to_numeric(daily_df["amount"], errors="coerce")
+                    .div(safe_volume)
+                    .replace([np.inf, -np.inf], np.nan)
+                )
                 if vwap_adjust_multiplier is not None:
                     daily_df['vwap'] = pd.to_numeric(daily_df['vwap'], errors="coerce") * vwap_adjust_multiplier
                 

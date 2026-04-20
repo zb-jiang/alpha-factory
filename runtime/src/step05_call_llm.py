@@ -22,6 +22,9 @@ def build_messages() -> list[dict[str, str]]:
     feature_cfg = feature_pool_config()
     backtest_rule = backtest_rule_config()
     summary = read_json(OUTPUT_DIR / "health" / "llm_summary.json")
+    market_context_path = OUTPUT_DIR / "health" / "market_context.json"
+    market_context = read_json(market_context_path) if market_context_path.exists() else summary.get("market_context", {})
+    train_context = market_context.get("train_context", market_context)
     workflow_state = dict(config.get("workflow_state", {}))
     label_column = label_name(config)
     label_spec = label_description(config)
@@ -80,6 +83,11 @@ def build_messages() -> list[dict[str, str]]:
 以下是系统对当前可用特征在历史数据上的表现总结（llm_summary.json）：
 {json.dumps(summary, ensure_ascii=False, indent=2)}
 
+【市场环境（必须使用）】
+以下是当前的市场状态描述：
+{json.dumps(train_context, ensure_ascii=False, indent=2)}
+请你严格基于上述市场状态描述来设计该市场环境下能够获得高收益标签的的因子，并在风险说明中（expected_failure_regime）明确指出该因子最可能失效的市场环境。
+
 【挖掘指南】
 - top_features：与目标相关性最强的特征，可作为构建因子的核心基石。
 - weak_features：单看相关性极弱，但可能在组合中作为惩罚项或分母（如控制市值、控制换手率）。
@@ -87,6 +95,8 @@ def build_messages() -> list[dict[str, str]]:
 - unstable_features：历史表现不稳定的特征。使用时需极其谨慎，或者配以强力的信号过滤。
 - previous_round_top_factors（若有）：上一轮迭代中回测表现最好的因子。你可以参考它们的成功逻辑，或者寻找与它们截然不同的正交逻辑以丰富策略库。
 - previous_round_skipped_factors（若有）：上一轮由于预测能力弱（IC低）、稳定性差（ICIR低）或方向胜率不足而被自动淘汰的因子。请务必分析它们的失败原因（如逻辑过度拟合、使用了无意义的高波动特征等），并确保本轮不要生成类似或雷同的因子。
+- train_context.summary_text：当前市场状态自然语言摘要，可用于确定本轮主攻逻辑（趋势/反转、进攻/防守、风格偏向）。
+- train_context.labels：6个离散当前市场环境标签，含义分别是 trend=方向状态（上行/震荡/下行）、volatility=波动水平（高/中/低）、liquidity=成交活跃度（高/中/低）、dispersion=个股分化强弱（高/中/低）、breadth=上涨覆盖面（普涨/分化/普跌）、style=大小盘风格（大盘占优/小盘占优）；用于给每个因子匹配“适用环境”与“失效环境”。
 - 优先生成“短公式、少特征、少层级、少重复加工”的因子。宁可简单清晰，也不要为了复杂而复杂。
 - 如果两个特征高度相似，不要用多个近似算子反复包装同一信号；优先通过差值、比值、分母惩罚等方式提取增量信息。
 
@@ -101,6 +111,7 @@ def build_messages() -> list[dict[str, str]]:
       "direction": "枚举值：'higher_better'(因子值越大越看多) 或 'lower_better'(因子值越小越看多)。这是你对因子经济含义的原始方向假设，系统后续会将其记录为 llm_direction，并再根据样本内数据计算 empirical_direction",
       "reason": "字符串：用中文简述该因子的金融学逻辑或设计意图（例如：'结合了短期动量和成交量放大的共振，同时剔除高波动率股票的风险'）",
       "risk": "字符串：用中文简述该因子在什么市场环境下可能失效（例如：'在市场风格急剧切换或低流动性环境下容易发生回撤'）",
+      "expected_failure_regime": "字符串：必须明确写出该因子最可能失效的市场状态（例如：'高波动单边逼空行情'、'极端缩量普跌且离散度很低的环境'）",
       "backtest_rule": {json.dumps(backtest_rule, ensure_ascii=False)}
     }}
   ]

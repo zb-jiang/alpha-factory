@@ -18,12 +18,13 @@ CONFIG_DIR = RUNTIME_ROOT / "config"
 DATA_DIR = RUNTIME_ROOT / "data"
 OUTPUT_DIR = RUNTIME_ROOT / "outputs"
 SRC_DIR = RUNTIME_ROOT / "src"
+MARKET_CONTEXT_CONFIG_PATH = CONFIG_DIR / "market_context.yaml"
 RUNTIME_CONTEXT_PATH = OUTPUT_DIR / "_runtime" / "active_context.json"
 OUTPUT_ARTIFACTS = [
-    Path("health") / "sample_preview.csv",
     Path("health") / "feature_stats.csv",
     Path("health") / "feature_corr.csv",
     Path("health") / "llm_summary.json",
+    Path("health") / "market_context.json",
     Path("llm") / "raw_response.json",
     Path("llm") / "factors_validated.json",
     Path("llm") / "factors_rejected.json",
@@ -80,6 +81,7 @@ CONFIG_OWNERSHIP: dict[str, set[str]] = {
         "rebalance_anchor",
         "label",
         "preprocess",
+        "min_valid_ratio_per_observation",
     },
     "backtest_rule": {
         "buy_top_n",
@@ -435,6 +437,12 @@ def analysis_profile(config: dict[str, Any] | None = None) -> str:
 
 def feature_pool_config() -> dict[str, Any]:
     return load_yaml_file(CONFIG_DIR / "feature_pool.yaml")
+
+
+def market_context_config() -> dict[str, Any]:
+    if not MARKET_CONTEXT_CONFIG_PATH.exists():
+        return {}
+    return load_yaml_file(MARKET_CONTEXT_CONFIG_PATH)
 
 
 def backtest_rule_config() -> dict[str, Any]:
@@ -1710,6 +1718,33 @@ def factor_metrics_from_series(
             "coverage": 0.0,
             "observation_count": 0,
         }
+    min_valid_ratio = float(cfg.get("min_valid_ratio_per_observation", 0.0) or 0.0)
+    if min_valid_ratio > 0:
+        valid_stats = (
+            observation_frame.assign(_valid_pair=observation_frame[["score", "label"]].notna().all(axis=1))
+            .groupby(level="datetime")
+            .agg(
+                n_valid=("_valid_pair", "sum"),
+                n_pool=("_valid_pair", "size"),
+            )
+        )
+        keep_dates = valid_stats.loc[
+            valid_stats["n_valid"] >= valid_stats["n_pool"] * min_valid_ratio
+        ].index
+        observation_frame = observation_frame.loc[
+            observation_frame.index.get_level_values("datetime").isin(keep_dates)
+        ]
+        if observation_frame.empty:
+            return {
+                "factor_name": factor_name,
+                "mean_ic": 0.0,
+                "mean_rank_ic": 0.0,
+                "ic_ir": 0.0,
+                "rank_ic_ir": 0.0,
+                "positive_ic_ratio": 0.0,
+                "coverage": 0.0,
+                "observation_count": 0,
+            }
 
     label_available_count = int(observation_frame["label"].notna().sum())
     valid_pair_count = int(observation_frame[["score", "label"]].notna().all(axis=1).sum())

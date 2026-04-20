@@ -7,7 +7,7 @@
 # run_mode 可选值:
 #   - train: 样本内训练模式。用于大模型迭代、因子特征体检、初筛回测。
 #   - test:  样本外盲测模式。因子定型后，在这段大模型没见过的数据上验证真实有效性。
-run_mode: train
+run_mode: test
 
 # 样本内 (In-Sample) 时间段
 # 方案一：近期滚动窗口 - 用最近 3.5 年数据训练，与当前市场环境更接近
@@ -27,7 +27,7 @@ training_workflow:
   mode: static_split
   static_split:
     # discovery_start_date / discovery_end_date:
-    # - 含义：海选阶段（discovery）的起止日期。该阶段会跑 step01~step09 产出候选因子。
+    # - 含义：海选阶段（discovery）的起止日期。该阶段会跑 step03~step09 产出候选因子。
     # - 设置建议：通常覆盖 train 区间前 60%~80% 的时间；建议不少于 18~24 个月，避免样本太短。
     discovery_start_date: 2022-10-01
     discovery_end_date: 2024-12-31
@@ -90,6 +90,8 @@ rebalance_interval: 1
 # - weekly: first_trading_day_of_week / last_trading_day_of_week
 # - monthly: first_trading_day_of_month / last_trading_day_of_month
 rebalance_anchor: first_trading_day_of_week
+# 每个观测日最小有效样本占比（n_valid / n_pool），低于阈值的观测日不参与 IC/IR 聚合。
+min_valid_ratio_per_observation: 0.9
 
 # 【5. 收益标签配置（LLM 挖掘阶段与因子研究阶段共用）】
 # 说明：

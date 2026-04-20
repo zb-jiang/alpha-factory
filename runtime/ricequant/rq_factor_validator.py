@@ -315,7 +315,9 @@ def apply_factor_preprocess(factor_series: pd.Series, raw_frame: pd.DataFrame, c
 
 
 def _cross_section_corr(score: pd.Series, label: pd.Series, method: str = "pearson") -> float:
-    frame = pd.concat([score.rename("score"), label.rename("label")], axis=1).dropna()
+    # Align with local behavior: drop invalid pairs including inf/-inf before correlation.
+    frame = pd.concat([score.rename("score"), label.rename("label")], axis=1)
+    frame = frame.replace([np.inf, -np.inf], np.nan).dropna()
     if len(frame) < 2:
         return float("nan")
     x = frame["score"].astype(float)
@@ -477,9 +479,11 @@ def _get_price_field(order_book_ids: list[str], start_date: str, end_date: str, 
 
 
 def _derive_vwap(amount: pd.DataFrame, volume: pd.DataFrame) -> pd.DataFrame:
-    safe_volume = volume.apply(pd.to_numeric, errors="coerce")
-    # Fixed RQ logic: total_turnover / volume
-    return amount / (safe_volume + 1e-8)
+    amt = amount.apply(pd.to_numeric, errors="coerce")
+    vol = volume.apply(pd.to_numeric, errors="coerce")
+    # Align with local Tushare logic: non-positive volume is invalid for VWAP.
+    safe_vol = vol.where(vol > 0)
+    return amt.div(safe_vol).replace([np.inf, -np.inf], np.nan)
 
 
 def _get_adjust_multiplier(
@@ -694,6 +698,33 @@ def factor_metrics_from_series(
             "coverage": 0.0,
             "observation_count": 0,
         }
+    min_valid_ratio = float(config.get("min_valid_ratio_per_observation", 0.0) or 0.0)
+    if min_valid_ratio > 0:
+        valid_stats = (
+            observation_frame.assign(_valid_pair=observation_frame[["score", "label"]].notna().all(axis=1))
+            .groupby(level="datetime")
+            .agg(
+                n_valid=("_valid_pair", "sum"),
+                n_pool=("_valid_pair", "size"),
+            )
+        )
+        keep_dates = valid_stats.loc[
+            valid_stats["n_valid"] >= valid_stats["n_pool"] * min_valid_ratio
+        ].index
+        observation_frame = observation_frame.loc[
+            observation_frame.index.get_level_values("datetime").isin(keep_dates)
+        ]
+        if observation_frame.empty:
+            return {
+                "factor_name": factor_name,
+                "mean_ic": 0.0,
+                "mean_rank_ic": 0.0,
+                "ic_ir": 0.0,
+                "rank_ic_ir": 0.0,
+                "positive_ic_ratio": 0.0,
+                "coverage": 0.0,
+                "observation_count": 0,
+            }
 
     label_available_count = int(observation_frame["label"].notna().sum())
     valid_pair_count = int(observation_frame[["score", "label"]].notna().all(axis=1).sum())

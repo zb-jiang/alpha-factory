@@ -5,8 +5,6 @@ import json
 from common import OUTPUT_DIR, clear_runtime_context, ensure_runtime_dirs, env_config, write_json
 from step00a_clean import run as run_step00a
 from step00b_precache_tushare import run as run_step00b
-from step01_init_datasource import run as run_step01
-from step02_build_feature_pool import run as run_step02
 from step07_eval_factor import run as run_step07
 from step08_backtest import run as run_step08
 from step09_score import run as run_step09
@@ -59,7 +57,6 @@ def run() -> None:
         print("================================================================")
         return
 
-    run_step00a()
     run_step00b()
 
     print("开始收集样本内 (In-Sample) 训练出的优秀因子...")
@@ -76,10 +73,7 @@ def run() -> None:
     
     print("开始进行样本外 (Out-of-Sample) 数据处理与回测...")
     print("------------------------------------------------")
-    run_step01()
-    run_step02()
-    # 跳过 step03 (健康检查), step04 (摘要), step05 (大模型), step06 (验证)
-    # 直接评估、回测和打分
+    # 跳过 discovery 生成链路，直接评估、回测和打分
     run_step07()
     run_step08()
     run_step09()

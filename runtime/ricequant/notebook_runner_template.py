@@ -64,8 +64,8 @@ if ENABLE_GET_PRICE_VWAP_FALLBACK:
 # 1) Analysis config (aligned with local analysis_rule.yaml style)
 # -----------------------------
 CONFIG = {
-    "start_date": "2022-10-01",
-    "end_date": "2025-12-31",
+    "start_date": "2026-01-01",
+    "end_date": "2026-04-10",
     "stock_pool": {
         "type": "index_components",  # index_components | all_market | custom
         "index_code": "SH000300",
@@ -79,6 +79,7 @@ CONFIG = {
     "rebalance": "weekly",  # daily | weekly | monthly
     "rebalance_interval": 1,
     "rebalance_anchor": "first_trading_day_of_week",
+    "min_valid_ratio_per_observation": 0.9,
     "label": {
         "name": "rebalance_period_return",
         "return_type": "period_return",
@@ -105,9 +106,8 @@ CONFIG = {
 # -----------------------------
 # Add/remove factors here. Each item is (factor_name, factor_formula).
 FACTORS = [
-    ("breakout_drawdown_ratio_v1", "breakout_20d / (abs(max_drawdown_20d) + 0.001)"),
-    ("volatility_inversion_v1", "close_to_high / (high_low_range + 0.001)"),
-    ("volume_volatility_penalty_v1", "ret_20d / (1 + volume_vol_20d)"),
+     ("price_vwap_dev_OOS", "ret_20d - vwap_ret_20d"),
+    ("vol_stability_ratio_OOS", "volume_mean_20d / (1 + volume_vol_20d)"),
 ]
 
 # -----------------------------

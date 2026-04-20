@@ -18,9 +18,8 @@ from common import (
 )
 from step00a_clean import clean_outputs, run as run_step00a
 from step00b_precache_tushare import run as run_step00b
-from step01_init_datasource import run as run_step01
-from step02_build_feature_pool import run as run_step02
 from step03_health_check import run as run_step03
+from step03b_market_context import run as run_step03b
 from step04_build_summary import run as run_step04
 from step05_call_llm import run as run_step05
 from step06_validate_factor import run as run_step06
@@ -63,11 +62,15 @@ def _metric_value(row: dict, *keys: str) -> float:
     return 0.0
 
 
+def _prepare_discovery_window(window: dict[str, str]) -> None:
+    # Step03/03b 仅依赖窗口数据与配置，在同一窗口内可复用。
+    set_runtime_context(_stage_context(window, "discovery", 1))
+    run_step03()
+    run_step03b()
+
+
 def _run_discovery_iteration(iteration: int, window: dict[str, str], scope: str) -> None:
     set_runtime_context(_stage_context(window, "discovery", iteration))
-    run_step01()
-    run_step02()
-    run_step03()
     run_step04()
     run_step05()
     run_step06()
@@ -136,8 +139,6 @@ def _run_validation(window: dict[str, str], candidates: list[dict]) -> list[dict
             },
         },
     )
-    run_step01()
-    run_step02()
     run_step07()
     run_step08()
     run_step09()
@@ -260,6 +261,7 @@ def run() -> None:
         for window in windows:
             clean_outputs(dry_run=False)
             discovery_scope = f"train_windows/{window['window_id']}/discovery"
+            _prepare_discovery_window(window)
             for iteration in range(1, iterations + 1):
                 _run_discovery_iteration(iteration, window, discovery_scope)
                 print(f"{window['window_id']} discovery iteration {iteration} ok")
