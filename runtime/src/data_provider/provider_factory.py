@@ -6,7 +6,7 @@
 from typing import Dict, Any, Type, List
 
 from .base_provider import BaseDataProvider
-from .tushare_provider import TushareProvider
+from .tushare_sqlite_provider import TushareSQLiteProvider
 
 
 class ProviderFactory:
@@ -24,7 +24,7 @@ class ProviderFactory:
     
     # 注册的数据提供者
     _providers: Dict[str, Type[BaseDataProvider]] = {
-        "tushare": TushareProvider,
+        "tushare": TushareSQLiteProvider,
     }
     
     @classmethod

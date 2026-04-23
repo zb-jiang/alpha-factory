@@ -9,6 +9,9 @@ from copy import deepcopy
 import pandas as pd
 
 from common import (
+    _dynamic_index_components_by_observation_date,
+    _dynamic_index_pool_enabled,
+    _observation_dates_from_run_window,
     env_config,
     estimate_label_forward_days,
     estimate_required_warmup,
@@ -43,12 +46,47 @@ def _collect_union_instruments(cfg: dict) -> list[str]:
             continue
         mode_cfg = deepcopy(cfg)
         mode_cfg["run_mode"] = mode
-        codes = list_instruments(mode_cfg)
+        if _dynamic_index_pool_enabled(mode_cfg):
+            observation_dates = _observation_dates_from_run_window(mode_cfg)
+            component_map = _dynamic_index_components_by_observation_date(mode_cfg, observation_dates)
+            codes = sorted({code for items in component_map.values() for code in items})
+            print(
+                f"{mode} 模式动态股票池: 观测日={len(observation_dates)}，"
+                f"并集股票数={len(codes)}"
+            )
+        else:
+            codes = list_instruments(mode_cfg)
         print(f"{mode} 模式股票池: {len(codes)} 只")
         code_set.update(codes)
     result = sorted(code_set)
     print(f"训练+测试并集股票池: {len(result)} 只")
     return result
+
+
+def _audit_remaining_gaps(
+    provider,
+    instruments: list[str],
+    start_ymd: str,
+    end_ymd: str,
+) -> None:
+    api_names = ("daily", "adj_factor", "daily_basic")
+    summary: list[str] = []
+    for api_name in api_names:
+        missing_code_count = 0
+        missing_range_count = 0
+        for qlib_code in instruments:
+            ts_code = provider._convert_to_ts_code(qlib_code)  # type: ignore[attr-defined]
+            ranges = provider._get_unfetched_ranges(api_name, ts_code, start_ymd, end_ymd)  # type: ignore[attr-defined]
+            if not ranges:
+                continue
+            missing_code_count += 1
+            missing_range_count += len(ranges)
+        summary.append(
+            f"{api_name}: missing_codes={missing_code_count}, missing_ranges={missing_range_count}"
+        )
+    print("预缓存缺口审计:")
+    for line in summary:
+        print(f"  {line}")
 
 
 def run() -> None:
@@ -85,6 +123,8 @@ def run() -> None:
     for api_name in ("daily", "adj_factor", "daily_basic"):
         print(f"预缓存 {api_name} ...")
         provider._ensure_data_cached(api_name, instruments, start_ymd, end_ymd)
+
+    _audit_remaining_gaps(provider, instruments, start_ymd, end_ymd)
 
     # 触发静态字段缓存，避免后续步骤第一次运行时再等待。
     provider.get_features(

@@ -2,25 +2,25 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 from openai import OpenAI
 
 from common import (
     OUTPUT_DIR,
-    backtest_rule_config,
     env_config,
     feature_pool_config,
     label_description,
     label_name,
+    parse_json_text,
     read_json,
     write_json,
 )
 
 
-def build_messages() -> list[dict[str, str]]:
+def build_messages(candidate_count_override: int | None = None) -> list[dict[str, str]]:
     config = env_config()
     feature_cfg = feature_pool_config()
-    backtest_rule = backtest_rule_config()
     summary = read_json(OUTPUT_DIR / "health" / "llm_summary.json")
     market_context_path = OUTPUT_DIR / "health" / "market_context.json"
     market_context = read_json(market_context_path) if market_context_path.exists() else summary.get("market_context", {})
@@ -43,7 +43,11 @@ def build_messages() -> list[dict[str, str]]:
     
     base_feature_names = [item["name"] for item in feature_cfg.get("base_features", [])]
     generation_constraints = feature_cfg.get("generation_constraints", {})
-    candidate_count = int(config.get("llm_candidate_count", 10))
+    candidate_count = int(
+        candidate_count_override
+        if candidate_count_override is not None
+        else config.get("llm_candidate_count", 10)
+    )
     
     system_prompt = """你是一个顶级的量化交易策略研究员和金融数据科学家。你精通A股市场微观结构、多因子模型、行为金融学以及Alpha挖掘。
 你的任务是在一个自动化的AI量化研究系统中，根据机器提供的数据体检报告和可用的数据资产，挖掘出具有强预测能力、低相关性且逻辑严密的全新选股因子（Alpha因子）。
@@ -55,7 +59,14 @@ def build_messages() -> list[dict[str, str]]:
 4. 鲁棒性控制：关注体检报告中的“不稳定特征(unstable_features)”，尽量少用，或者通过非线性变换（如除以波动率）来控制其风险暴露。
 5. 表达式规范：只能使用给定的【允许的基础特征】和【允许的算子】，必须保证公式能够被Python直接解析执行。
 
-请严格遵守系统设定的输出格式，以纯JSON格式返回，不要包含任何Markdown代码块标记（如```json），也不要任何额外的解释性对话。"""
+请严格遵守系统设定的输出格式，以纯JSON格式返回，不要包含任何Markdown代码块标记（如```json），也不要任何额外的解释性对话。
+
+【JSON 输出硬性规范】
+1. 所有 key 必须使用双引号；禁止单引号、注释、尾逗号。
+2. 括号必须完全配平：{{}} 与 [] 必须一一对应。
+3. 只输出 1 个 JSON 对象，且首字符是 {{、末字符是 }}。
+4. 因子列表中的每个元素都必须是完整对象，禁止截断。
+5. 在输出前请先做一次“自检”：确认可被 Python json.loads 直接解析。"""
 
     user_prompt = f"""【任务背景】
 我们需要你挖掘出 {candidate_count} 个全新的量化选股因子。
@@ -111,8 +122,7 @@ def build_messages() -> list[dict[str, str]]:
       "direction": "枚举值：'higher_better'(因子值越大越看多) 或 'lower_better'(因子值越小越看多)。这是你对因子经济含义的原始方向假设，系统后续会将其记录为 llm_direction，并再根据样本内数据计算 empirical_direction",
       "reason": "字符串：用中文简述该因子的金融学逻辑或设计意图（例如：'结合了短期动量和成交量放大的共振，同时剔除高波动率股票的风险'）",
       "risk": "字符串：用中文简述该因子在什么市场环境下可能失效（例如：'在市场风格急剧切换或低流动性环境下容易发生回撤'）",
-      "expected_failure_regime": "字符串：必须明确写出该因子最可能失效的市场状态（例如：'高波动单边逼空行情'、'极端缩量普跌且离散度很低的环境'）",
-      "backtest_rule": {json.dumps(backtest_rule, ensure_ascii=False)}
+      "expected_failure_regime": "字符串：必须明确写出该因子最可能失效的市场状态（例如：'高波动单边逼空行情'、'极端缩量普跌且离散度很低的环境'）"
     }}
   ]
 }}
@@ -121,6 +131,8 @@ def build_messages() -> list[dict[str, str]]:
 1. 绝对不能使用未来数据！
 2. 绝对不能使用不在【允许的基础特征列表】中的未授权字段！
 3. 返回结果必须是直接可解析的JSON字典，严禁输出 ```json 等Markdown格式标记！
+4. 不要输出 backtest_rule 字段，交易规则由系统自动注入。
+5. 再次强调：请在输出前做括号配平检查，确保不存在缺失 `}}` 或 `]` 的情况。
 """
 
     return [
@@ -138,6 +150,11 @@ def run() -> None:
     api_key = str(config.get("llm_api_key", "")).strip()
     base_url = str(config.get("llm_base_url", "")).strip()
     model = str(config.get("llm_model", "")).strip()
+    llm_request_timeout_seconds = max(float(config.get("llm_request_timeout_seconds", 120.0) or 120.0), 1.0)
+    llm_max_retries = max(int(config.get("llm_max_retries", 2) or 2), 0)
+    llm_retry_wait_seconds = max(float(config.get("llm_retry_wait_seconds", 3.0) or 3.0), 0.0)
+    candidate_count = max(int(config.get("llm_candidate_count", 10) or 10), 1)
+    llm_min_candidate_count = max(int(config.get("llm_min_candidate_count", 3) or 3), 1)
     
     # 代理设置检查：如果有全局代理导致 SSL 握手失败，可以选择在这里临时清理环境变量
     # os.environ.pop("http_proxy", None)
@@ -164,15 +181,71 @@ def run() -> None:
         http_client = httpx.Client(verify=False, trust_env=False)
     
     client = OpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
-    messages = build_messages()
+    messages = build_messages(candidate_count)
     
     print(f"正在调用大模型 ({model})，请稍候...")
-    response = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=0.2,
-    )
-    content = response.choices[0].message.content or ""
+    response = None
+    content = ""
+    last_error: Exception | None = None
+    for attempt in range(llm_max_retries + 1):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.2,
+                timeout=llm_request_timeout_seconds,
+            )
+            content = response.choices[0].message.content or ""
+            parsed = parse_json_text(content)
+            if not isinstance(parsed, dict) or not isinstance(parsed.get("factors"), list):
+                raise ValueError("LLM 返回内容不是包含 factors 列表的 JSON 对象")
+            break
+        except Exception as error:
+            last_error = error
+            finish_reason = ""
+            if response is not None:
+                finish_reason = str(response.choices[0].finish_reason or "")
+                invalid_payload = {
+                    "model": model,
+                    "base_url": base_url,
+                    "messages": messages,
+                    "content": content,
+                    "raw": response.model_dump(),
+                    "finish_reason": finish_reason,
+                    "error": str(error),
+                    "attempt": attempt + 1,
+                }
+                write_json(OUTPUT_DIR / "llm" / "raw_response_invalid.json", invalid_payload)
+            error_text = str(error)
+            should_reduce_candidate_count = (
+                "Unterminated string" in error_text
+                or "Expecting ',' delimiter" in error_text
+                or finish_reason == "length"
+            )
+            if should_reduce_candidate_count and candidate_count > llm_min_candidate_count:
+                next_count = max(llm_min_candidate_count, candidate_count // 2)
+                if next_count < candidate_count:
+                    candidate_count = next_count
+                    messages = build_messages(candidate_count)
+                    print(
+                        f"检测到大模型输出疑似截断，候选因子数调整为 {candidate_count}，"
+                        "并继续重试..."
+                    )
+            if attempt >= llm_max_retries:
+                print(f"大模型调用在第 {attempt + 1} 次尝试后失败，停止重试。")
+                raise RuntimeError(
+                    f"大模型调用失败: model={model}, timeout={llm_request_timeout_seconds}s, "
+                    f"retries={llm_max_retries}, error={error}"
+                ) from error
+            wait_seconds = llm_retry_wait_seconds * (attempt + 1)
+            print(
+                f"大模型调用异常(第 {attempt + 1}/{llm_max_retries + 1} 次): {error}，"
+                f"{wait_seconds:.1f} 秒后重试..."
+            )
+            time.sleep(wait_seconds)
+
+    if response is None:
+        raise RuntimeError(f"大模型调用失败: {last_error}")
     payload = {
         "model": model,
         "base_url": base_url,

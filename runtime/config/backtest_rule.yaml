@@ -1,35 +1,126 @@
-# 买入规则：根据因子得分从高到低排序，买入排名前 20 的股票
-buy_top_n: 20
+# 策略工厂入口：可选 TopKDropout / EnhancedIndexing / SoftTopK
+# 当前 step08 仅实现 TopKDropout，其它策略先完成配置与校验能力。
+strategy_type: TopKDropout
 
-# 卖出规则：持仓股票如果跌出前 40 名，则将其卖出（采用前20买、跌出40卖的宽幅逻辑，可降低换手率）
-sell_drop_to: 40
+# TopKDropout（当前可执行）
+TopKDropout:
+  # 买入规则：根据因子得分从高到低排序，优先候选前 N
+  buy_top_n: 20
+  # 卖出规则：持仓股票若跌出前 M 名则卖出（宽幅缓冲降低换手）
+  sell_drop_to: 40
+  # 最终目标持仓数
+  holding_count: 20
+  # 权重模式：
+  # - equal_weight：等权持仓（默认）
+  # - score_weight：按因子分做权重分配（分高仓位更大）
+  weight_mode: equal_weight
+  # 每次调仓最多换出数量（用于显式控制换手，阶段三实现）
+  max_drop_per_day: 5
 
-# 目标持仓数量：组合中最多同时持有 20 只股票
-holding_count: 20
+# EnhancedIndexing（指数增强策略）
+# 核心思想：以基准指数为锚（Benchmark），在基准权重附近做小幅超配/低配（Tilt），
+# 目标是“控制偏离风险的前提下获取超额收益”，而不是纯粹追求绝对收益最大化。
+# 重要说明：当前实现中，“增强的股票池”以因子挖掘阶段产出的股票池为准；
+# 不再单独通过 benchmark 参数切换股票池，避免配置与实际回测宇宙不一致。
+EnhancedIndexing:
+  # 跟踪误差上限（Tracking Error Limit），用于约束相对基准的波动偏离
+  # 数值越小：越贴近基准，风格更稳；数值越大：主动风险更高，收益弹性也更大
+  # 经验区间：0.02~0.08（A股日频回测）
+  tracking_error_limit: 0.05
+  # 单只股票“主动权重偏离”上限（Active Weight Bound）
+  # 含义：某只股票相对基准权重的增减幅度不超过该值（如 ±2%）
+  # 作用：避免个股偏离过大导致组合集中度和风格漂移失控
+  active_weight_bound: 0.02
+  # 组合目标持仓数上限（最终组合大致持有的股票数量）
+  # 数量更大：分散度更高、交易更平滑；数量更小：Alpha更集中但回撤可能增大
+  holding_count: 30
+  # 权重模式（当前三个都已实现）：
+  # - benchmark_tilt：zscore 倾斜模式（默认）
+  # - equal_weight_enhanced：增强池内等权
+  # - score_tilt：按原始分数比例倾斜，再受 active_weight_bound 与 tracking_error_limit 约束
+  weight_mode: benchmark_tilt
 
-# 仓位权重分配方式，'equal_weight' 表示所有持仓股票等权重分配资金
-weight_mode: equal_weight
+# SoftTopK（软性TopK策略）
+# 核心思想：先选出Top-N股票，再按分数连续分配权重（而不是简单等权），
+# 使“高置信度信号”获得更高仓位。
+SoftTopK:
+  # 参与软分配的候选股票数（按因子分从高到低截取前N）
+  # 常见范围：20~80；N越大越分散，N越小越集中
+  top_n: 30
+  # 权重函数：
+  # - softmax：对高分更敏感，头部集中度更高
+  # - rank_power：按排名幂律衰减，权重更平滑、稳健
+  weight_func: softmax
+  # 最终持仓数量上限（通常 <= top_n）
+  # 当 top_n > holding_count 时，先选Top-N再裁剪到 holding_count
+  holding_count: 30
 
-# 交易价格设定：
-# - next_open: 使用信号后的下一交易日开盘价成交
-# - next_close: 使用信号后的下一交易日收盘价成交
-# 当前默认使用 next_open，避免对当日收盘成交做过强假设。
-trade_price: next_open
+# 择时过滤模块（Market Timing）
+# 该模块是“叠加层”，不是独立选股策略：
+# 在主策略给出目标持仓后，再根据市场状态统一调整总仓位/开仓条件。
+MarketTiming:
+  # 是否启用择时过滤：
+  # - false：不做择时，按主策略满仓执行
+  # - true：按 market_indicator 判定风险状态并进行仓位缩放
+  enabled: false
+  # 市场级择时指标类型（当前实现：EMA_60）
+  # EMA_60 语义：当基准收盘价(股票池里各股票的 OHLCV 做平均生成的“合成基准”) < 60日EMA 时，视为风险抬升阶段
+  market_indicator: EMA_60
+  # 择时触发后的目标暴露比例（0~1）
+  # 例如 0.5 表示风险状态下组合总体仓位压到约50%
+  # 建议：先用 0.5 做基线，再按回撤容忍度调到 0.3~0.8
+  reduce_to: 0.5
+  # 个股开仓过滤器（仅对“新开仓”生效，老持仓不受该过滤影响）：
+  # - none：不开启个股过滤
+  # - ema：仅当个股 close >= 个股EMA(stock_ema_period) 才允许新开仓
+  # - rsi：仅当个股 RSI(period) <= rsi_buy_max 才允许新开仓（方案A）
+  stock_open_filter: rsi
+  # 个股 EMA 开仓过滤周期（仅 stock_open_filter=ema 时生效）
+  # 例如 20 表示用个股 20 日 EMA 判断是否允许新开仓
+  stock_ema_period: 60
+  # RSI 计算窗口（仅 stock_open_filter=rsi 时生效）
+  rsi_period: 14
+  # RSI 开仓上限（仅 stock_open_filter=rsi 时生效）
+  # 例：70 表示 RSI>70 视为偏热，禁止新开仓；<=70 允许新开仓
+  rsi_buy_max: 70.0
 
-# 买入手续费率（包含佣金、过户费等），0.0015 表示千分之1.5
-buy_cost: 0.0015
+# 执行层公共参数
+Execution:
+  # 回测初始资金（账户起始总资产，单位：元）
+  # 例如 1000000 表示以 100 万资金起步；会直接影响每只股票的下单金额
+  # 建议与真实资金规模保持同量级，便于评估交易成本和容量约束
+  initial_cash: 1000000
 
-# 卖出手续费率（包含印花税、佣金等），0.0025 表示千分之2.5
-sell_cost: 0.0025
+  # 交易价格设定：
+  # - next_open: 使用信号后的下一交易日开盘价成交
+  # - next_close: 使用信号后的下一交易日收盘价成交
+  trade_price: next_open
 
-# 滑点成本（模拟真实交易中吃单导致的买价更高、卖价更低），0.0005 表示万分之5
-slippage: 0.0005
+  # 买入手续费率（包含佣金、过户费等），0.0015 表示千分之1.5
+  buy_cost: 0.0015
+  # 卖出手续费率（包含印花税、佣金等），0.0025 表示千分之2.5
+  sell_cost: 0.0025
+  # 滑点成本（模拟真实交易中吃单导致的买价更高、卖价更低）
+  slippage: 0.0005
 
-# 停牌股票处理方式，'skip' 表示如果目标股票停牌则跳过该股票的交易
-suspend_action: skip
+  # 交易约束动作（Execution Constraints）
+  # 说明：用于定义“目标仓位无法立即成交”时系统的处理策略，目的是让回测更贴近真实交易。
+  # 注意：这些字段已纳入统一配置与参数透传；不同回测后端对细节的实现深度可能不同。
+  # 建议先保持默认值，后续再结合成交日志逐步收紧。
 
-# 涨停股票处理方式，'skip_buy' 表示如果目标股票涨停（无法买入），则放弃买入
-limit_up_action: skip_buy
+  # 停牌处理（常见选项）：
+  # - skip：当日无法交易就放弃本次调仓动作（默认，偏保守）
+  # - queue：先记下目标仓位，后续每天自动重试，直到恢复可交易
+  suspend_action: skip
 
-# 跌停股票处理方式，'delay_sell' 表示如果持仓股票跌停（无法卖出），则延迟到下一个可交易日再卖
-limit_down_action: delay_sell
+  # 涨停买入处理（常见选项）：
+  # - skip_buy：放弃本次买入（默认，最保守）
+  # - queue_buy：先不买，后续每天自动重试买入，直到不再涨停
+  # - allow_buy：忽略涨停限制照常下单（激进，可能高估可成交性）
+  limit_up_action: skip_buy
+
+  # 跌停卖出处理（常见选项）：
+  # - delay_sell：先不卖，后续每天自动重试卖出，直到不再跌停（默认）
+  # - skip_sell：本次卖出直接放弃，等待下一轮新的调仓信号
+  # - force_sell：忽略跌停限制照常下单（激进，可能低估流动性风险）
+  limit_down_action: delay_sell

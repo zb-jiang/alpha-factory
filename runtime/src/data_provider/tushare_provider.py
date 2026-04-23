@@ -2,12 +2,14 @@
 Tushare 数据提供者实现
 封装 Tushare 的数据访问接口，适配 BaseDataProvider
 """
+from __future__ import annotations
 
 import hashlib
+import json
 import os
 import time
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import pandas as pd
 import numpy as np
 
@@ -81,7 +83,7 @@ class TushareProvider(BaseDataProvider):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.ts_config = config.get("tushare", {})
-        self.cache_dir = Path(self.ts_config.get("data_cache_dir", "./data/tushare_cache"))
+        self.cache_dir = Path(self.ts_config.get("data_cache_dir", "./data/tushare_cache")).resolve()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._ts = None  # tushare 模块
         self._pro = None  # Tushare Pro 接口
@@ -89,7 +91,19 @@ class TushareProvider(BaseDataProvider):
         self._request_interval_seconds = max(float(self.ts_config.get("request_interval_seconds", 0.35) or 0.35), 0.0)
         self._rate_limit_retry_seconds = max(float(self.ts_config.get("rate_limit_retry_seconds", 65.0) or 65.0), 0.0)
         self._rate_limit_retries = max(int(self.ts_config.get("rate_limit_retries", 1) or 1), 0)
+        self._api_call_timeout_seconds = max(float(self.ts_config.get("api_call_timeout_seconds", 30.0) or 30.0), 0.0)
+        self._enable_meta_reconcile = bool(self.ts_config.get("enable_meta_reconcile", False))
+        self._latest_trade_lag_days = max(int(self.ts_config.get("latest_trade_lag_days", 1) or 1), 0)
         self._last_request_started_at = 0.0
+        self._cache_meta_changed = False
+        self._actual_cache_range: Dict[Tuple[str, str], Optional[Tuple[str, str]]] = {}
+        self._cache_dir_warned = False
+        self._index_component_month_cache: Dict[Tuple[str, str], Tuple[str, List[str]]] = {}
+        self._list_date_cache: dict[str, str] = {}
+        self._delist_date_cache: dict[str, str] = {}
+        self._list_date_cache_loaded = False
+        self._latest_trade_date_cache: Optional[str] = None
+        self._has_open_trade_day_cache: Dict[Tuple[str, str], bool] = {}
         self._init_cache_meta()
 
 
@@ -100,7 +114,6 @@ class TushareProvider(BaseDataProvider):
         self.cache_meta = {}
         if self.cache_meta_file.exists():
             try:
-                import json
                 with open(self.cache_meta_file, 'r', encoding='utf-8') as f:
                     self.cache_meta = json.load(f)
             except Exception as e:
@@ -109,14 +122,121 @@ class TushareProvider(BaseDataProvider):
 
     def _save_cache_meta(self):
         try:
-            import json
             with open(self.cache_meta_file, 'w', encoding='utf-8') as f:
                 json.dump(self.cache_meta, f, ensure_ascii=False, indent=2)
+            self._cache_meta_changed = False
         except Exception as e:
             print(f"警告: 保存缓存元数据失败: {e}")
 
+    def _warn_multiple_cache_dirs_once(self) -> None:
+        if self._cache_dir_warned:
+            return
+        self._cache_dir_warned = True
+        try:
+            parent = self.cache_dir.parent
+            candidates = sorted(path for path in parent.glob("tushare_cache*") if path.is_dir())
+            if len(candidates) <= 1:
+                return
+            other_dirs = [path for path in candidates if path.resolve() != self.cache_dir]
+            if not other_dirs:
+                return
+            print("缓存目录机制提示:")
+            print(f"  当前生效目录: {self.cache_dir}")
+            print("  检测到同级其他缓存目录(不会自动使用):")
+            for path in other_dirs:
+                parquet_count = len(list(path.glob("*.parquet")))
+                has_meta = (path / "cache_metadata_v2.json").exists() or (path / "cache_metadata.json").exists()
+                print(f"    - {path} (parquet={parquet_count}, meta={'Y' if has_meta else 'N'})")
+        except Exception:
+            return
+
+    def _load_cached_date_range_from_parquet(self, api_name: str, ts_code: str) -> Optional[Tuple[str, str]]:
+        cache_key = (api_name, ts_code)
+        if cache_key in self._actual_cache_range:
+            return self._actual_cache_range[cache_key]
+        file_path = self.cache_dir / f"{api_name}_{ts_code}.parquet"
+        if not file_path.exists() and "." in ts_code:
+            code, exchange = ts_code.split(".", 1)
+            legacy_code = f"{exchange}{code}"
+            legacy_files = sorted(
+                self.cache_dir.glob(f"{api_name}_{legacy_code}_*.parquet"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if legacy_files:
+                file_path = legacy_files[0]
+        if not file_path.exists():
+            self._actual_cache_range[cache_key] = None
+            return None
+        try:
+            frame = pd.read_parquet(file_path, columns=["trade_date"])
+            if frame.empty or "trade_date" not in frame.columns:
+                self._actual_cache_range[cache_key] = None
+                return None
+            dates = pd.to_datetime(frame["trade_date"], errors="coerce").dropna()
+            if dates.empty:
+                self._actual_cache_range[cache_key] = None
+                return None
+            min_date = dates.min().strftime("%Y%m%d")
+            max_date = dates.max().strftime("%Y%m%d")
+            result = (min_date, max_date)
+            self._actual_cache_range[cache_key] = result
+            return result
+        except Exception:
+            self._actual_cache_range[cache_key] = None
+            return None
+
+    def _reconcile_meta_with_parquet(self, api_name: str, ts_code: str) -> None:
+        api_meta = self.cache_meta.setdefault(api_name, {})
+        fetched = list(api_meta.get(ts_code, []))
+        actual_range = self._load_cached_date_range_from_parquet(api_name, ts_code)
+        if actual_range is None:
+            if fetched:
+                api_meta.pop(ts_code, None)
+                self._cache_meta_changed = True
+            return
+        actual_start, actual_end = actual_range
+        if not fetched:
+            api_meta[ts_code] = [[actual_start, actual_end]]
+            self._cache_meta_changed = True
+            return
+        repaired: list[list[str]] = []
+        for start, end in fetched:
+            s = max(str(start), actual_start)
+            e = min(str(end), actual_end)
+            if s <= e:
+                repaired.append([s, e])
+        if not repaired:
+            repaired = [[actual_start, actual_end]]
+        repaired.sort(key=lambda item: item[0])
+        merged: list[list[str]] = [repaired[0]]
+        for start, end in repaired[1:]:
+            prev = merged[-1]
+            if start <= prev[1]:
+                prev[1] = max(prev[1], end)
+            else:
+                merged.append([start, end])
+        if merged != fetched:
+            api_meta[ts_code] = merged
+            self._cache_meta_changed = True
+
     def _get_unfetched_ranges(self, api_name: str, ts_code: str, start_date: str, end_date: str):
         from datetime import datetime, timedelta
+        if self._enable_meta_reconcile:
+            self._reconcile_meta_with_parquet(api_name, ts_code)
+        latest_trade_date = self._latest_open_trade_date()
+        if latest_trade_date and end_date > latest_trade_date:
+            end_date = latest_trade_date
+        # 上市前区间不需要拉取，避免永远存在“前缀缺口”导致反复补拉。
+        list_date = self._get_list_date(ts_code)
+        if list_date and list_date > start_date:
+            start_date = list_date
+        # 退市后区间不需要拉取，避免“尾部缺口”在每次运行重复出现。
+        delist_date = self._get_delist_date(ts_code)
+        if delist_date and delist_date < end_date:
+            end_date = delist_date
+        if start_date > end_date:
+            return []
         fetched = self.cache_meta.get(api_name, {}).get(ts_code, [])
         t_start = datetime.strptime(start_date, '%Y%m%d')
         t_end = datetime.strptime(end_date, '%Y%m%d')
@@ -152,6 +272,7 @@ class TushareProvider(BaseDataProvider):
             else:
                 m.append([s, e])
         self.cache_meta[api_name][ts_code] = [[d[0].strftime('%Y%m%d'), d[1].strftime('%Y%m%d')] for d in m]
+        self._cache_meta_changed = True
 
     def _append_to_parquet(self, api_name: str, ts_code: str, df):
         if df is None or df.empty:
@@ -185,6 +306,7 @@ class TushareProvider(BaseDataProvider):
             df = df.sort_values('trade_date')
         try:
             df.to_parquet(file_path, index=False)
+            self._actual_cache_range.pop((api_name, ts_code), None)
         except Exception as e:
             print(f"警告: 保存缓存文件失败 {file_path}: {e}")
 
@@ -239,12 +361,24 @@ class TushareProvider(BaseDataProvider):
                     overall_start = min(overall_start, s)
                     overall_end = max(overall_end, e)
         if not missing_tasks:
+            if self._cache_meta_changed:
+                self._save_cache_meta()
             return
-        print(f"  从 Tushare 获取缺失的 {api_name} 数据 ({overall_start} 至 {overall_end}), 涉及 {len(missing_tasks)} 只股票...")
-        fetched_count = 0
-        partial_tail_count = 0
         missing_codes = list(missing_tasks.keys())
         total = len(missing_codes)
+        if api_name in {"daily", "adj_factor", "daily_basic"} and not self._has_open_trade_day_between(overall_start, overall_end):
+            print(
+                f"  跳过 {api_name} 补拉: 请求区间 {overall_start} 至 {overall_end} 无交易日，"
+                f"标记 {total} 只股票为已覆盖"
+            )
+            for ts_code in missing_codes:
+                self._add_fetched_range(api_name, ts_code, overall_start, overall_end)
+            if self._cache_meta_changed:
+                self._save_cache_meta()
+            return
+        print(f"  从 Tushare 获取缺失的 {api_name} 数据 ({overall_start} 至 {overall_end}), 涉及 {total} 只股票...")
+        fetched_count = 0
+        partial_tail_count = 0
         for i, ts_code in enumerate(missing_codes, start=1):
             if api_name == "daily":
                 df = self._call_pro_api("daily", ts_code=ts_code, start_date=overall_start, end_date=overall_end)
@@ -286,7 +420,100 @@ class TushareProvider(BaseDataProvider):
                 f"  提示: {api_name} 有 {partial_tail_count} 只股票返回数据未覆盖请求末日 {end_date}，"
                 "这些股票会在后续请求中继续尝试补拉"
             )
-        self._save_cache_meta()
+        if self._cache_meta_changed:
+            self._save_cache_meta()
+
+    def _get_list_date(self, ts_code: str) -> Optional[str]:
+        if not self._list_date_cache_loaded:
+            self._load_list_date_cache()
+        return self._list_date_cache.get(ts_code)
+
+    def _get_delist_date(self, ts_code: str) -> Optional[str]:
+        if not self._list_date_cache_loaded:
+            self._load_list_date_cache()
+        return self._delist_date_cache.get(ts_code)
+
+    def _load_list_date_cache(self) -> None:
+        if self._list_date_cache_loaded:
+            return
+        self._list_date_cache_loaded = True
+        try:
+            frames: list[pd.DataFrame] = []
+            for status in ("L", "D", "P"):
+                stock_basic = self._call_pro_api(
+                    "stock_basic",
+                    exchange="",
+                    list_status=status,
+                    fields="ts_code,list_date,delist_date",
+                )
+                if stock_basic is not None and not stock_basic.empty:
+                    frames.append(stock_basic)
+            if not frames:
+                return
+            merged = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["ts_code"], keep="first")
+            self._list_date_cache = {
+                str(row["ts_code"]): str(row["list_date"])
+                for _, row in merged.iterrows()
+                if pd.notna(row.get("list_date")) and str(row.get("list_date"))
+            }
+            self._delist_date_cache = {
+                str(row["ts_code"]): str(row["delist_date"])
+                for _, row in merged.iterrows()
+                if pd.notna(row.get("delist_date")) and str(row.get("delist_date"))
+            }
+        except Exception:
+            # 上市日期仅用于优化缓存补拉，不应影响主流程。
+            self._list_date_cache = {}
+            self._delist_date_cache = {}
+
+    def _latest_open_trade_date(self) -> str:
+        if self._latest_trade_date_cache:
+            return self._latest_trade_date_cache
+        today = pd.Timestamp.today().normalize()
+        start = (today - pd.Timedelta(days=40)).strftime("%Y%m%d")
+        end = today.strftime("%Y%m%d")
+        try:
+            cal = self._call_pro_api(
+                "trade_cal",
+                exchange="SSE",
+                start_date=start,
+                end_date=end,
+                is_open="1",
+            )
+            if cal is not None and not cal.empty and "cal_date" in cal.columns:
+                open_dates = sorted(str(item) for item in cal["cal_date"].dropna().tolist())
+                if open_dates:
+                    index = max(0, len(open_dates) - 1 - int(self._latest_trade_lag_days))
+                    self._latest_trade_date_cache = open_dates[index]
+                    return self._latest_trade_date_cache
+                self._latest_trade_date_cache = end
+                return self._latest_trade_date_cache
+        except Exception:
+            pass
+        self._latest_trade_date_cache = end
+        return self._latest_trade_date_cache
+
+    def _has_open_trade_day_between(self, start_date: str, end_date: str) -> bool:
+        if start_date > end_date:
+            return False
+        cache_key = (start_date, end_date)
+        cached = self._has_open_trade_day_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            cal = self._call_pro_api(
+                "trade_cal",
+                exchange="SSE",
+                start_date=start_date,
+                end_date=end_date,
+                is_open="1",
+            )
+            has_open = bool(cal is not None and not cal.empty)
+        except Exception:
+            # 保守策略：交易日判断失败时不阻断正常补拉流程。
+            has_open = True
+        self._has_open_trade_day_cache[cache_key] = has_open
+        return has_open
 
     def _wait_for_request_slot(self) -> None:
         if self._request_interval_seconds <= 0:
@@ -358,6 +585,7 @@ class TushareProvider(BaseDataProvider):
             print(f"Tushare 数据连接成功")
             print(f"  API Key: {self._api_key[:8]}...")
             print(f"  缓存目录: {self.cache_dir}")
+            self._warn_multiple_cache_dirs_once()
             
         except ImportError:
             raise ImportError(
@@ -487,6 +715,10 @@ class TushareProvider(BaseDataProvider):
         # 生成缓存键
         cache_key = self._get_cache_key("get_index_components", index_code=index_code, date=date or "latest")
         cache_path = self._get_cache_path(cache_key)
+        target_trade_date = str(date or "").replace("-", "")
+        month_key = ""
+        if target_trade_date and len(target_trade_date) >= 6:
+            month_key = target_trade_date[:6]
         
         # 检查缓存是否存在且未过期（1天）
         if cache_path.exists():
@@ -495,53 +727,128 @@ class TushareProvider(BaseDataProvider):
                 cache_age = time.time() - cache_path.stat().st_mtime
                 if cache_age < 86400:  # 24小时 = 86400秒
                     cached_data = pd.read_parquet(cache_path)
-                    instruments = cached_data['instrument'].tolist()
+                    fetch_status = "ok"
+                    if "fetch_status" in cached_data.columns and not cached_data.empty:
+                        fetch_status = str(cached_data["fetch_status"].iloc[0] or "ok").strip().lower()
+                    instruments = (
+                        cached_data["instrument"].dropna().astype(str).tolist()
+                        if "instrument" in cached_data.columns
+                        else []
+                    )
+                    if fetch_status != "ok":
+                        print(f"  使用指数成分股负缓存: {index_code} ({date or 'latest'})")
+                        return []
                     print(f"  从缓存加载指数成分股: {len(instruments)} 只")
                     return instruments
             except Exception:
                 cache_path.unlink(missing_ok=True)
+
+        # 同月观察日快速复用：同一月份只要命中过一次成分快照，后续观察日直接复用，
+        # 避免每个观察日都请求一次 index_weight。
+        if target_trade_date and month_key:
+            month_cache_key = (str(index_code), month_key)
+            month_hit = self._index_component_month_cache.get(month_cache_key)
+            if month_hit:
+                source_trade_date, instruments = month_hit
+                if source_trade_date <= target_trade_date and instruments:
+                    cache_df = pd.DataFrame({"instrument": instruments})
+                    cache_df["fetch_status"] = "ok"
+                    cache_df["source_trade_date"] = source_trade_date
+                    self._save_to_cache(cache_key, cache_df)
+                    print(
+                        f"  使用同月成分缓存: {index_code} {target_trade_date} "
+                        f"-> {source_trade_date} ({len(instruments)}只)"
+                    )
+                    return instruments
         
         try:
             print(f"  从 Tushare 获取指数 {index_code} 成分股...")
-            
-            # 转换指数代码格式
             ts_index_code = self._convert_index_code(index_code)
-            
-            # 获取成分股
-            if date:
-                # 获取指定日期的成分股
-                df = self._call_pro_api("index_weight", index_code=ts_index_code, trade_date=date.replace('-', ''))
-            else:
-                # 获取最新成分股
-                df = self._call_pro_api("index_weight", index_code=ts_index_code)
-            
-            if df is None or df.empty:
+
+            # 先尝试目标观察日（或最新）
+            instruments = self._fetch_index_components_once(ts_index_code, target_trade_date or None)
+            used_trade_date = target_trade_date or "latest"
+
+            # 观察日失败时，沿交易日向前回溯（有上限），避免大量重复失败请求。
+            if (not instruments) and target_trade_date:
+                max_fallback_days = max(int(self.ts_config.get("index_component_fallback_max_open_days", 20) or 20), 0)
+                fallback_dates = self._list_fallback_trade_dates(target_trade_date, max_fallback_days)
+                for fallback_trade_date in fallback_dates:
+                    instruments = self._fetch_index_components_once(ts_index_code, fallback_trade_date)
+                    if instruments:
+                        used_trade_date = fallback_trade_date
+                        print(
+                            f"  指数成分回溯命中: {index_code} "
+                            f"{target_trade_date} -> {fallback_trade_date}"
+                        )
+                        break
+
+            if not instruments:
                 print(f"警告: 无法获取指数 {index_code} 的成分股")
+                fail_cache_df = pd.DataFrame({"instrument": [], "fetch_status": []})
+                fail_cache_df.loc[0, "fetch_status"] = "failed"
+                self._save_to_cache(cache_key, fail_cache_df)
                 return []
-            
-            # 转换为 Qlib 格式
-            instruments = []
-            for _, row in df.iterrows():
-                ts_code = row['con_code']  # 成分股代码
-                if '.' in ts_code:
-                    code, exchange = ts_code.split('.')
-                    if exchange == 'SH':
-                        instruments.append(f"SH{code}")
-                    elif exchange == 'SZ':
-                        instruments.append(f"SZ{code}")
-            
-            instruments = list(set(instruments))  # 去重
-            
-            # 保存到缓存
-            cache_df = pd.DataFrame({'instrument': instruments})
+
+            cache_df = pd.DataFrame({"instrument": instruments})
+            cache_df["fetch_status"] = "ok"
+            if target_trade_date:
+                cache_df["source_trade_date"] = used_trade_date
+                if month_key:
+                    self._index_component_month_cache[(str(index_code), month_key)] = (
+                        used_trade_date,
+                        list(instruments),
+                    )
             self._save_to_cache(cache_key, cache_df)
             print(f"  已缓存指数成分股: {len(instruments)} 只")
-            
             return instruments
-            
+
         except Exception as e:
             print(f"获取指数成分股失败: {e}")
+            fail_cache_df = pd.DataFrame({"instrument": [], "fetch_status": []})
+            fail_cache_df.loc[0, "fetch_status"] = "failed"
+            self._save_to_cache(cache_key, fail_cache_df)
             return []
+
+    def _fetch_index_components_once(self, ts_index_code: str, trade_date: Optional[str]) -> List[str]:
+        if trade_date:
+            df = self._call_pro_api("index_weight", index_code=ts_index_code, trade_date=trade_date)
+        else:
+            df = self._call_pro_api("index_weight", index_code=ts_index_code)
+        if df is None or df.empty:
+            return []
+        instruments: list[str] = []
+        for _, row in df.iterrows():
+            ts_code = str(row.get("con_code", ""))
+            if "." not in ts_code:
+                continue
+            code, exchange = ts_code.split(".")
+            if exchange == "SH":
+                instruments.append(f"SH{code}")
+            elif exchange == "SZ":
+                instruments.append(f"SZ{code}")
+        return sorted(set(instruments))
+
+    def _list_fallback_trade_dates(self, target_trade_date: str, max_open_days: int) -> List[str]:
+        if max_open_days <= 0:
+            return []
+        end = pd.Timestamp(target_trade_date)
+        start = (end - pd.Timedelta(days=max(120, max_open_days * 8))).strftime("%Y%m%d")
+        cal = self._call_pro_api(
+            "trade_cal",
+            exchange="SSE",
+            start_date=start,
+            end_date=end.strftime("%Y%m%d"),
+            is_open="1",
+        )
+        if cal is None or cal.empty or "cal_date" not in cal.columns:
+            return []
+        open_dates = sorted(str(item) for item in cal["cal_date"].dropna().tolist())
+        # 回溯列表不包含目标日自己
+        fallback_dates = [item for item in open_dates if item < target_trade_date]
+        if not fallback_dates:
+            return []
+        return list(reversed(fallback_dates[-max_open_days:]))
     
     def _convert_index_code(self, code: str) -> str:
         """转换指数代码为 Tushare 格式"""

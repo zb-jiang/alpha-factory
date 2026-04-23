@@ -6,10 +6,11 @@ import json
 import math
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 import yaml
 
 
@@ -84,17 +85,12 @@ CONFIG_OWNERSHIP: dict[str, set[str]] = {
         "min_valid_ratio_per_observation",
     },
     "backtest_rule": {
-        "buy_top_n",
-        "sell_drop_to",
-        "holding_count",
-        "weight_mode",
-        "trade_price",
-        "buy_cost",
-        "sell_cost",
-        "slippage",
-        "suspend_action",
-        "limit_up_action",
-        "limit_down_action",
+        "strategy_type",
+        "TopKDropout",
+        "EnhancedIndexing",
+        "SoftTopK",
+        "MarketTiming",
+        "Execution",
     },
 }
 
@@ -117,6 +113,147 @@ PREPROCESS_DEFAULTS: dict[str, Any] = {
         "market_cap_field": "market_cap",
     },
 }
+
+
+class TopKDropoutRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    buy_top_n: int = Field(20, ge=1)
+    sell_drop_to: int = Field(40, ge=1)
+    holding_count: int = Field(20, ge=1)
+    weight_mode: Literal["equal_weight", "score_weight"] = "equal_weight"
+    max_drop_per_day: int = Field(5, ge=1)
+
+
+class EnhancedIndexingRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    benchmark: str = "000300.SH"
+    tracking_error_limit: float = Field(0.05, ge=0.0, le=1.0)
+    active_weight_bound: float = Field(0.02, ge=0.0, le=1.0)
+    holding_count: int = Field(30, ge=1)
+    weight_mode: Literal["benchmark_tilt", "equal_weight_enhanced", "score_tilt"] = "benchmark_tilt"
+
+
+class SoftTopKRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    top_n: int = Field(30, ge=1)
+    weight_func: Literal["softmax", "rank_power"] = "softmax"
+    holding_count: int = Field(30, ge=1)
+
+
+class MarketTimingRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    market_indicator: str = "EMA_60"
+    reduce_to: float = Field(0.5, ge=0.0, le=1.0)
+    stock_open_filter: Literal["none", "ema", "rsi"] = "rsi"
+    stock_ema_period: int = Field(60, ge=2)
+    rsi_period: int = Field(14, ge=2)
+    rsi_buy_max: float = Field(70.0, ge=0.0, le=100.0)
+
+
+class ExecutionRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    initial_cash: float = Field(1_000_000.0, gt=0.0)
+    trade_price: Literal["next_open", "next_close"] = "next_open"
+    buy_cost: float = Field(0.0015, ge=0.0)
+    sell_cost: float = Field(0.0025, ge=0.0)
+    slippage: float = Field(0.0005, ge=0.0)
+    suspend_action: Literal["skip", "queue"] = "skip"
+    limit_up_action: Literal["skip_buy", "queue_buy", "allow_buy"] = "skip_buy"
+    limit_down_action: Literal["delay_sell", "skip_sell", "force_sell"] = "delay_sell"
+
+
+class BacktestStrategyFactoryRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    strategy_type: Literal["TopKDropout", "EnhancedIndexing", "SoftTopK"] = "TopKDropout"
+    TopKDropout: TopKDropoutRule = Field(default_factory=TopKDropoutRule)
+    EnhancedIndexing: EnhancedIndexingRule = Field(default_factory=EnhancedIndexingRule)
+    SoftTopK: SoftTopKRule = Field(default_factory=SoftTopKRule)
+    MarketTiming: MarketTimingRule = Field(default_factory=MarketTimingRule)
+    Execution: ExecutionRule = Field(default_factory=ExecutionRule)
+
+
+def _is_strategy_factory_backtest_rule(backtest_cfg: dict[str, Any]) -> bool:
+    return "strategy_type" in backtest_cfg
+
+
+def _legacy_backtest_rule_to_factory(backtest_cfg: dict[str, Any]) -> dict[str, Any]:
+    buy_top_n = int(backtest_cfg.get("buy_top_n", 20) or 20)
+    sell_drop_to = int(backtest_cfg.get("sell_drop_to", 40) or 40)
+    holding_count = int(backtest_cfg.get("holding_count", buy_top_n) or buy_top_n)
+    suggested_drop = min(max(1, buy_top_n // 4), buy_top_n)
+    return {
+        "strategy_type": "TopKDropout",
+        "TopKDropout": {
+            "buy_top_n": buy_top_n,
+            "sell_drop_to": sell_drop_to,
+            "holding_count": holding_count,
+            "weight_mode": str(backtest_cfg.get("weight_mode", "equal_weight") or "equal_weight"),
+            "max_drop_per_day": int(backtest_cfg.get("max_drop_per_day", suggested_drop) or suggested_drop),
+        },
+        "EnhancedIndexing": {
+            "benchmark": str(backtest_cfg.get("benchmark", "000300.SH") or "000300.SH"),
+            "tracking_error_limit": float(backtest_cfg.get("tracking_error_limit", 0.05) or 0.05),
+            "active_weight_bound": float(backtest_cfg.get("active_weight_bound", 0.02) or 0.02),
+            "holding_count": int(backtest_cfg.get("enhanced_holding_count", 30) or 30),
+            "weight_mode": "benchmark_tilt",
+        },
+        "SoftTopK": {
+            "top_n": int(backtest_cfg.get("soft_top_n", 30) or 30),
+            "weight_func": str(backtest_cfg.get("weight_func", "softmax") or "softmax"),
+            "holding_count": int(backtest_cfg.get("soft_holding_count", 30) or 30),
+        },
+        "MarketTiming": {
+            "enabled": bool(backtest_cfg.get("market_timing_enabled", False)),
+            "market_indicator": str(
+                backtest_cfg.get("market_timing_market_indicator",
+                backtest_cfg.get("market_timing_indicator", "EMA_60")) or "EMA_60"
+            ),
+            "reduce_to": float(backtest_cfg.get("market_timing_reduce_to", 0.5) or 0.5),
+            "stock_open_filter": str(backtest_cfg.get("market_timing_stock_open_filter", "rsi") or "rsi"),
+            "stock_ema_period": int(backtest_cfg.get("market_timing_stock_ema_period", 60) or 60),
+            "rsi_period": int(backtest_cfg.get("market_timing_rsi_period", 14) or 14),
+            "rsi_buy_max": float(backtest_cfg.get("market_timing_rsi_buy_max", 70.0) or 70.0),
+        },
+        "Execution": {
+            "initial_cash": float(backtest_cfg.get("initial_cash", 1_000_000.0) or 1_000_000.0),
+            "trade_price": str(backtest_cfg.get("trade_price", "next_open") or "next_open"),
+            "buy_cost": float(backtest_cfg.get("buy_cost", 0.0015) or 0.0015),
+            "sell_cost": float(backtest_cfg.get("sell_cost", 0.0025) or 0.0025),
+            "slippage": float(backtest_cfg.get("slippage", 0.0005) or 0.0005),
+            "suspend_action": str(backtest_cfg.get("suspend_action", "skip") or "skip"),
+            "limit_up_action": str(backtest_cfg.get("limit_up_action", "skip_buy") or "skip_buy"),
+            "limit_down_action": str(backtest_cfg.get("limit_down_action", "delay_sell") or "delay_sell"),
+        },
+    }
+
+
+def validate_backtest_rule_factory(backtest_cfg: dict[str, Any]) -> BacktestStrategyFactoryRule:
+    candidate = backtest_cfg if _is_strategy_factory_backtest_rule(backtest_cfg) else _legacy_backtest_rule_to_factory(backtest_cfg)
+    return BacktestStrategyFactoryRule.model_validate(candidate)
+
+
+def normalized_backtest_rule_config() -> dict[str, Any]:
+    _, _, backtest_cfg = _load_layered_configs()
+    validated = validate_backtest_rule_factory(backtest_cfg)
+    return validated.model_dump()
+
+
+def _active_strategy_fields(rule: dict[str, Any]) -> dict[str, Any]:
+    strategy_type = str(rule.get("strategy_type", "TopKDropout"))
+    if strategy_type == "TopKDropout":
+        return dict(rule["TopKDropout"])
+    if strategy_type == "EnhancedIndexing":
+        return dict(rule["EnhancedIndexing"])
+    if strategy_type == "SoftTopK":
+        return dict(rule["SoftTopK"])
+    raise ValueError(f"不支持的 strategy_type: {strategy_type}")
 
 
 def _normalize_label_block(config: dict[str, Any]) -> dict[str, Any]:
@@ -446,8 +583,19 @@ def market_context_config() -> dict[str, Any]:
 
 
 def backtest_rule_config() -> dict[str, Any]:
-    _, _, backtest_cfg = _load_layered_configs()
-    return backtest_cfg
+    normalized = normalized_backtest_rule_config()
+    active = _active_strategy_fields(normalized)
+    execution = dict(normalized.get("Execution", {}))
+    return {
+        **active,
+        **execution,
+        "strategy_type": normalized.get("strategy_type"),
+        "TopKDropout": normalized.get("TopKDropout", {}),
+        "EnhancedIndexing": normalized.get("EnhancedIndexing", {}),
+        "SoftTopK": normalized.get("SoftTopK", {}),
+        "MarketTiming": normalized.get("MarketTiming", {}),
+        "Execution": execution,
+    }
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -976,6 +1124,7 @@ def build_feature_frame(
     raw_frame: pd.DataFrame,
     config: dict[str, Any] | None = None,
     feature_cfg: dict[str, Any] | None = None,
+    clip_window: bool = True,
 ) -> pd.DataFrame:
     cfg = config or env_config()
     fp_cfg = feature_cfg or feature_pool_config()
@@ -986,7 +1135,9 @@ def build_feature_frame(
     feature_frame = pd.concat(frames).sort_index()
     label = build_label_series(raw_frame, cfg)
     feature_frame[label.name] = label
-    return clip_to_active_window(feature_frame, cfg)
+    if clip_window:
+        return clip_to_active_window(feature_frame, cfg)
+    return feature_frame
 
 
 def build_label_series(
@@ -1123,19 +1274,78 @@ def build_summary_payload(stats: pd.DataFrame, corr: pd.DataFrame, label_name: s
     }
 
 
+def _balanced_json_candidate(text: str) -> str:
+    in_string = False
+    escape = False
+    curly_balance = 0
+    square_balance = 0
+    for ch in text:
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            curly_balance += 1
+        elif ch == "}":
+            curly_balance = max(curly_balance - 1, 0)
+        elif ch == "[":
+            square_balance += 1
+        elif ch == "]":
+            square_balance = max(square_balance - 1, 0)
+    return text + ("]" * square_balance) + ("}" * curly_balance)
+
+
+def _repair_json_by_balancing(text: str, max_inserts: int = 64) -> str:
+    candidate = _balanced_json_candidate(text)
+    for _ in range(max_inserts):
+        try:
+            json.loads(candidate)
+            return candidate
+        except json.JSONDecodeError as error:
+            if error.pos <= 0 or error.pos >= len(candidate):
+                return candidate
+            if candidate[error.pos] != "{":
+                return candidate
+            left = error.pos - 1
+            while left >= 0 and candidate[left].isspace():
+                left -= 1
+            if left >= 0 and candidate[left] == ",":
+                # 常见错误：对象结束少一个 '}'，导致 ", {" 被解析为对象内部逗号后直接跟 '{'。
+                candidate = candidate[:left] + "}" + candidate[left:]
+                continue
+            return candidate
+    return candidate
+
+
+def _loads_with_single_repair(text: str) -> Any:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        repaired = _repair_json_by_balancing(text)
+        if repaired != text:
+            return json.loads(repaired)
+        raise
+
+
 def parse_json_text(text: str) -> Any:
     stripped = text.strip()
     fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", stripped, flags=re.DOTALL)
     if fenced:
         stripped = fenced.group(1).strip()
     if stripped.startswith("{") or stripped.startswith("["):
-        return json.loads(stripped)
+        return _loads_with_single_repair(stripped)
     object_match = re.search(r"(\{.*\})", stripped, flags=re.DOTALL)
     if object_match:
-        return json.loads(object_match.group(1))
+        return _loads_with_single_repair(object_match.group(1))
     array_match = re.search(r"(\[.*\])", stripped, flags=re.DOTALL)
     if array_match:
-        return json.loads(array_match.group(1))
+        return _loads_with_single_repair(array_match.group(1))
     raise ValueError("无法从大模型输出中提取 JSON")
 
 

@@ -6,7 +6,6 @@ from pydantic import BaseModel, Field, ValidationError
 
 from common import (
     OUTPUT_DIR,
-    backtest_rule_config,
     feature_pool_config,
     formula_feature_names,
     generation_constraints,
@@ -25,7 +24,7 @@ class FactorCandidate(BaseModel):
     reason: str
     risk: str
     expected_failure_regime: str = ""
-    backtest_rule: Dict[str, Any]
+    backtest_rule: Dict[str, Any] = Field(default_factory=dict)
 
 
 class FactorPayload(BaseModel):
@@ -40,7 +39,6 @@ def run() -> None:
     allowed_features = {item["name"] for item in feature_cfg.get("base_features", [])}
     allowed_operators = set(feature_cfg.get("allowed_operators", []))
     constraints = generation_constraints(feature_cfg)
-    fixed_rule = backtest_rule_config()
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for candidate in factor_payload.factors:
@@ -58,10 +56,10 @@ def run() -> None:
                 raise ValueError(
                     f"fields 与公式实际使用特征不一致: fields={sorted(field_set)}, formula={sorted(formula_fields)}"
                 )
-            if candidate.backtest_rule != fixed_rule:
-                raise ValueError("backtest_rule 与固定交易规则不一致")
             factor_data = candidate.model_dump()
             factor_data["llm_direction"] = factor_data.pop("direction")
+            # 完全去耦：交易规则由 step08 从统一配置读取，不写入因子文件。
+            factor_data.pop("backtest_rule", None)
             accepted.append(factor_data)
         except Exception as exc:
             rejected.append(

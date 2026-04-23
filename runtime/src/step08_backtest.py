@@ -172,6 +172,11 @@ def run() -> None:
         raw_frame["adj_close"] = raw_frame["close"]
 
     rule = backtest_rule_config()
+    strategy_type = str(rule.get("strategy_type", "TopKDropout"))
+    if strategy_type != "TopKDropout":
+        raise NotImplementedError(
+            f"step08_backtest.py 当前仅支持 strategy_type=TopKDropout，收到: {strategy_type}"
+        )
     trade_price = _resolve_trade_price_mode(rule)
     price_field = "adj_close" if trade_price == "next_close" else "adj_open"
     trade_prices = (

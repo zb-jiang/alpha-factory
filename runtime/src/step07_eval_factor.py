@@ -70,7 +70,7 @@ def run() -> None:
         warmup_trading_days=warmup_days,
         forward_trading_days=forward_days,
     )
-    feature_frame = build_feature_frame(raw_frame, config, feature_cfg)
+    feature_frame = build_feature_frame(raw_frame, config, feature_cfg, clip_window=False)
     metric_rows: list[dict[str, object]] = []
     factor_input = feature_frame[[item["name"] for item in feature_cfg.get("base_features", [])]]
     label_series = build_label_series(raw_frame, config)
