@@ -1124,7 +1124,6 @@ def build_feature_frame(
     raw_frame: pd.DataFrame,
     config: dict[str, Any] | None = None,
     feature_cfg: dict[str, Any] | None = None,
-    clip_window: bool = True,
 ) -> pd.DataFrame:
     cfg = config or env_config()
     fp_cfg = feature_cfg or feature_pool_config()
@@ -1135,9 +1134,7 @@ def build_feature_frame(
     feature_frame = pd.concat(frames).sort_index()
     label = build_label_series(raw_frame, cfg)
     feature_frame[label.name] = label
-    if clip_window:
-        return clip_to_active_window(feature_frame, cfg)
-    return feature_frame
+    return clip_to_active_window(feature_frame, cfg)
 
 
 def build_label_series(
