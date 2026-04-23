@@ -69,18 +69,27 @@ def _audit_remaining_gaps(
     start_ymd: str,
     end_ymd: str,
 ) -> None:
+    # 先统一同步一次交易日历，避免在每只股票审计时重复回源。
+    if hasattr(provider, "_sync_trade_cal"):
+        provider._sync_trade_cal(start_ymd, end_ymd)  # type: ignore[attr-defined]
+
     api_names = ("daily", "adj_factor", "daily_basic")
     summary: list[str] = []
     for api_name in api_names:
         missing_code_count = 0
         missing_range_count = 0
-        for qlib_code in instruments:
+        total = len(instruments)
+        for i, qlib_code in enumerate(instruments, 1):
             ts_code = provider._convert_to_ts_code(qlib_code)  # type: ignore[attr-defined]
             ranges = provider._get_unfetched_ranges(api_name, ts_code, start_ymd, end_ymd)  # type: ignore[attr-defined]
             if not ranges:
+                if i % 100 == 0 or i == total:
+                    print(f"  审计 {api_name} 进度: {i}/{total}")
                 continue
             missing_code_count += 1
             missing_range_count += len(ranges)
+            if i % 100 == 0 or i == total:
+                print(f"  审计 {api_name} 进度: {i}/{total}")
         summary.append(
             f"{api_name}: missing_codes={missing_code_count}, missing_ranges={missing_range_count}"
         )

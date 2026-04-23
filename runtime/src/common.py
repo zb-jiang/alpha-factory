@@ -83,6 +83,7 @@ CONFIG_OWNERSHIP: dict[str, set[str]] = {
         "label",
         "preprocess",
         "min_valid_ratio_per_observation",
+        "index_component_search_max_open_days",
     },
     "backtest_rule": {
         "strategy_type",
