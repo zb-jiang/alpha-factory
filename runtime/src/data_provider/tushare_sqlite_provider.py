@@ -76,6 +76,15 @@ class TushareSQLiteProvider(TushareProvider):
             CREATE TABLE IF NOT EXISTS stock_basic (ts_code TEXT PRIMARY KEY, symbol TEXT, name TEXT, area TEXT, industry TEXT, market TEXT, list_date TEXT, delist_date TEXT, list_status TEXT);
             CREATE TABLE IF NOT EXISTS index_weight (index_code TEXT, trade_date TEXT, con_code TEXT, weight REAL, PRIMARY KEY(index_code, trade_date, con_code)) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_index_weight_date ON index_weight(trade_date);
+            CREATE TABLE IF NOT EXISTS index_component_resolve_map (
+                index_code TEXT,
+                target_trade_date TEXT,
+                resolved_trade_date TEXT,
+                resolved_via TEXT,
+                updated_at TEXT,
+                PRIMARY KEY(index_code, target_trade_date)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_icrm_resolved_date ON index_component_resolve_map(resolved_trade_date);
             CREATE TABLE IF NOT EXISTS stock_daily_price (ts_code TEXT, trade_date TEXT, open REAL, high REAL, low REAL, close REAL, pre_close REAL, change REAL, pct_chg REAL, vol REAL, amount REAL, adj_factor REAL, PRIMARY KEY(ts_code, trade_date)) WITHOUT ROWID;
             CREATE TABLE IF NOT EXISTS stock_fundamental (ts_code TEXT, trade_date TEXT, data_type TEXT, features TEXT, PRIMARY KEY(ts_code, trade_date, data_type)) WITHOUT ROWID;
             CREATE TABLE IF NOT EXISTS generic_cache (cache_key TEXT PRIMARY KEY, payload BLOB NOT NULL, updated_at TEXT);
@@ -477,7 +486,7 @@ class TushareSQLiteProvider(TushareProvider):
         return result
 
     def get_index_components(self, index_code: str, date: str = None) -> List[str]:
-        """重写：按“指定日期 -> 逐日回溯”顺序，先查缓存，再查 Tushare。"""
+        """重写：优先命中“目标日->真实成分日”映射，再按逐日回溯补齐。"""
         ts_index_code = self._convert_index_code(index_code)
         conn = self._get_conn()
         normalized_date = str(date or "").replace("-", "")
@@ -513,6 +522,50 @@ class TushareSQLiteProvider(TushareProvider):
                 # 忽略主键冲突等写缓存异常，不影响主流程返回。
                 pass
 
+        def _load_resolved_trade_date(target_trade_date: str) -> str:
+            row = conn.execute(
+                """
+                SELECT resolved_trade_date
+                FROM index_component_resolve_map
+                WHERE index_code=? AND target_trade_date=?
+                """,
+                (ts_index_code, target_trade_date),
+            ).fetchone()
+            if not row or not row[0]:
+                return ""
+            return str(row[0])
+
+        def _save_resolved_trade_date(target_trade_date: str, resolved_trade_date: str, via: str) -> None:
+            if not target_trade_date or not resolved_trade_date:
+                return
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO index_component_resolve_map(
+                        index_code, target_trade_date, resolved_trade_date, resolved_via, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, datetime('now'))
+                    ON CONFLICT(index_code, target_trade_date) DO UPDATE SET
+                        resolved_trade_date=excluded.resolved_trade_date,
+                        resolved_via=excluded.resolved_via,
+                        updated_at=excluded.updated_at
+                    """,
+                    (ts_index_code, target_trade_date, resolved_trade_date, via),
+                )
+                conn.commit()
+            except Exception:
+                pass
+
+        def _delete_resolved_trade_date(target_trade_date: str) -> None:
+            try:
+                conn.execute(
+                    "DELETE FROM index_component_resolve_map WHERE index_code=? AND target_trade_date=?",
+                    (ts_index_code, target_trade_date),
+                )
+                conn.commit()
+            except Exception:
+                pass
+
         def _iter_search_dates(target_trade_date: str) -> List[str]:
             # 按“目标日 -> 向前开市日”顺序组织搜索队列。
             fallback_dates = self._list_fallback_trade_dates(target_trade_date, max_search_open_days)
@@ -523,10 +576,19 @@ class TushareSQLiteProvider(TushareProvider):
             return dates
 
         if normalized_date:
+            resolved_trade_date = _load_resolved_trade_date(normalized_date)
+            if resolved_trade_date:
+                resolved_codes = _load_snapshot(resolved_trade_date)
+                if resolved_codes:
+                    return resolved_codes
+                # 映射指向的快照不存在时，清理失效映射并进入回溯补齐。
+                _delete_resolved_trade_date(normalized_date)
+
             # 严格按“每个日期先缓存、再 Tushare”的顺序逐日回溯。
             for trade_date in _iter_search_dates(normalized_date):
                 cached_codes = _load_snapshot(trade_date)
                 if cached_codes:
+                    _save_resolved_trade_date(normalized_date, trade_date, "cache")
                     if trade_date != normalized_date:
                         print(
                             f"指数成分回溯命中缓存: {index_code} "
@@ -536,6 +598,7 @@ class TushareSQLiteProvider(TushareProvider):
                 fetched_codes = self._fetch_index_components_once(ts_index_code, trade_date)
                 if fetched_codes:
                     _cache_snapshot(trade_date, fetched_codes)
+                    _save_resolved_trade_date(normalized_date, trade_date, "tushare")
                     print(
                         f"指数成分回溯命中Tushare: {index_code} "
                         f"{normalized_date} -> {trade_date} ({len(fetched_codes)}只)"
