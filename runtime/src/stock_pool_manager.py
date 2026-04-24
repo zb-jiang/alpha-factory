@@ -255,9 +255,14 @@ class StockPoolManager:
         # 恢复原始配置
         self.pool_type = original_pool_type
         
-        # 简化版分层抽样：按市值分层
+        # 按市值分层抽样
         if "market_cap" in stratify_by:
-            sampled = self._stratify_by_market_cap(base_pool, sample_size, seed)
+            sampled = self._stratify_by_market_cap(
+                base_pool,
+                sample_size,
+                seed,
+                as_of_date=end_date or start_date,
+            )
         else:
             # 其他分层方式暂不支持，使用随机抽样
             print(f"警告: 不支持的分层方式 {stratify_by}，使用随机抽样")
@@ -267,36 +272,99 @@ class StockPoolManager:
         print(f"分层抽样: {len(sampled)} 只股票 (分层维度: {stratify_by}, seed={seed})")
         return sampled
     
-    def _stratify_by_market_cap(self, codes: List[str], sample_size: int, seed: int) -> List[str]:
+    def _stratify_by_market_cap(
+        self,
+        codes: List[str],
+        sample_size: int,
+        seed: int,
+        as_of_date: str | None = None,
+    ) -> List[str]:
         """
         按市值分层抽样
-        
-        简化实现：将股票列表分成 3 层（小、中、大市值）
+
+        实现说明：
+        - 使用数据提供者获取市值（$market_cap）并按真实市值排序
+        - 将基础池按市值分为 3 层（小/中/大）
+        - 按层内随机抽样，默认目标配额尽量均分到 3 层
         """
-        random.seed(seed)
-        
-        # 简化版：直接按股票代码排序后分层
-        sorted_codes = sorted(codes)
-        n = len(sorted_codes)
-        
-        # 分成 3 层
-        layer_size = n // 3
-        layers = [
-            sorted_codes[:layer_size],           # 小市值
-            sorted_codes[layer_size:2*layer_size],  # 中市值
-            sorted_codes[2*layer_size:]          # 大市值
-        ]
-        
-        # 每层抽样
-        samples_per_layer = sample_size // 3
-        sampled = []
-        for layer in layers:
-            if len(layer) > samples_per_layer:
-                sampled.extend(random.sample(layer, samples_per_layer))
-            else:
-                sampled.extend(layer)
-        
-        return sampled[:sample_size]
+        if not codes or sample_size <= 0:
+            return []
+
+        rng = random.Random(seed)
+        all_codes = sorted(set(codes))
+        target_size = min(sample_size, len(all_codes))
+
+        as_of_ts = pd.Timestamp(
+            as_of_date
+            or self.config.get("train_end_date")
+            or pd.Timestamp.today()
+        ).normalize()
+        start_date = (as_of_ts - pd.Timedelta(days=90)).strftime("%Y-%m-%d")
+        end_date = as_of_ts.strftime("%Y-%m-%d")
+
+        market_cap_map: dict[str, float] = {}
+        try:
+            from data_provider import get_data_provider
+
+            provider = get_data_provider(self.config)
+            provider.initialize()
+            market_cap_frame = provider.get_features(
+                all_codes,
+                fields=["$market_cap"],
+                start_date=start_date,
+                end_date=end_date,
+                freq="day",
+            )
+
+            if not market_cap_frame.empty and "$market_cap" in market_cap_frame.columns:
+                caps = pd.to_numeric(market_cap_frame["$market_cap"], errors="coerce")
+                for code, series in caps.groupby(level="instrument", sort=False):
+                    series = series.dropna()
+                    if series.empty:
+                        continue
+                    market_cap_map[str(code)] = float(series.iloc[-1])
+        except Exception as exc:
+            print(f"警告: 获取市值数据失败，分层抽样回退为按代码顺序分层: {exc}")
+
+        # 优先按真实市值排序；缺失市值的股票放到末尾（内部按代码排序保证可复现）
+        valid_pairs = [(code, market_cap_map[code]) for code in all_codes if code in market_cap_map]
+        valid_pairs.sort(key=lambda item: item[1])  # 小 -> 大
+        missing_codes = [code for code in all_codes if code not in market_cap_map]
+        ordered_codes = [code for code, _ in valid_pairs] + sorted(missing_codes)
+
+        n = len(ordered_codes)
+        base = n // 3
+        rem = n % 3
+        layer_sizes = [base + (1 if i < rem else 0) for i in range(3)]
+
+        layers: list[list[str]] = []
+        cursor = 0
+        for size in layer_sizes:
+            layers.append(ordered_codes[cursor:cursor + size])
+            cursor += size
+
+        target_base = target_size // 3
+        target_rem = target_size % 3
+        layer_targets = [target_base + (1 if i < target_rem else 0) for i in range(3)]
+
+        sampled: list[str] = []
+        selected = set()
+        for layer, layer_target in zip(layers, layer_targets):
+            take = min(layer_target, len(layer))
+            if take <= 0:
+                continue
+            picks = rng.sample(layer, take) if len(layer) > take else list(layer)
+            sampled.extend(picks)
+            selected.update(picks)
+
+        # 若某层股票不足，使用其余未选股票补齐目标样本数
+        if len(sampled) < target_size:
+            remaining = [code for code in ordered_codes if code not in selected]
+            need = min(target_size - len(sampled), len(remaining))
+            if need > 0:
+                sampled.extend(rng.sample(remaining, need) if len(remaining) > need else remaining)
+
+        return sampled[:target_size]
     
     def _apply_sampling(self, codes: List[str], max_instruments: int) -> List[str]:
         """

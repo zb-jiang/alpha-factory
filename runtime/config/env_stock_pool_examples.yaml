@@ -83,6 +83,8 @@ example_5_random_100:
   stock_pool:
     type: "random_sample"
     base_pool_type: "all_market"  # 从全市场抽样
+    # 如需从指数成分股抽样，可改为:
+    # base_pool_type: "index_components"  # 并同时配置 index_code，例如 "000300.XSHG"
     sample_size: 100  # 抽样100只
     seed: 42  # 固定随机种子，保证可复现
 
@@ -99,7 +101,7 @@ example_5_random_100:
 example_6_stratified_500:
   stock_pool:
     type: "stratified_sample"
-    base_pool_type: "all_market"  # 从全市场分层
+    base_pool_type: "all_market"  # 从全市场分层，分三层
     sample_size: 500  # 抽样500只
     stratify_by: ["market_cap"]  # 按市值分层
     seed: 42  # 固定随机种子
