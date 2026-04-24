@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 
 from common import OUTPUT_DIR, clear_runtime_context, ensure_runtime_dirs, env_config, write_json
-from step00a_clean import run as run_step00a
-from step00b_precache_tushare import run as run_step00b
+from step00_clean import run as run_step00
+from step01_precache_tushare import run as run_step01
 from step07_eval_factor import run as run_step07
 from step08_backtrader import run_backtrader_batch_export as run_step08
 from step09_score import run as run_step09
@@ -57,7 +57,7 @@ def run() -> None:
         print("================================================================")
         return
 
-    run_step00b()
+    run_step01()
 
     print("开始收集样本内 (In-Sample) 训练出的优秀因子...")
     factors = collect_train_top_factors()

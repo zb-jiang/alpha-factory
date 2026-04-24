@@ -1,6 +1,6 @@
 # ==============================================================================
 # 市场上下文配置（market_context.yaml）
-# 作用：驱动 step03b_market_context.py 生成 runtime/outputs/health/market_context.json
+# 作用：驱动 step03_market_context.py 生成 runtime/outputs/health/market_context.json
 # 原则：仅放“市场状态计算与离散化”的参数，不放训练/回测主流程参数
 # ==============================================================================
 

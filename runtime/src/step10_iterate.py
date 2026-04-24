@@ -16,10 +16,10 @@ from common import (
     set_runtime_context,
     write_json,
 )
-from step00a_clean import clean_outputs, run as run_step00a
-from step00b_precache_tushare import run as run_step00b
-from step03_health_check import run as run_step03
-from step03b_market_context import run as run_step03b
+from step00_clean import clean_outputs, run as run_step00
+from step01_precache_tushare import run as run_step01
+from step02_health_check import run as run_step02
+from step03_market_context import run as run_step03
 from step04_build_summary import run as run_step04
 from step05_call_llm import run as run_step05
 from step06_validate_factor import run as run_step06
@@ -63,10 +63,10 @@ def _metric_value(row: dict, *keys: str) -> float:
 
 
 def _prepare_discovery_window(window: dict[str, str]) -> None:
-    # Step03/03b 仅依赖窗口数据与配置，在同一窗口内可复用。
+    # Step02/03 仅依赖窗口数据与配置，在同一窗口内可复用。
     set_runtime_context(_stage_context(window, "discovery", 1))
+    run_step02()
     run_step03()
-    run_step03b()
 
 
 def _run_discovery_iteration(iteration: int, window: dict[str, str], scope: str) -> None:
@@ -153,7 +153,7 @@ def _run_validation(window: dict[str, str], candidates: list[dict]) -> list[dict
     metrics = final_score.copy()
     if not factor_metrics.empty and "factor_name" in factor_metrics.columns:
         metrics = metrics.merge(
-            factor_metrics[["factor_name", "rank_ic_ir", "positive_ic_ratio"]],
+            factor_metrics[["factor_name", "mean_rank_ic", "rank_ic_ir", "positive_ic_ratio"]],
             on="factor_name",
             how="left",
         )
@@ -181,6 +181,7 @@ def _run_validation(window: dict[str, str], candidates: list[dict]) -> list[dict
                 "discovery_total_score": float(candidate.get("discovery_total_score", 0.0) or 0.0),
                 "validation_total_score": _metric_value(row, "total_score"),
                 "annualized_return": _metric_value(row, "annualized_return", "annualized_return_x", "annualized_return_y"),
+                "mean_rank_ic": _metric_value(row, "mean_rank_ic", "mean_rank_ic_x", "mean_rank_ic_y"),
                 "rank_ic_ir": _metric_value(row, "rank_ic_ir", "rank_ic_ir_x", "rank_ic_ir_y"),
                 "positive_ic_ratio": _metric_value(row, "positive_ic_ratio", "positive_ic_ratio_x", "positive_ic_ratio_y"),
                 "max_drawdown": _metric_value(row, "max_drawdown", "max_drawdown_x", "max_drawdown_y"),
@@ -207,6 +208,7 @@ def _aggregate_cross_window_results(validation_rows: list[dict], total_windows: 
             mean_validation_total_score=("validation_total_score", "mean"),
             min_validation_total_score=("validation_total_score", "min"),
             mean_annualized_return=("annualized_return", "mean"),
+            mean_rank_ic=("mean_rank_ic", "mean"),
             mean_rank_ic_ir=("rank_ic_ir", "mean"),
             mean_positive_ic_ratio=("positive_ic_ratio", "mean"),
             mean_max_drawdown=("max_drawdown", "mean"),
@@ -251,8 +253,8 @@ def run() -> None:
         print("请先将 analysis_rule.yaml 中的 run_mode 修改为 'train'，然后再运行此脚本。")
         print("================================================================")
         return
-    run_step00a()
-    run_step00b()
+    run_step00()
+    run_step01()
     windows = build_training_windows(config)
     iterations = int(config.get("iteration_count", 3))
     write_json(OUTPUT_DIR / "backtest" / "training_windows.json", {"windows": windows})
