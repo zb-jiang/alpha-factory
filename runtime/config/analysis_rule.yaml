@@ -68,10 +68,10 @@ stock_pool:
   include_st: false
   include_new_stock: false
   new_stock_days: 60
-# 指数成分查询时，按“目标日 -> 向前开市日”逐日回溯的最大开市日数量。
-# 逻辑：每个回溯日都先查本地 SQLite 缓存；缓存没有再请求 Tushare；命中后立即回写缓存。
-# 作用：随着运行次数增加，缓存会被逐步补全，后续对同类日期请求会越来越少访问 Tushare。
-index_component_search_max_open_days: 2000
+  # 指数成分查询时，按“目标日 -> 向前开市日”逐日回溯的最大开市日数量。
+  # 逻辑：每个回溯日都先查本地 SQLite 缓存；缓存没有再请求 Tushare；命中后立即回写缓存。
+  # 作用：随着运行次数增加，缓存会被逐步补全，后续对同类日期请求会越来越少访问 Tushare。
+  index_component_search_max_open_days: 2000
 
 # 【3.1 价格复权口径（影响因子与标签）】
 # 可选值：
@@ -94,7 +94,7 @@ rebalance_interval: 1
 # - weekly: first_trading_day_of_week / last_trading_day_of_week
 # - monthly: first_trading_day_of_month / last_trading_day_of_month
 rebalance_anchor: first_trading_day_of_week
-# 每个观测日最小有效样本占比（n_valid / n_pool），低于阈值的观测日不参与 IC/IR 聚合。
+# 每个观测日最小有效样本占比（n_valid / label_available），低于阈值的观测日不参与 IC/IR 聚合。
 min_valid_ratio_per_observation: 0.9
 
 # 【5. 收益标签配置（LLM 挖掘阶段与因子研究阶段共用）】

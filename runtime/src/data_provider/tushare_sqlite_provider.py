@@ -490,9 +490,14 @@ class TushareSQLiteProvider(TushareProvider):
         ts_index_code = self._convert_index_code(index_code)
         conn = self._get_conn()
         normalized_date = str(date or "").replace("-", "")
-        configured_max_open_days = self.config.get(
+        stock_pool_cfg = self.config.get("stock_pool") or {}
+        # 新配置建议放在 stock_pool 下；同时兼容历史顶层字段。
+        configured_max_open_days = stock_pool_cfg.get(
             "index_component_search_max_open_days",
-            self.ts_config.get("index_component_search_max_open_days", 2000),
+            self.config.get(
+                "index_component_search_max_open_days",
+                self.ts_config.get("index_component_search_max_open_days", 2000),
+            ),
         )
         max_search_open_days = max(int(configured_max_open_days or 2000), 1)
 

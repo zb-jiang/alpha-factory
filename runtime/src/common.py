@@ -1929,15 +1929,18 @@ def factor_metrics_from_series(
     min_valid_ratio = float(cfg.get("min_valid_ratio_per_observation", 0.0) or 0.0)
     if min_valid_ratio > 0:
         valid_stats = (
-            observation_frame.assign(_valid_pair=observation_frame[["score", "label"]].notna().all(axis=1))
+            observation_frame.assign(
+                _valid_pair=observation_frame[["score", "label"]].notna().all(axis=1),
+                _label_available=observation_frame["label"].notna(),
+            )
             .groupby(level="datetime")
             .agg(
                 n_valid=("_valid_pair", "sum"),
-                n_pool=("_valid_pair", "size"),
+                label_available=("_label_available", "sum"),
             )
         )
         keep_dates = valid_stats.loc[
-            valid_stats["n_valid"] >= valid_stats["n_pool"] * min_valid_ratio
+            valid_stats["n_valid"] >= valid_stats["label_available"] * min_valid_ratio
         ].index
         observation_frame = observation_frame.loc[
             observation_frame.index.get_level_values("datetime").isin(keep_dates)
