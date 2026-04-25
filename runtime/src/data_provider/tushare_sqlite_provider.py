@@ -145,9 +145,12 @@ class TushareSQLiteProvider(TushareProvider):
         if not statuses:
             return
 
+        print(f"  [SQLite] 同步 stock_basic: 需要补齐状态 {statuses}", flush=True)
         for status in statuses:
+            print(f"  [SQLite] 拉取 stock_basic(list_status={status}) ...", flush=True)
             df = self._call_pro_api('stock_basic', exchange='', list_status=status)
             if df is None or df.empty:
+                print(f"  [SQLite] stock_basic(list_status={status}) 返回空", flush=True)
                 continue
             rows = []
             for _, row in df.iterrows():
@@ -188,7 +191,12 @@ class TushareSQLiteProvider(TushareProvider):
                 """,
                 rows,
             )
+            print(
+                f"  [SQLite] stock_basic(list_status={status}) 写入完成: {len(rows)} 行",
+                flush=True,
+            )
         conn.commit()
+        print("  [SQLite] stock_basic 同步完成", flush=True)
 
     def _get_unfetched_ranges(self, api_name: str, ts_code: str, start_date: str, end_date: str):
         """SQLite 口径缺口审计：返回区间内仍未覆盖的交易日范围。"""
@@ -435,6 +443,7 @@ class TushareSQLiteProvider(TushareProvider):
     def get_instruments(self, market: str = "all") -> List[str]:
         """从 SQLite 的 stock_basic 表读取股票列表。"""
         self.initialize()
+        print("  [SQLite] 开始准备股票列表（检查 stock_basic）...", flush=True)
         self._sync_stock_basic()
         conn = self._get_conn()
         rows = conn.execute(

@@ -20,6 +20,7 @@ DATA_DIR = RUNTIME_ROOT / "data"
 OUTPUT_DIR = RUNTIME_ROOT / "outputs"
 SRC_DIR = RUNTIME_ROOT / "src"
 MARKET_CONTEXT_CONFIG_PATH = CONFIG_DIR / "market_context.yaml"
+SELECTOR_CONFIG_PATH = CONFIG_DIR / "selector.yaml"
 RUNTIME_CONTEXT_PATH = OUTPUT_DIR / "_runtime" / "active_context.json"
 OUTPUT_ARTIFACTS = [
     Path("health") / "feature_stats.csv",
@@ -586,6 +587,12 @@ def market_context_config() -> dict[str, Any]:
     return load_yaml_file(MARKET_CONTEXT_CONFIG_PATH)
 
 
+def selector_config() -> dict[str, Any]:
+    if not SELECTOR_CONFIG_PATH.exists():
+        return {}
+    return load_yaml_file(SELECTOR_CONFIG_PATH)
+
+
 def backtest_rule_config() -> dict[str, Any]:
     normalized = normalized_backtest_rule_config()
     active = _active_strategy_fields(normalized)
@@ -1053,11 +1060,17 @@ def load_raw_data(
         end_timestamp = (end_timestamp + pd.offsets.BDay(int(forward_trading_days) + 5)).normalize()
     start_time = _date_text(start_timestamp)
     end_time = _date_text(end_timestamp)
+    print(
+        f"加载原始数据窗口: {start_time} ~ {end_time} "
+        f"(fields={len(fields)}, warmup={warmup_trading_days}, forward={forward_trading_days})",
+        flush=True,
+    )
     if str(cfg.get("price_adjust_reference_date", "auto") or "auto").strip().lower() == "auto":
         # 默认把前复权参考日固定到本次任务的 load_end，避免随运行日期漂移。
         cfg["price_adjust_reference_date"] = end_time
     
     if _dynamic_index_pool_enabled(cfg):
+        print("开始构建动态指数股票池...", flush=True)
         observation_dates = _observation_dates_from_run_window(cfg)
         component_map = _dynamic_index_components_by_observation_date(cfg, observation_dates)
         instruments = sorted({code for codes in component_map.values() for code in codes})
@@ -1066,10 +1079,17 @@ def load_raw_data(
             f"合并后 {len(instruments)} 只股票"
         )
     else:
+        print("开始获取股票列表...", flush=True)
         instruments = list_instruments(cfg)
+        print(f"股票列表准备完成: {len(instruments)} 只", flush=True)
     
     provider = get_data_provider(cfg)
     provider.initialize()
+    print(
+        f"开始加载特征数据: instruments={len(instruments)}, fields={len(fields)}, "
+        f"freq={str(cfg.get('freq', 'day'))}",
+        flush=True,
+    )
     frame = provider.get_features(
         instruments=instruments,
         fields=raw_field_tokens(fields),
@@ -1077,6 +1097,7 @@ def load_raw_data(
         end_date=end_time,
         freq=str(cfg.get("freq", "day")),
     )
+    print(f"特征数据加载完成: rows={len(frame)}", flush=True)
     
     frame = frame.sort_index()
     frame.columns = [column.replace("$", "") for column in frame.columns]

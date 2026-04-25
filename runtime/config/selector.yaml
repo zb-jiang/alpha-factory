@@ -1,0 +1,37 @@
+# ==============================================================================
+# 训练窗口选择器配置（selector.yaml）
+# 用途：为当前 test 窗口推荐“连续 N 个月”的历史训练窗口（仅出报告，不自动改 analysis_rule.yaml）
+# ==============================================================================
+
+# 回看历史年数。
+# 含义：以 test_start_date 为锚点，向前回看多少年的历史月份用于相似度比较。
+# 例如 test_start_date=2026-01-01，lookback_years=10，则历史候选区间起点为 2016-01-01。
+lookback_years: 10
+
+# 推荐窗口长度（月），支持单值或列表。
+# 含义：候选训练窗口必须是“连续 recommend_span_months 个月”。
+# 建议直接配置为列表，同时评估多种长度，例如 [12, 18, 24]。
+recommend_span_months:
+  - 12
+  - 18
+  - 24
+
+# Top-K 相似月份数量。
+# 含义：先在历史月度中找出与 test 状态最相似的前 K 个月，再用于窗口覆盖度打分。
+# K 越大，覆盖度项越平滑；K 越小，结果更“尖锐”。
+top_k_similar_months: 4
+
+# 总分中的“平均相似度”权重。
+# 含义：窗口内每个月的 similarity_score 均值占总分的权重。
+# 建议与 score_coverage_weight 之和为 1.0。
+score_similarity_weight: 0.7
+
+# 总分中的“Top-K 覆盖度”权重。
+# 含义：候选窗口命中 Top-K 相似月份的比例占总分的权重。
+# 建议与 score_similarity_weight 之和为 1.0。
+score_coverage_weight: 0.3
+
+# 是否在 selector 运行时临时关闭动态成分股。
+# true: 仅 selector 内部关闭 dynamic_membership，可显著减少指数成分逐日回溯请求，避免长时间等待。
+# false: 保持 analysis_rule.yaml 中的 dynamic_membership 设置，口径更严格但耗时可能明显增加。
+disable_dynamic_membership: true
