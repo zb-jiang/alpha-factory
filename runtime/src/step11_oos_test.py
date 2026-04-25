@@ -82,6 +82,7 @@ def run() -> None:
     print("\n样本外盲测完成！")
     print("盲测结果保存在 D:/test/test/Qlib/runtime/outputs/backtest/ 中。")
     print("你可以查看 outputs/backtest/top3_factors.json 和 strategy_metrics.csv 来评估这些因子是否真正有效。")
+    print("如需对最终 Top3 做 Alphalens 复盘，请继续运行: python src/step12_alphalens_report.py")
 
 
 if __name__ == "__main__":
