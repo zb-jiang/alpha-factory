@@ -128,7 +128,7 @@ def build_messages(candidate_count_override: int | None = None) -> list[dict[str
 }}
 
 【最终警告】
-1. 绝对不能使用未来数据！
+1. 挖掘过程中绝对不能使用未来数据（未来函数）！
 2. 绝对不能使用不在【允许的基础特征列表】中的未授权字段！
 3. 返回结果必须是直接可解析的JSON字典，严禁输出 ```json 等Markdown格式标记！
 4. 不要输出 backtest_rule 字段，交易规则由系统自动注入。
