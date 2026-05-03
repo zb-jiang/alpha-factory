@@ -6,6 +6,7 @@ import warnings
 
 import numpy as np
 import pandas as pd
+import shutil
 
 from common import (
     OUTPUT_DIR,
@@ -264,6 +265,8 @@ def run() -> None:
     horizon_days = max(int(estimate_label_forward_days(cfg) or 1), 1)
     quantiles = 5
     output_dir = OUTPUT_DIR / "alphalens"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     summaries: list[dict[str, Any]] = []

@@ -103,3 +103,7 @@ dmypy.json
 
 # Large CSV files (如果有的话)
 # *.csv
+
+# Claude Code
+.claude/
+.omc/

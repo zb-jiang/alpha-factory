@@ -66,6 +66,8 @@ def clean_outputs(dry_run: bool = False) -> dict[str, int]:
         ("backtest/*", "files"),
         # LLM 输出
         ("llm/*", "files"),
+        # 多 Agent 模式下分析师中间产物
+        ("llm/agent_outputs", "directories"),
         # 当前运行态上下文
         ("_runtime/active_context.json", "files"),
     ]

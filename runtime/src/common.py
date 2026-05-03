@@ -60,6 +60,7 @@ CONFIG_OWNERSHIP: dict[str, set[str]] = {
         "llm_model",
         "llm_base_url",
         "llm_api_key",
+        "llm_temperature",
         "iteration_count",
         "llm_candidate_count",
         "summary_top_k",
@@ -70,6 +71,8 @@ CONFIG_OWNERSHIP: dict[str, set[str]] = {
         "min_rank_ic_ir_to_backtest",
         "min_positive_ic_ratio",
         "enable_direction_filter",
+        "enable_multi_agent",
+        "llm_agents",
     },
     "analysis_rule": {
         "run_mode",

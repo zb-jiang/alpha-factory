@@ -122,7 +122,9 @@ def _collect_discovery_passed_factors(scope: str) -> list[dict]:
         reverse=True,
     )
     if not candidates:
-        raise RuntimeError("discovery 阶段没有任何通过回测筛选的候选因子，无法进入 validation")
+        print(f"================================================================")
+        print(f"警告: discovery 阶段没有任何通过回测筛选的候选因子，跳过该窗口的 validation")
+        print(f"================================================================")
     return candidates
 
 
@@ -268,6 +270,18 @@ def run() -> None:
                 _run_discovery_iteration(iteration, window, discovery_scope)
                 print(f"{window['window_id']} discovery iteration {iteration} ok")
             candidates = _collect_discovery_passed_factors(discovery_scope)
+            if not candidates:
+                print(f"{window['window_id']} 跳过 validation（无候选因子）")
+                write_json(
+                    OUTPUT_DIR / "train_windows" / window["window_id"] / "window_summary.json",
+                    {
+                        "window": window,
+                        "discovery_candidate_count": 0,
+                        "validation_passed_count": 0,
+                        "skipped_reason": "discovery 阶段无任何因子通过预筛",
+                    },
+                )
+                continue
             validation_result = _run_validation(window, candidates)
             validation_rows.extend(validation_result)
             write_json(

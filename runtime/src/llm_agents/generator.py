@@ -1,0 +1,127 @@
+"""因子生成器：根据首席分析师的设计方向，生成具体因子公式列表。
+
+输出格式与现有 raw_response.json 完全一致。
+"""
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from .agent_runner import AgentConfig, call_llm_agent
+
+_GENERATOR_SYSTEM = """你是一个顶级的量化交易策略研究员和金融数据科学家。你精通A股市场微观结构、多因子模型、行为金融学以及Alpha挖掘。
+你的任务是严格遵循首席分析师的设计方向，挖掘出具有强预测能力、低相关性且逻辑严密的全新选股因子（Alpha因子）。
+
+核心约束：
+1. 你只能使用【全部可用特征列表】中的特征；优先使用【首席分析师推荐特征】，严禁使用【首席分析师建议规避特征】
+2. 每个因子必须有明确的经济学逻辑解释（reason 字段）
+3. 每个因子必须指明最可能失效的市场环境（expected_failure_regime 字段）
+4. 公式必须可被 Python 直接 eval 执行，仅允许使用 +、-、*、/ 等基本算术运算符和【允许的算子】中的函数算子
+5. 禁止使用未来函数（如 .shift(-1)）
+6. 公式必须严格遵守【公式约束】中的硬性规则（嵌套深度、特征数量、算子数量、禁止链等）
+7. 公式应简洁清晰，避免过度复杂的多层嵌套
+
+方向只能是 higher_better（因子值越大越看多）或 lower_better（因子值越小越看多）。
+
+输出必须是符合指定 JSON Schema 的纯 JSON，不要 Markdown 代码块。"""
+
+# 因子必须包含的字段
+_REQUIRED_FACTOR_FIELDS = {
+    "factor_name",
+    "formula",
+    "fields",
+    "direction",
+    "reason",
+    "risk",
+    "expected_failure_regime",
+}
+
+
+def _build_generator_messages(design_direction: dict[str, Any], context: dict[str, Any]) -> list[dict[str, str]]:
+    """构建生成器的 messages。"""
+    user_content = f"""请根据以下设计方向，生成 {design_direction.get('candidate_count', 10)} 个候选因子。
+
+【设计方向】
+{json.dumps(design_direction, ensure_ascii=False, indent=2)}
+
+【全部可用特征列表】（公式中使用的特征必须来自此列表）
+{json.dumps(context.get('feature_names', []), ensure_ascii=False)}
+
+【首席分析师推荐特征】（优先使用）
+{json.dumps(design_direction.get('recommended_features', []), ensure_ascii=False)}
+
+【首席分析师建议规避特征】（严禁使用）
+{json.dumps(design_direction.get('avoid_features', []), ensure_ascii=False)}
+
+【允许的算子】
+{json.dumps(context.get('allowed_operators', []), ensure_ascii=False)}
+
+【公式约束】（硬性规则，任何不满足的公式都会在验证阶段被直接拒绝）
+{json.dumps(context.get('generation_constraints', {}), ensure_ascii=False, indent=2)}
+
+【特征体检报告摘要】
+{json.dumps(context.get('llm_summary', {}), ensure_ascii=False)}
+
+【市场环境】
+{json.dumps(context.get('market_context', {}), ensure_ascii=False)}
+
+请严格按照以下 JSON Schema 输出（只输出 JSON，不要 Markdown 代码块）：
+{{
+  "factors": [
+    {{
+      "factor_name": "因子的英文名称，如 reversal_vol_ratio_v1",
+      "formula": "Python 表达式，如 'ret_5d / (1 + realized_vol_20d)'",
+      "fields": ["公式中实际使用的特征名称列表"],
+      "direction": "higher_better 或 lower_better",
+      "reason": "中文简述因子的经济学逻辑",
+      "risk": "中文简述风险",
+      "expected_failure_regime": "最可能失效的市场环境"
+    }}
+  ]
+}}"""
+
+    return [
+        {"role": "system", "content": _GENERATOR_SYSTEM},
+        {"role": "user", "content": user_content},
+    ]
+
+
+def _parse_factors(raw: dict[str, Any]) -> dict[str, Any]:
+    """解析并校验生成器输出，过滤不完整的因子。"""
+    factors = raw.get("factors", [])
+    if not isinstance(factors, list):
+        return {"factors": []}
+
+    valid_factors: list[dict[str, Any]] = []
+    for item in factors:
+        if not isinstance(item, dict):
+            continue
+        missing = _REQUIRED_FACTOR_FIELDS - set(item.keys())
+        if missing:
+            print(f"生成器产出的因子缺少字段 {missing}: {item.get('factor_name', 'unknown')}")
+            continue
+        if item.get("direction") not in ("higher_better", "lower_better"):
+            print(f"生成器产出的因子方向无效: {item.get('factor_name', 'unknown')}")
+            continue
+        valid_factors.append(item)
+
+    return {"factors": valid_factors}
+
+
+def run_generator(
+    agent_config: AgentConfig,
+    design_direction: dict[str, Any],
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    """运行因子生成器，返回符合现有 raw_response.json schema 的字典。
+
+    失败时抛出 RuntimeError。
+    """
+    try:
+        messages = _build_generator_messages(design_direction, context)
+        raw = call_llm_agent(agent_config, messages)
+        if not isinstance(raw, dict):
+            raise ValueError(f"生成器返回非字典: {type(raw)}")
+        return _parse_factors(raw)
+    except Exception as exc:
+        raise RuntimeError(f"因子生成器执行失败: {exc}") from exc
