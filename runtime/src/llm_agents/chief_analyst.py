@@ -1,6 +1,6 @@
 """首席分析师：整合多个专业分析师的输出，给出统一的因子设计方向。
 
-输入：5 个专业分析师的建议
+输入：6 个专业分析师的建议
 输出：design_direction.json 格式的字典
 """
 from __future__ import annotations

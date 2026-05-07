@@ -18,13 +18,14 @@ from llm_agents.agent_runner import AgentConfig
 class TestAnalystAgentIds:
     """测试分析师 ID 列表。"""
 
-    def test_contains_all_five(self):
+    def test_contains_all_six(self):
         assert "trend_momentum" in ANALYST_AGENT_IDS
         assert "reversal_mean_reversion" in ANALYST_AGENT_IDS
         assert "volatility_risk" in ANALYST_AGENT_IDS
         assert "volume_price" in ANALYST_AGENT_IDS
         assert "microstructure" in ANALYST_AGENT_IDS
-        assert len(ANALYST_AGENT_IDS) == 5
+        assert "chip_distribution" in ANALYST_AGENT_IDS
+        assert len(ANALYST_AGENT_IDS) == 6
 
 
 class TestBuildAnalystMessages:
@@ -162,7 +163,7 @@ class TestRunAnalystTeam:
 
     @patch("llm_agents.analyst_team.call_llm_agent")
     def test_parallel_execution(self, mock_call):
-        """验证 5 个分析师并行执行。"""
+        """验证 6 个分析师并行执行。"""
         mock_call.return_value = {
             "recommendation_score": 0.7,
             "rationale": "test",

@@ -79,6 +79,31 @@ base_features:
   - name: market_cap_stability_20d  # 20日市值稳定度，衡量容量波动是否平稳
     expr: market_cap.pct_change().rolling(20).std()
 
+  # 筹码分布特征：衡量筹码成本结构、集中度与获利盘比例
+  # 筹码集中度：值越小代表筹码越集中，抛压越小
+  - name: chip_concentration_90d  # 90日筹码集中度，衡量季度级别筹码锁定程度
+    expr: chip.concentration_90d
+  - name: chip_concentration_210d # 210日筹码集中度，衡量年度级别筹码锁定程度
+    expr: chip.concentration_210d
+
+  # 获利盘比例：当前价以下的筹码占比，>80%抛压大，<20%可能见底
+  - name: profit_ratio_90d        # 90日获利盘比例，衡量季度级别获利盘压力
+    expr: chip.profit_ratio_90d
+  - name: profit_ratio_210d       # 210日获利盘比例，衡量年度级别获利盘压力
+    expr: chip.profit_ratio_210d
+
+  # 平均成本偏离度：当前价相对平均成本的偏离，偏离度越小越接近市场平均成本
+  - name: avg_cost_distance_90d   # 90日平均成本偏离度
+    expr: chip.avg_cost_distance_90d
+  - name: avg_cost_distance_210d  # 210日平均成本偏离度
+    expr: chip.avg_cost_distance_210d
+
+  # 筹码峰距离：当前价相对筹码峰的距离，距离越近支撑/压力越强
+  - name: peak_distance_90d       # 90日筹码峰距离
+    expr: chip.peak_distance_90d
+  - name: peak_distance_210d      # 210日筹码峰距离
+    expr: chip.peak_distance_210d
+
 # 允许使用的算子 (Operators): 相当于"烹饪手法"，用来限制大模型，它只能用这些方法去组合产生新的因子
 allowed_operators:
   - add           # 加法，用于构建线性组合或加总信号

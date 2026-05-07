@@ -1132,15 +1132,197 @@ def estimate_label_forward_days(config: dict[str, Any] | None = None) -> int:
     return 5 * interval
 
 
+def _calculate_chip_distribution(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    volume: pd.Series,
+    window: int = 210,
+    bins: int = 100,
+) -> dict[str, Any]:
+    if len(high) < window:
+        window = len(high)
+    
+    if window < 2:
+        return {
+            'concentration': 1.0,
+            'profit_ratio': 0.5,
+            'avg_cost': float(close.iloc[-1]),
+            'peak_price': float(close.iloc[-1]),
+        }
+    
+    recent_high = float(high.iloc[-window:].max())
+    recent_low = float(low.iloc[-window:].min())
+    
+    if recent_high <= recent_low:
+        recent_high = recent_low * 1.01
+    
+    price_levels = np.linspace(recent_low, recent_high, bins + 1)
+    price_centers = (price_levels[:-1] + price_levels[1:]) / 2
+    
+    chip_distribution = np.zeros(bins)
+    
+    for i in range(window):
+        idx = -(i + 1)
+        day_low = float(low.iloc[idx])
+        day_high = float(high.iloc[idx])
+        day_volume = float(volume.iloc[idx])
+        
+        if day_high <= day_low or day_volume <= 0:
+            continue
+        
+        bin_low = np.searchsorted(price_levels, day_low, side='left')
+        bin_high = np.searchsorted(price_levels, day_high, side='right')
+        
+        bin_low = max(0, min(bin_low, bins - 1))
+        bin_high = max(bin_low + 1, min(bin_high, bins))
+        
+        num_bins_in_range = bin_high - bin_low
+        if num_bins_in_range > 0:
+            volume_per_bin = day_volume / num_bins_in_range
+            chip_distribution[bin_low:bin_high] += volume_per_bin
+    
+    total_volume = chip_distribution.sum()
+    if total_volume <= 0:
+        chip_ratio = np.ones(bins) / bins
+    else:
+        chip_ratio = chip_distribution / total_volume
+    
+    avg_cost = float(np.sum(price_centers * chip_ratio))
+    
+    current_price = float(close.iloc[-1])
+    profit_mask = price_centers < current_price
+    profit_ratio = float(chip_ratio[profit_mask].sum())
+    
+    p10 = np.percentile(price_centers, 10)
+    p90 = np.percentile(price_centers, 90)
+    if avg_cost > 0:
+        concentration = float((p90 - p10) / avg_cost)
+    else:
+        concentration = 1.0
+    
+    peak_idx = np.argmax(chip_ratio)
+    peak_price = float(price_centers[peak_idx])
+    
+    return {
+        'concentration': concentration,
+        'profit_ratio': profit_ratio,
+        'avg_cost': avg_cost,
+        'peak_price': peak_price,
+    }
+
+
+def _calculate_chip_features_series(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    volume: pd.Series,
+    window: int = 210,
+    bins: int = 100,
+) -> pd.DataFrame:
+    n = len(close)
+    
+    concentration = np.full(n, np.nan)
+    profit_ratio = np.full(n, np.nan)
+    avg_cost = np.full(n, np.nan)
+    avg_cost_distance = np.full(n, np.nan)
+    peak_price = np.full(n, np.nan)
+    peak_distance = np.full(n, np.nan)
+    
+    for i in range(window - 1, n):
+        start_idx = i - window + 1
+        end_idx = i + 1
+        
+        result = _calculate_chip_distribution(
+            high.iloc[start_idx:end_idx],
+            low.iloc[start_idx:end_idx],
+            close.iloc[start_idx:end_idx],
+            volume.iloc[start_idx:end_idx],
+            window=window,
+            bins=bins
+        )
+        
+        concentration[i] = result['concentration']
+        profit_ratio[i] = result['profit_ratio']
+        avg_cost[i] = result['avg_cost']
+        peak_price[i] = result['peak_price']
+        
+        current_close = float(close.iloc[i])
+        if result['avg_cost'] > 0:
+            avg_cost_distance[i] = (current_close - result['avg_cost']) / result['avg_cost']
+        
+        if result['peak_price'] > 0:
+            peak_distance[i] = (current_close - result['peak_price']) / result['peak_price']
+    
+    return pd.DataFrame({
+        'chip_concentration': concentration,
+        'profit_ratio': profit_ratio,
+        'avg_cost': avg_cost,
+        'avg_cost_distance': avg_cost_distance,
+        'peak_price': peak_price,
+        'peak_distance': peak_distance,
+    }, index=close.index)
+
+
+def _calculate_chip_features(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    volume: pd.Series,
+    windows: list[int] | None = None,
+    bins: int = 100,
+) -> pd.DataFrame:
+    if windows is None:
+        windows = [90, 210]
+    
+    features = pd.DataFrame(index=close.index)
+    
+    for window in windows:
+        result = _calculate_chip_features_series(
+            high, low, close, volume, window=window, bins=bins
+        )
+        
+        features[f'chip_concentration_{window}d'] = result['chip_concentration']
+        features[f'profit_ratio_{window}d'] = result['profit_ratio']
+        features[f'avg_cost_distance_{window}d'] = result['avg_cost_distance']
+        features[f'peak_distance_{window}d'] = result['peak_distance']
+    
+    return features
+
+
 def _compute_group_features(group: pd.DataFrame, base_features: list[dict[str, str]]) -> pd.DataFrame:
     local = group.droplevel("instrument").copy()
     env = {column: local[column] for column in local.columns}
     values: dict[str, pd.Series] = {}
+    
+    chip_features_computed = False
+    chip_features_df = None
+    
     for item in base_features:
         name = str(item["name"])
         expr = _normalize_pct_change_expr(str(item["expr"]))
-        values[name] = eval(expr, {"__builtins__": {}}, env)
-        env[name] = values[name]
+        
+        if expr.startswith("chip.") and not chip_features_computed:
+            required_cols = ["high", "low", "close", "volume"]
+            if all(col in local.columns for col in required_cols):
+                chip_features_df = _calculate_chip_features(
+                    local["high"], local["low"], local["close"], local["volume"]
+                )
+                for col in chip_features_df.columns:
+                    env[col] = chip_features_df[col]
+            chip_features_computed = True
+        
+        if expr.startswith("chip."):
+            if chip_features_df is not None and name in chip_features_df.columns:
+                values[name] = chip_features_df[name]
+                env[name] = values[name]
+            else:
+                values[name] = pd.Series(np.nan, index=local.index)
+                env[name] = values[name]
+        else:
+            values[name] = eval(expr, {"__builtins__": {}}, env)
+            env[name] = values[name]
+    
     result = pd.DataFrame(values, index=local.index)
     result.index.name = "datetime"
     result["instrument"] = group.index.get_level_values("instrument")[0]
