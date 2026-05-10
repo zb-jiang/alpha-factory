@@ -1,4 +1,5 @@
-from .topk_dropout import BaseFactorStrategy, TopkDropoutStrategy
+from .base_strategy import BaseFactorStrategy
+from .topk_dropout import TopkDropoutStrategy
 from .sbb_ema_topk_dropout import SBBStrategyEMA
 from .soft_topk import SoftTopkStrategy
 from .enhanced_indexing import EnhancedIndexingStrategy

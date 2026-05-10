@@ -12,12 +12,12 @@ run_mode: test
 # 样本内 (In-Sample) 时间段
 # 方案一：近期滚动窗口 - 用最近 3.5 年数据训练，与当前市场环境更接近
 train_start_date: 2020-04-01
-train_end_date: 2021-09-30
+train_end_date: 2021-03-31
 
 # 样本外 (Out-of-Sample) 时间段
 # 可按需改为最新盲测区间
 test_start_date: 2026-01-01
-test_end_date: 2026-04-24
+test_end_date: 2026-05-07
 
 # 【2. 样本内训练切分配置】
 # mode 可选值:
@@ -30,13 +30,13 @@ training_workflow:
     # - 含义：海选阶段（discovery）的起止日期。该阶段会跑 step03~step09 产出候选因子。
     # - 设置建议：通常覆盖 train 区间前 60%~80% 的时间；建议不少于 18~24 个月，避免样本太短。
     discovery_start_date: 2020-04-01
-    discovery_end_date: 2021-06-30
+    discovery_end_date: 2020-12-31
     # validation_start_date / validation_end_date:
     # - 含义：复试阶段（validation）的起止日期。用 discovery 候选做二次验证与打分。
     # - 设置建议：通常覆盖 train 区间后 20%~40% 的时间；建议不少于 6~12 个月。
     # - 约束：必须满足 discovery_end_date < validation_start_date，且两段都在 train 区间内。
-    validation_start_date: 2021-07-01
-    validation_end_date: 2021-09-30
+    validation_start_date: 2021-01-01
+    validation_end_date: 2021-03-31
   walk_forward:
     # discovery_window_months:
     # - 含义：每个滚动窗口里 discovery 阶段长度（月）。

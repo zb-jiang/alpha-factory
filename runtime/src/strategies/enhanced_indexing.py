@@ -11,7 +11,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover
         "缺少依赖 backtrader，请先执行: python -m pip install backtrader"
     ) from exc
 
-from .topk_dropout import BaseFactorStrategy
+from .base_strategy import BaseFactorStrategy
 
 
 class EnhancedIndexingStrategy(BaseFactorStrategy):
@@ -95,6 +95,10 @@ class EnhancedIndexingStrategy(BaseFactorStrategy):
         exposure_scale = max(0.0, min(1.0, float(self._target_exposure_scale())))
         target_weights = self._enhanced_weights(scores)
         scaled = {code: weight * exposure_scale for code, weight in target_weights.items()}
+
+        # 应用资金缓冲
+        target_codes = sorted(scaled.keys())
+        scaled = self._apply_cash_buffer(scaled, target_codes)
 
         for data in self.datas:
             code = str(data._name)

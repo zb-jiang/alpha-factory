@@ -60,11 +60,16 @@ class BuySellCommissionInfo(bt.CommInfoBase):
     params = (
         ("buy_cost", 0.0015),
         ("sell_cost", 0.0025),
+        ("stamp_duty", 0.001),
     )
 
     def _getcommission(self, size: float, price: float, pseudoexec: bool) -> float:
         rate = self.p.buy_cost if size > 0 else self.p.sell_cost
-        return abs(size) * price * rate
+        commission = abs(size) * price * rate
+        # 卖出时加收印花税
+        if size < 0:
+            commission += abs(size) * price * self.p.stamp_duty
+        return commission
 
 
 class TurnoverAnalyzer(bt.Analyzer):
@@ -213,6 +218,7 @@ def _build_backtrader_bundle_for_factor(
 
     if not merged:
         raise RuntimeError("没有可用的 DataFeed（行情与因子分合并后为空）")
+
     benchmark_frame = (
         pd.concat(merged.values(), axis=0)
         .groupby(level=0)[["open", "high", "low", "close", "volume", "openinterest"]]
@@ -248,6 +254,7 @@ def build_cerebro(rule: dict[str, Any] | None = None) -> bt.Cerebro:
         BuySellCommissionInfo(
             buy_cost=float(cfg.get("buy_cost", 0.0015)),
             sell_cost=float(cfg.get("sell_cost", 0.0025)),
+            stamp_duty=float(cfg.get("stamp_duty", 0.001)),
         )
     )
     slippage = float(cfg.get("slippage", 0.0005))
@@ -423,6 +430,7 @@ def _build_strategy_kwargs(rule: dict[str, Any], rebalance_dates: set[str]) -> t
         "holding_count": int(topk_cfg.get("holding_count", rule.get("holding_count", 20))),
         "weight_mode": str(topk_cfg.get("weight_mode", "equal_weight") or "equal_weight").strip().lower(),
         "max_drop_per_day": int(topk_cfg.get("max_drop_per_day", 5)),
+        "cash_buffer_ratio": float(rule.get("cash_buffer_ratio", 0.02)),
         "rebalance_dates": rebalance_dates,
         "strict_assertions": False,
         "max_rebalance_logs": 0,
@@ -442,6 +450,7 @@ def _build_strategy_kwargs(rule: dict[str, Any], rebalance_dates: set[str]) -> t
             "top_n": int(soft_cfg.get("top_n", 30)),
             "holding_count": int(soft_cfg.get("holding_count", 30)),
             "weight_func": str(soft_cfg.get("weight_func", "softmax") or "softmax").strip().lower(),
+            "cash_buffer_ratio": float(rule.get("cash_buffer_ratio", 0.02)),
             "rebalance_dates": rebalance_dates,
             "strict_assertions": False,
             "max_rebalance_logs": 0,
@@ -461,6 +470,7 @@ def _build_strategy_kwargs(rule: dict[str, Any], rebalance_dates: set[str]) -> t
             "weight_mode": str(enhanced_cfg.get("weight_mode", "benchmark_tilt") or "benchmark_tilt").strip().lower(),
             "active_weight_bound": float(enhanced_cfg.get("active_weight_bound", 0.02)),
             "tracking_error_limit": float(enhanced_cfg.get("tracking_error_limit", 0.05)),
+            "cash_buffer_ratio": float(rule.get("cash_buffer_ratio", 0.02)),
             "rebalance_dates": rebalance_dates,
             "strict_assertions": False,
             "max_rebalance_logs": 0,

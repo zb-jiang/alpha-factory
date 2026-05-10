@@ -79,11 +79,14 @@ def run() -> None:
     active_preprocess = preprocess_signature(config)
     factor_writer = FactorValueParquetWriter(OUTPUT_DIR / "backtest" / "factor_values.parquet")
     wrote_factor_values = False
+    total = len(validated)
     try:
-        for item in validated:
+        for i, item in enumerate(validated, start=1):
             factor_name = str(item["factor_name"])
+            print(f"  [{i}/{total}] {factor_name}: evaluating...", flush=True)
             raw_score = evaluate_formula(str(item["formula"]), factor_input)
             score = apply_factor_preprocess(raw_score, raw_frame, config)
+            print(f"  [{i}/{total}] {factor_name}: computing IC/IR metrics...", flush=True)
             metrics = factor_metrics_from_series(factor_name, score, label_series, config)
             metrics["llm_direction"] = str(item["llm_direction"])
             metrics["empirical_direction"] = "higher_better" if metrics["mean_rank_ic"] >= 0 else "lower_better"
@@ -93,6 +96,9 @@ def run() -> None:
             factor_writer.write(_build_factor_value_chunk(factor_name, raw_score, score))
             wrote_factor_values = True
             metric_rows.append(metrics)
+            rank_ic = metrics.get("mean_rank_ic", 0.0)
+            rank_ir = metrics.get("rank_ic_ir", 0.0)
+            print(f"  [{i}/{total}] {factor_name}: rank_ic={rank_ic:.4f}, rank_ir={rank_ir:.4f}", flush=True)
     finally:
         factor_writer.close()
     if not wrote_factor_values:
