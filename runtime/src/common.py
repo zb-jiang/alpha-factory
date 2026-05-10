@@ -170,7 +170,9 @@ class ExecutionRule(BaseModel):
     trade_price: Literal["next_open", "next_close"] = "next_open"
     buy_cost: float = Field(0.0015, ge=0.0)
     sell_cost: float = Field(0.0025, ge=0.0)
+    stamp_duty: float = Field(0.001, ge=0.0)
     slippage: float = Field(0.0005, ge=0.0)
+    cash_buffer_ratio: float = Field(0.02, ge=0.0, le=1.0)
     suspend_action: Literal["skip", "queue"] = "skip"
     limit_up_action: Literal["skip_buy", "queue_buy", "allow_buy"] = "skip_buy"
     limit_down_action: Literal["delay_sell", "skip_sell", "force_sell"] = "delay_sell"

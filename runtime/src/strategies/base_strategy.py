@@ -22,6 +22,7 @@ class BaseFactorStrategy(bt.Strategy):
         ("suspend_action", "skip"),
         ("limit_up_action", "skip_buy"),
         ("limit_down_action", "delay_sell"),
+        ("cash_buffer_ratio", 0.02),
     )
 
     def __init__(self) -> None:
