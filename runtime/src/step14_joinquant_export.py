@@ -791,7 +791,12 @@ def execute_trades(context):
         + "        \n"
         + ("        " + suspend_skip_code + "\n" if suspend_skip_code else "")
         + ("        " + limit_up_skip_code + "\n" if limit_up_skip_code else "")
-        + "        order_target_value(code, target_value)\n"
+        + "        # 科创板(688开头)需使用限价单，其他用市价单\n"
+        + "        if code.startswith('688'):\n"
+        + "            limit_price = current_data[code].last_price * 1.02\n"
+        + "            order_target_value(code, target_value, style=LimitOrderStyle(limit_price))\n"
+        + "        else:\n"
+        + "            order_target_value(code, target_value)\n"
         + "        if is_buy_action:\n"
         + "            buy_count += 1\n"
         + "            log.info('buy order: %s, value=%.2f' % (code, target_value))\n"

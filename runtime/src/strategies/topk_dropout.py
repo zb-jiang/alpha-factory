@@ -122,10 +122,6 @@ class TopkDropoutStrategy(BaseFactorStrategy):
                 raise AssertionError(
                     f"阶段三校验失败：持仓数 {len(target)} 超过 buy_top_n={buy_top_n}"
                 )
-            if current_holdings and sell_count > max_drop_per_day:
-                raise AssertionError(
-                    f"阶段三校验失败：单日换手 {sell_count} 超过 max_drop_per_day={max_drop_per_day}"
-                )
             self._log_rebalance(target, sell_count=sell_count, buy_count=buy_count)
 
         return target

@@ -342,11 +342,44 @@ def analysis_observation_dates(dates: pd.Index, config: dict[str, Any]) -> list[
 
     if rebalance == "weekly":
         week_keys = (unique_dates - pd.to_timedelta(unique_dates.weekday, unit="D")).normalize()
+        
+        if anchor == "first_trading_day_of_week":
+            if len(unique_dates) > 0 and unique_dates[0].weekday() != 0:
+                first_week_start = week_keys[0]
+                unique_dates = unique_dates[week_keys != first_week_start]
+                if len(unique_dates) == 0:
+                    return []
+                week_keys = (unique_dates - pd.to_timedelta(unique_dates.weekday, unit="D")).normalize()
+        elif anchor == "last_trading_day_of_week":
+            if len(unique_dates) > 0 and unique_dates[-1].weekday() != 4:
+                last_week_start = week_keys[-1]
+                unique_dates = unique_dates[week_keys != last_week_start]
+                if len(unique_dates) == 0:
+                    return []
+                week_keys = (unique_dates - pd.to_timedelta(unique_dates.weekday, unit="D")).normalize()
+        
         grouped = unique_dates.to_series().groupby(week_keys)
         selected = grouped.first().tolist() if anchor.startswith("first") else grouped.last().tolist()
         return [pd.Timestamp(d) for d in selected][::interval]
 
     if rebalance == "monthly":
+        if anchor == "first_trading_day_of_month":
+            if len(unique_dates) > 0:
+                first_month = unique_dates[0].to_period("M")
+                first_month_start = first_month.start_time
+                if unique_dates[0] > first_month_start:
+                    unique_dates = unique_dates[unique_dates.to_period("M") != first_month]
+                    if len(unique_dates) == 0:
+                        return []
+        elif anchor == "last_trading_day_of_month":
+            if len(unique_dates) > 0:
+                last_month = unique_dates[-1].to_period("M")
+                last_month_end = last_month.end_time
+                if unique_dates[-1] < last_month_end:
+                    unique_dates = unique_dates[unique_dates.to_period("M") != last_month]
+                    if len(unique_dates) == 0:
+                        return []
+        
         grouped = unique_dates.to_series().groupby(unique_dates.to_period("M"))
         selected = grouped.first().tolist() if anchor.startswith("first") else grouped.last().tolist()
         return [pd.Timestamp(d) for d in selected][::interval]
