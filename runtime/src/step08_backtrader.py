@@ -430,6 +430,7 @@ def _build_strategy_kwargs(rule: dict[str, Any], rebalance_dates: set[str]) -> t
         "holding_count": int(topk_cfg.get("holding_count", rule.get("holding_count", 20))),
         "weight_mode": str(topk_cfg.get("weight_mode", "equal_weight") or "equal_weight").strip().lower(),
         "max_drop_per_day": int(topk_cfg.get("max_drop_per_day", 5)),
+        "min_score_coverage": float(topk_cfg.get("min_score_coverage", 0.90)),
         "cash_buffer_ratio": float(rule.get("cash_buffer_ratio", 0.02)),
         "rebalance_dates": rebalance_dates,
         "strict_assertions": False,
@@ -450,6 +451,7 @@ def _build_strategy_kwargs(rule: dict[str, Any], rebalance_dates: set[str]) -> t
             "top_n": int(soft_cfg.get("top_n", 30)),
             "holding_count": int(soft_cfg.get("holding_count", 30)),
             "weight_func": str(soft_cfg.get("weight_func", "softmax") or "softmax").strip().lower(),
+            "min_score_coverage": float(soft_cfg.get("min_score_coverage", 0.90)),
             "cash_buffer_ratio": float(rule.get("cash_buffer_ratio", 0.02)),
             "rebalance_dates": rebalance_dates,
             "strict_assertions": False,
@@ -467,9 +469,9 @@ def _build_strategy_kwargs(rule: dict[str, Any], rebalance_dates: set[str]) -> t
         enhanced_cfg = dict(rule.get("EnhancedIndexing", {}))
         kwargs = {
             "holding_count": int(enhanced_cfg.get("holding_count", 30)),
-            "weight_mode": str(enhanced_cfg.get("weight_mode", "benchmark_tilt") or "benchmark_tilt").strip().lower(),
             "active_weight_bound": float(enhanced_cfg.get("active_weight_bound", 0.02)),
-            "tracking_error_limit": float(enhanced_cfg.get("tracking_error_limit", 0.05)),
+            "benchmark_weights": dict(rule.get("benchmark_weights", {})) if rule.get("benchmark_weights") else None,
+            "min_score_coverage": float(enhanced_cfg.get("min_score_coverage", 0.90)),
             "cash_buffer_ratio": float(rule.get("cash_buffer_ratio", 0.02)),
             "rebalance_dates": rebalance_dates,
             "strict_assertions": False,

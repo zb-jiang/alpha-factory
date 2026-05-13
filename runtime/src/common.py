@@ -131,16 +131,18 @@ class TopKDropoutRule(BaseModel):
     holding_count: int = Field(20, ge=1)
     weight_mode: Literal["equal_weight", "score_weight"] = "equal_weight"
     max_drop_per_day: int = Field(5, ge=1)
+    min_score_coverage: float = Field(0.90, ge=0.0, le=1.0)
 
 
 class EnhancedIndexingRule(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     benchmark: str = "000300.SH"
-    tracking_error_limit: float = Field(0.05, ge=0.0, le=1.0)
     active_weight_bound: float = Field(0.02, ge=0.0, le=1.0)
     holding_count: int = Field(30, ge=1)
-    weight_mode: Literal["benchmark_tilt", "equal_weight_enhanced", "score_tilt"] = "benchmark_tilt"
+    weight_mode: Literal["benchmark_tilt"] = "benchmark_tilt"
+    min_score_coverage: float = Field(0.90, ge=0.0, le=1.0)
+    min_weight_coverage: float = Field(0.90, ge=0.0, le=1.0)
 
 
 class SoftTopKRule(BaseModel):
@@ -149,6 +151,9 @@ class SoftTopKRule(BaseModel):
     top_n: int = Field(30, ge=1)
     weight_func: Literal["softmax", "rank_power"] = "softmax"
     holding_count: int = Field(30, ge=1)
+    softmax_temperature: float = Field(1.0, gt=0.0)
+    rank_power_alpha: float = Field(1.0, gt=0.0)
+    min_score_coverage: float = Field(0.90, ge=0.0, le=1.0)
 
 
 class MarketTimingRule(BaseModel):
@@ -209,7 +214,6 @@ def _legacy_backtest_rule_to_factory(backtest_cfg: dict[str, Any]) -> dict[str, 
         },
         "EnhancedIndexing": {
             "benchmark": str(backtest_cfg.get("benchmark", "000300.SH") or "000300.SH"),
-            "tracking_error_limit": float(backtest_cfg.get("tracking_error_limit", 0.05) or 0.05),
             "active_weight_bound": float(backtest_cfg.get("active_weight_bound", 0.02) or 0.02),
             "holding_count": int(backtest_cfg.get("enhanced_holding_count", 30) or 30),
             "weight_mode": "benchmark_tilt",

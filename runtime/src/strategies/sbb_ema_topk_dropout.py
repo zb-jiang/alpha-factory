@@ -27,6 +27,7 @@ class SBBStrategyEMA(TopkDropoutStrategy):
         ("holding_count", 20),
         ("weight_mode", "equal_weight"),
         ("max_drop_per_day", 5),
+        ("min_score_coverage", 0.90),
         ("ema_period", 60),
         ("timing_reduce_to", 0.5),
         ("timing_strict_assertions", True),
@@ -90,7 +91,7 @@ class SBBStrategyEMA(TopkDropoutStrategy):
         if indicator is None:
             return False
         value = float(indicator[0])
-        if value != value:  # NaN
+        if value != value:
             return False
         return value <= float(self.p.rsi_buy_max)
 
@@ -104,22 +105,26 @@ class SBBStrategyEMA(TopkDropoutStrategy):
             return self._stock_rsi_ok(code)
         return self._stock_in_uptrend(code)
 
-    def _compute_target_holdings(
-        self,
-        scores: dict[str, float],
-        current_holdings: list[str],
-    ) -> list[str]:
-        base_target = super()._compute_target_holdings(scores, current_holdings)
-        current_set = set(current_holdings)
-        filtered: list[str] = []
-        for code in base_target:
-            # 个股择时：已有持仓允许继续持有；仅对新开仓做趋势过滤。
-            if code in current_set or self._allow_new_open(code):
-                filtered.append(code)
-        return filtered
+    def _compute_target_weights(self, scores: dict[str, float]) -> dict[str, float]:
+        base_weights = super()._compute_target_weights(scores)
+        current_set = set(self._current_holdings())
+        filtered_weights: dict[str, float] = {}
+        for code, weight in base_weights.items():
+            if weight > 0 and code not in current_set and not self._allow_new_open(code):
+                filtered_weights[code] = 0.0
+            else:
+                filtered_weights[code] = weight
+        positive_weights = {c: w for c, w in filtered_weights.items() if w > 0}
+        if positive_weights:
+            weight_sum = sum(positive_weights.values())
+            if weight_sum > 0:
+                scale = 1.0 / weight_sum
+                for code in positive_weights:
+                    filtered_weights[code] = filtered_weights[code] * scale
+        return filtered_weights
 
-    def _log_rebalance(self, holdings: list[str], sell_count: int, buy_count: int) -> None:
-        super()._log_rebalance(holdings, sell_count, buy_count)
+    def _log_rebalance(self, target_weights: dict[str, float]) -> None:
+        super()._log_rebalance(target_weights)
         if self._timing_log_count >= int(self.p.max_rebalance_logs):
             return
         date_text = self._today()

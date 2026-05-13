@@ -27,6 +27,7 @@ class SBBEMASoftTopkStrategy(SoftTopkStrategy):
         ("weight_func", "softmax"),
         ("softmax_temperature", 1.0),
         ("rank_power_alpha", 1.0),
+        ("min_score_coverage", 0.90),
         ("ema_period", 60),
         ("timing_reduce_to", 0.5),
         ("stock_open_filter", "rsi"),
@@ -102,26 +103,20 @@ class SBBEMASoftTopkStrategy(SoftTopkStrategy):
             return self._stock_rsi_ok(code)
         return self._stock_in_uptrend(code)
 
-    def next(self) -> None:
-        self._flush_pending_targets()
-        if not self._is_rebalance_day():
-            return
-        scores = self._cross_section_scores()
-        if not scores:
-            return
+    def _compute_target_weights(self, scores: dict[str, float]) -> dict[str, float]:
+        base_weights = super()._compute_target_weights(scores)
         current_set = set(self._current_holdings())
-        exposure_scale = max(0.0, min(1.0, float(self._target_exposure_scale())))
-        target_weights = self._weighted_targets(scores)
-        filtered: dict[str, float] = {}
-        for code, weight in target_weights.items():
-            if code in current_set or self._allow_new_open(code):
-                filtered[code] = float(weight)
-        weight_sum = float(sum(filtered.values()))
-        if weight_sum > 0:
-            filtered = {code: weight / weight_sum for code, weight in filtered.items()}
-        scaled = {code: weight * exposure_scale for code, weight in filtered.items()}
-        for data in self.datas:
-            code = str(data._name)
-            if code == str(self.p.benchmark_name):
-                continue
-            self._submit_target_percent(data=data, target=float(scaled.get(code, 0.0)))
+        filtered_weights: dict[str, float] = {}
+        for code, weight in base_weights.items():
+            if weight > 0 and code not in current_set and not self._allow_new_open(code):
+                filtered_weights[code] = 0.0
+            else:
+                filtered_weights[code] = weight
+        positive_weights = {c: w for c, w in filtered_weights.items() if w > 0}
+        if positive_weights:
+            weight_sum = sum(positive_weights.values())
+            if weight_sum > 0:
+                scale = 1.0 / weight_sum
+                for code in positive_weights:
+                    filtered_weights[code] = filtered_weights[code] * scale
+        return filtered_weights

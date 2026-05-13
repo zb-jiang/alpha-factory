@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 import numpy as np
 
 try:
@@ -29,62 +27,10 @@ class TopkDropoutStrategy(BaseFactorStrategy):
         ("holding_count", 20),
         ("weight_mode", "equal_weight"),
         ("max_drop_per_day", 5),
+        ("min_score_coverage", 0.90),
     )
 
-    def _place_target_orders(
-        self,
-        target_holdings: list[str],
-        scores: dict[str, float] | None = None,
-    ) -> None:
-        target_set = set(target_holdings)
-        target_codes = sorted(target_set)
-        exposure_scale = float(self._target_exposure_scale())
-        exposure_scale = max(0.0, min(1.0, exposure_scale))
-        if not target_set:
-            for data in self.datas:
-                if str(data._name) == str(self.p.benchmark_name):
-                    continue
-                if self.getposition(data).size > 0:
-                    self._submit_target_percent(data=data, target=0.0)
-            return
-
-        mode = str(getattr(self.p, "weight_mode", "equal_weight") or "equal_weight").strip().lower()
-        if mode != "score_weight" or not scores:
-            equal_weight = exposure_scale / len(target_set)
-            weights = {code: equal_weight for code in target_codes}
-        else:
-            values = np.array([float(scores.get(code, np.nan)) for code in target_codes], dtype=float)
-            valid_mask = np.isfinite(values)
-            if not valid_mask.any():
-                equal_weight = exposure_scale / len(target_set)
-                weights = {code: equal_weight for code in target_codes}
-            else:
-                min_value = float(np.min(values[valid_mask]))
-                adjusted = np.where(valid_mask, values - min_value + 1e-12, 0.0)
-                denom = float(np.sum(adjusted))
-                if not np.isfinite(denom) or denom <= 0:
-                    equal_weight = exposure_scale / len(target_set)
-                    weights = {code: equal_weight for code in target_codes}
-                else:
-                    weights = {
-                        code: float(adjusted[idx] / denom * exposure_scale)
-                        for idx, code in enumerate(target_codes)
-                    }
-
-        # 应用资金缓冲
-        weights = self._apply_cash_buffer(weights, target_codes)
-
-        for data in self.datas:
-            code = str(data._name)
-            if code == str(self.p.benchmark_name):
-                continue
-            self._submit_target_percent(data=data, target=float(weights.get(code, 0.0)))
-
-    def _compute_target_holdings(
-        self,
-        scores: dict[str, float],
-        current_holdings: list[str],
-    ) -> list[str]:
+    def _compute_target_weights(self, scores: dict[str, float]) -> dict[str, float]:
         buy_top_n = int(self.p.buy_top_n)
         sell_drop_to = int(self.p.sell_drop_to)
         holding_count = int(self.p.holding_count)
@@ -92,36 +38,44 @@ class TopkDropoutStrategy(BaseFactorStrategy):
 
         ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
         ranked_codes = [code for code, _ in ranked]
-        top_buy_codes = ranked_codes[:buy_top_n]
         keep_rank_set = set(ranked_codes[:sell_drop_to])
 
-        # 限制每日最多卖出 max_drop_per_day：对跌出阈值的现有持仓按分数从低到高卖出。
+        current_holdings = self._current_holdings()
         drop_candidates = [code for code in current_holdings if code not in keep_rank_set]
         drop_candidates = sorted(drop_candidates, key=lambda code: scores.get(code, -np.inf))
-        to_sell_set = set(drop_candidates[:max_drop_per_day])
+
+        to_sell_count = min(len(drop_candidates), max_drop_per_day)
+        to_sell_set = set(drop_candidates[:to_sell_count])
+
         kept = [code for code in current_holdings if code not in to_sell_set]
 
-        max_new_buys = len(to_sell_set) if current_holdings else holding_count
-        added = 0
-        for code in top_buy_codes:
+        max_new_buys = to_sell_count if current_holdings else holding_count
+        if current_holdings:
+            shortfall = holding_count - len(current_holdings) + to_sell_count
+            max_new_buys = max(max_new_buys, shortfall)
+        new_buys: list[str] = []
+        for code in ranked_codes[:buy_top_n]:
             if code in kept:
                 continue
-            if len(kept) >= holding_count:
+            if len(kept) + len(new_buys) >= holding_count:
                 break
-            if added >= max_new_buys:
+            if len(new_buys) >= max_new_buys:
                 break
-            kept.append(code)
-            added += 1
+            new_buys.append(code)
 
-        target = kept[:holding_count]
+        weights: dict[str, float] = {}
+        for code in to_sell_set:
+            weights[code] = 0.0
 
-        if self.p.strict_assertions:
-            sell_count = len(set(current_holdings) - set(target))
-            buy_count = len(set(target) - set(current_holdings))
-            if len(target) > buy_top_n:
-                raise AssertionError(
-                    f"阶段三校验失败：持仓数 {len(target)} 超过 buy_top_n={buy_top_n}"
-                )
-            self._log_rebalance(target, sell_count=sell_count, buy_count=buy_count)
+        if not current_holdings:
+            target_count = holding_count
+        else:
+            target_count = len(kept) + len(new_buys)
+        if target_count <= 0:
+            target_count = 1
 
-        return target
+        weight_per_stock = 1.0 / target_count
+        for code in new_buys:
+            weights[code] = weight_per_stock
+
+        return weights

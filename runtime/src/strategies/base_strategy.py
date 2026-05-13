@@ -23,14 +23,16 @@ class BaseFactorStrategy(bt.Strategy):
         ("limit_up_action", "skip_buy"),
         ("limit_down_action", "delay_sell"),
         ("cash_buffer_ratio", 0.02),
+        ("min_score_coverage", 0.0),
     )
 
     def __init__(self) -> None:
         raw_dates = self.p.rebalance_dates or set()
         self._rebalance_dates = {str(item) for item in raw_dates}
         self._log_count = 0
-        self._pending_targets: dict[str, float] = {}
         self._data_by_name = {str(data._name): data for data in self.datas}
+        self._last_target_weights: dict[str, float] = {}
+        self._open_orders: dict[str, list[bt.Order]] = {}
 
     def _today(self) -> str:
         return bt.num2date(self.datas[0].datetime[0]).strftime("%Y-%m-%d")
@@ -61,11 +63,7 @@ class BaseFactorStrategy(bt.Strategy):
                 holdings.append(str(data._name))
         return holdings
 
-    def _compute_target_holdings(
-        self,
-        scores: dict[str, float],
-        current_holdings: list[str],
-    ) -> list[str]:
+    def _compute_target_weights(self, scores: dict[str, float]) -> dict[str, float]:
         raise NotImplementedError
 
     def _target_exposure_scale(self) -> float:
@@ -110,136 +108,172 @@ class BaseFactorStrategy(bt.Strategy):
             return 0.0
         return float(position.size * close / portfolio_value)
 
-    def _submit_target_percent(self, data: bt.feeds.DataBase, target: float) -> None:
-        code = str(data._name)
-        current_weight = self._current_weight(data)
-        delta = float(target) - float(current_weight)
-        if abs(delta) < 1e-8:
-            self._pending_targets.pop(code, None)
+    def _apply_cash_buffer(
+        self,
+        weights: dict[str, float],
+        target_codes: list[str],
+    ) -> dict[str, float]:
+        cash = self.broker.getcash()
+        portfolio_value = self.broker.getvalue()
+        cash_buffer_ratio = float(getattr(self.p, 'cash_buffer_ratio', 0.02))
+        reserved_cash = portfolio_value * cash_buffer_ratio
+        available_cash = max(0, cash - reserved_cash)
+        additional_cash_needed = 0.0
+        for code in target_codes:
+            target_value = weights.get(code, 0.0) * portfolio_value
+            current_value = 0.0
+            data = self._data_by_name.get(code)
+            if data is not None:
+                pos = self.getposition(data)
+                close = float(data.close[0])
+                if not np.isnan(close):
+                    current_value = float(pos.size * close)
+            delta = target_value - current_value
+            if delta > 0:
+                additional_cash_needed += delta
+        if additional_cash_needed > available_cash and additional_cash_needed > 0:
+            scale = available_cash / additional_cash_needed
+            new_weights: dict[str, float] = {}
+            for code, w in weights.items():
+                if w <= 0:
+                    new_weights[code] = w
+                    continue
+                target_value = w * portfolio_value
+                data = self._data_by_name.get(code)
+                current_value = 0.0
+                if data is not None:
+                    pos = self.getposition(data)
+                    close = float(data.close[0])
+                    if not np.isnan(close):
+                        current_value = float(pos.size * close)
+                delta = target_value - current_value
+                if delta > 0:
+                    reduced_target_value = current_value + delta * scale
+                    new_weights[code] = reduced_target_value / portfolio_value
+                else:
+                    new_weights[code] = w
+            return new_weights
+        return weights
+
+    def _check_score_coverage(self, scores: dict[str, float]) -> bool:
+        min_coverage = float(self.p.min_score_coverage or 0.0)
+        if min_coverage <= 0:
+            return True
+        total_count = 0
+        for data in self.datas:
+            if str(data._name) == str(self.p.benchmark_name):
+                continue
+            total_count += 1
+        if total_count == 0:
+            return True
+        valid_count = len(scores)
+        coverage = valid_count / total_count
+        return coverage >= min_coverage
+
+    def notify_order(self, order: bt.Order) -> None:
+        if order is None:
             return
+        code = str(order.data._name)
+        if order.status in (order.Completed, order.Canceled, order.Margin, order.Rejected):
+            orders = self._open_orders.get(code)
+            if orders is not None:
+                self._open_orders[code] = [o for o in orders if o is not None and o.ref != order.ref]
+                if not self._open_orders[code]:
+                    del self._open_orders[code]
+
+    def _has_open_order(self, code: str) -> bool:
+        orders = self._open_orders.get(code)
+        return bool(orders)
+
+    def _cancel_open_orders(self, code: str) -> None:
+        orders = self._open_orders.pop(code, None)
+        if orders:
+            for order in orders:
+                if order is not None:
+                    self.cancel(order)
+
+    def _set_target_weight(self, data: bt.feeds.DataBase, target: float) -> bool:
+        code = str(data._name)
 
         if self._is_suspended(data):
             action = str(self.p.suspend_action or "skip").strip().lower()
-            if action == "queue":
-                self._pending_targets[code] = float(target)
-            return
+            if action != "force":
+                return False
+
+        current_weight = self._current_weight(data)
+        delta = float(target) - float(current_weight)
+        if abs(delta) < 1e-8:
+            return False
 
         is_buy = delta > 0
         if is_buy and self._is_limit_up(data):
             action = str(self.p.limit_up_action or "skip_buy").strip().lower()
-            if action == "queue_buy":
-                self._pending_targets[code] = float(target)
-                return
-            if action == "allow_buy":
-                pass
-            else:
-                return
+            if action != "allow_buy":
+                return False
+
         if (not is_buy) and self._is_limit_down(data):
             action = str(self.p.limit_down_action or "delay_sell").strip().lower()
-            if action == "delay_sell":
-                self._pending_targets[code] = float(target)
-                return
-            if action == "force_sell":
-                pass
-            else:
-                return
+            if action != "force_sell":
+                return False
 
         mode = str(self.p.trade_price_mode or "next_open").strip().lower()
         kwargs: dict[str, Any] = {}
         if mode == "next_close":
             kwargs["exectype"] = bt.Order.Close
 
+        pure_code = code[2:] if len(code) > 2 and code[:2] in ("SH", "SZ") else code
+        if pure_code.startswith("688"):
+            if is_buy:
+                kwargs["exectype"] = bt.Order.Limit
+                kwargs["price"] = float(data.close[0]) * 1.02
+            else:
+                kwargs["exectype"] = bt.Order.Limit
+                kwargs["price"] = float(data.close[0]) * 0.98
+
         price = self.datas[0].close[0] if code == self.p.benchmark_name else data.close[0]
         portfolio_value = self.broker.getvalue()
         target_value = abs(float(target)) * portfolio_value
-        if target_value <= 0:
-            return
+        if is_buy and target_value <= 0:
+            return False
         shares_needed = target_value / price
         if is_buy and shares_needed < 100:
-            return
+            return False
         if not is_buy and target > 0 and shares_needed < 100:
+            return False
+
+        self._cancel_open_orders(code)
+        order = self.order_target_percent(data=data, target=float(target), **kwargs)
+        if order is not None:
+            self._open_orders.setdefault(code, []).append(order)
+        return True
+
+    def _retry_limit_down_sells(self) -> None:
+        if not self._last_target_weights:
             return
-
-        # 科创板保护限价：科创板股票(688开头)使用限价单
-        # 买入保护限价 = 当前价格 * 1.02 (允许2%的上涨空间)
-        # 卖出保护限价 = 当前价格 * 0.98 (允许2%的下跌空间)
-        if code.startswith("SH688") and code != self.p.benchmark_name:
-            kwargs["exectype"] = bt.Order.Limit
-            if is_buy:
-                kwargs["price"] = price * 1.02
-            else:
-                kwargs["price"] = price * 0.98
-
-        self.order_target_percent(data=data, target=float(target), **kwargs)
-        self._pending_targets.pop(code, None)
-
-    def _flush_pending_targets(self) -> None:
-        if not self._pending_targets:
-            return
-        for code, target in list(self._pending_targets.items()):
-            data = self._data_by_name.get(str(code))
-            if data is None:
-                self._pending_targets.pop(code, None)
-                continue
-            self._submit_target_percent(data=data, target=float(target))
-
-    def _apply_cash_buffer(
-        self,
-        weights: dict[str, float],
-        target_codes: list[str],
-    ) -> dict[str, float]:
-        """应用资金缓冲：预留部分资金防止因手续费导致订单失败"""
-        cash = self.broker.getcash()
-        portfolio_value = self.broker.getvalue()
-
-        # 从配置读取资金缓冲比例，默认2%
-        cash_buffer_ratio = float(getattr(self.p, 'cash_buffer_ratio', 0.02))
-        reserved_cash = portfolio_value * cash_buffer_ratio
-        available_cash = max(0, cash - reserved_cash)
-
-        # 计算目标持仓需要的总资金
-        total_target_value = sum(
-            weights.get(code, 0.0) * portfolio_value
-            for code in target_codes
-        )
-
-        # 如果目标资金超过可用资金，等比例缩放权重
-        if total_target_value > available_cash and total_target_value > 0:
-            scale = available_cash / total_target_value
-            weights = {code: w * scale for code, w in weights.items()}
-
-        return weights
-
-    def _place_target_orders(
-        self,
-        target_holdings: list[str],
-        scores: dict[str, float] | None = None,
-    ) -> None:
-        del scores
-        target_set = set(target_holdings)
-        exposure_scale = float(self._target_exposure_scale())
-        exposure_scale = max(0.0, min(1.0, exposure_scale))
-        if not target_set:
-            for data in self.datas:
-                if str(data._name) == str(self.p.benchmark_name):
-                    continue
-                if self.getposition(data).size > 0:
-                    self._submit_target_percent(data=data, target=0.0)
-            return
-        weight = exposure_scale / len(target_set)
         for data in self.datas:
             code = str(data._name)
             if code == str(self.p.benchmark_name):
                 continue
-            target = weight if code in target_set else 0.0
-            self._submit_target_percent(data=data, target=target)
+            if self.getposition(data).size <= 0:
+                continue
+            if self._has_open_order(code):
+                continue
+            if code not in self._last_target_weights:
+                continue
+            last_target = self._last_target_weights[code]
+            if last_target > 0:
+                continue
+            self._set_target_weight(data, 0.0)
 
-    def _log_rebalance(self, holdings: list[str], sell_count: int, buy_count: int) -> None:
+    def _log_rebalance(self, target_weights: dict[str, float]) -> None:
         if self._log_count >= int(self.p.max_rebalance_logs):
             return
+        sell_codes = [c for c, w in target_weights.items() if w <= 0 and c in self._current_holdings()]
+        buy_codes = [c for c, w in target_weights.items() if w > 0 and c not in self._current_holdings()]
         print(
-            f"[TopkDropout] date={self._today()}, holdings={len(holdings)}, "
-            f"sell_count={sell_count}, buy_count={buy_count}, sample={holdings[:10]}"
+            f"[{self.__class__.__name__}] date={self._today()}, "
+            f"sell_count={len(sell_codes)}, buy_count={len(buy_codes)}, "
+            f"sells={sell_codes[:10]}, buys={buy_codes[:10]}"
         )
         self._log_count += 1
 
@@ -247,12 +281,32 @@ class BaseFactorStrategy(bt.Strategy):
         self.next()
 
     def next(self) -> None:
-        self._flush_pending_targets()
-        if not self._is_rebalance_day():
-            return
-        scores = self._cross_section_scores()
-        if not scores:
-            return
-        current = self._current_holdings()
-        target = self._compute_target_holdings(scores, current)
-        self._place_target_orders(target, scores=scores)
+        if self._is_rebalance_day():
+            scores = self._cross_section_scores()
+            if not scores:
+                self._retry_limit_down_sells()
+                return
+            if not self._check_score_coverage(scores):
+                self._retry_limit_down_sells()
+                return
+
+            target_weights = self._compute_target_weights(scores)
+            self._last_target_weights = dict(target_weights)
+
+            exposure_scale = max(0.0, min(1.0, float(self._target_exposure_scale())))
+            if exposure_scale < 1.0:
+                target_weights = {code: w * exposure_scale for code, w in target_weights.items()}
+
+            target_codes = [c for c, w in target_weights.items() if w > 0]
+            target_weights = self._apply_cash_buffer(target_weights, target_codes)
+
+            for code, weight in target_weights.items():
+                data = self._data_by_name.get(code)
+                if data is None:
+                    continue
+                self._set_target_weight(data, float(weight))
+
+            if self.p.strict_assertions:
+                self._log_rebalance(target_weights)
+        else:
+            self._retry_limit_down_sells()

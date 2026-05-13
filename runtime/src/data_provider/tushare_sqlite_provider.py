@@ -245,6 +245,7 @@ class TushareSQLiteProvider(TushareProvider):
                     f"""
                     SELECT trade_date FROM stock_fundamental
                     WHERE ts_code='{ts_code}' AND data_type='{api_name}'
+                    AND features != '{{}}'
                     AND trade_date BETWEEN '{start_date}' AND '{end_date}'
                     """
                 ).fetchall()
@@ -306,7 +307,7 @@ class TushareSQLiteProvider(TushareProvider):
             elif api_name == 'adj_factor':
                 check_sql = f"SELECT trade_date FROM stock_daily_price WHERE ts_code='{ts_code}' AND adj_factor IS NOT NULL AND trade_date BETWEEN '{start_date}' AND '{end_date}'"
             elif api_name == 'daily_basic':
-                check_sql = f"SELECT trade_date FROM stock_fundamental WHERE ts_code='{ts_code}' AND data_type='{api_name}' AND trade_date BETWEEN '{start_date}' AND '{end_date}'"
+                check_sql = f"SELECT trade_date FROM stock_fundamental WHERE ts_code='{ts_code}' AND data_type='{api_name}' AND features != '{{}}' AND trade_date BETWEEN '{start_date}' AND '{end_date}'"
             else:
                 continue
                 

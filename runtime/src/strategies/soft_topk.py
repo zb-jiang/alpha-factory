@@ -29,26 +29,17 @@ class SoftTopkStrategy(BaseFactorStrategy):
         ("weight_func", "softmax"),
         ("softmax_temperature", 1.0),
         ("rank_power_alpha", 1.0),
+        ("min_score_coverage", 0.90),
     )
 
-    def _compute_target_holdings(
-        self,
-        scores: dict[str, float],
-        current_holdings: list[str],
-    ) -> list[str]:
-        del current_holdings
-        holding_count = max(int(self.p.holding_count), 1)
-        top_n = max(int(self.p.top_n), 1)
-        ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
-        return [code for code, _ in ranked[: min(top_n, holding_count)]]
-
-    def _weighted_targets(self, scores: dict[str, float]) -> dict[str, float]:
+    def _compute_target_weights(self, scores: dict[str, float]) -> dict[str, float]:
         holding_count = max(int(self.p.holding_count), 1)
         top_n = max(int(self.p.top_n), 1)
         ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
         selected = ranked[: min(top_n, holding_count)]
+
         if not selected:
-            return {}
+            return {code: 0.0 for code in scores}
 
         codes = [code for code, _ in selected]
         values = np.array([float(value) for _, value in selected], dtype=float)
@@ -61,35 +52,22 @@ class SoftTopkStrategy(BaseFactorStrategy):
         else:
             temperature = max(float(self.p.softmax_temperature), 1e-9)
             shifted = (values - float(values.max())) / temperature
-            # 防止极端值导致 exp 溢出
             shifted = np.clip(shifted, -60.0, 60.0)
             raw = np.exp(shifted)
 
         denom = float(raw.sum())
         if not math.isfinite(denom) or denom <= 0:
             equal = 1.0 / len(codes)
-            return {code: equal for code in codes}
+            selected_set = set(codes)
+            return {code: equal if code in selected_set else 0.0 for code in scores}
         normalized = raw / denom
-        return {code: float(weight) for code, weight in zip(codes, normalized)}
 
-    def next(self) -> None:
-        self._flush_pending_targets()
-        if not self._is_rebalance_day():
-            return
-        scores = self._cross_section_scores()
-        if not scores:
-            return
-
-        exposure_scale = max(0.0, min(1.0, float(self._target_exposure_scale())))
-        target_weights = self._weighted_targets(scores)
-        scaled = {code: weight * exposure_scale for code, weight in target_weights.items()}
-
-        # 应用资金缓冲
-        target_codes = sorted(scaled.keys())
-        scaled = self._apply_cash_buffer(scaled, target_codes)
-
-        for data in self.datas:
-            code = str(data._name)
-            if code == str(self.p.benchmark_name):
-                continue
-            self._submit_target_percent(data=data, target=float(scaled.get(code, 0.0)))
+        selected_set = set(codes)
+        result: dict[str, float] = {}
+        for code in scores:
+            if code in selected_set:
+                idx = codes.index(code)
+                result[code] = float(normalized[idx])
+            else:
+                result[code] = 0.0
+        return result

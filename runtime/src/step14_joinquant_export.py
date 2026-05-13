@@ -356,6 +356,7 @@ def _generate_strategy_code(
     holding_count = int(topk_cfg.get("holding_count", 20))
     weight_mode = str(topk_cfg.get("weight_mode", "equal_weight"))
     max_drop_per_day = int(topk_cfg.get("max_drop_per_day", 5))
+    min_score_coverage = float(topk_cfg.get("min_score_coverage", 0.90))
     initial_cash = float(execution_cfg.get("initial_cash", 1_000_000))
     buy_cost = float(execution_cfg.get("buy_cost", 0.0015))
     sell_cost = float(execution_cfg.get("sell_cost", 0.0025))
@@ -483,6 +484,8 @@ def _generate_strategy_code(
             enhanced_cfg, timing_enabled, timing_filter_code, suspend_skip_code, limit_up_skip_code, limit_down_skip_code
         )
 
+    retry_schedule = "    run_daily(retry_limit_down_sells, time='09:30')" if limit_down_action == "delay_sell" else ""
+
     rebalance_schedule = ""
     if rebalance == "weekly":
         if rebalance_anchor == "first_trading_day_of_week":
@@ -521,6 +524,7 @@ BUY_TOP_N = {buy_top_n}
 SELL_DROP_TO = {sell_drop_to}
 HOLDING_COUNT = {holding_count}
 MAX_DROP_PER_DAY = {max_drop_per_day}
+MIN_SCORE_COVERAGE = {min_score_coverage}
 
 # Execution cost
 BUY_COST = {buy_cost}
@@ -633,8 +637,10 @@ def initialize(context):
 
     g.benchmark_code = '{index_code_jq}'
     g.current_holdings = []
+    g.pending_limit_down_sells = []
 
 {rebalance_schedule}
+{retry_schedule}
 
 
 def after_trading_end(context):
@@ -655,30 +661,6 @@ def _gen_topk_dropout_logic(
     limit_up_skip_code: str,
     limit_down_skip_code: str,
 ) -> str:
-    weight_calc = "    weight = 1.0 / max(len(target_holdings), 1)"
-
-    sell_block_lines = ["is_buy_action = False"]
-    if suspend_skip_code:
-        sell_block_lines.append(suspend_skip_code)
-    if limit_down_skip_code:
-        sell_block_lines.append(limit_down_skip_code)
-    sell_block_lines.append("order_target_value(code, 0)")
-    sell_block_lines.append("sell_count += 1")
-    sell_block_lines.append("log.info('sell order: %s' % code)")
-    sell_block = textwrap.indent("\n".join(sell_block_lines), "            ")
-
-    buy_block_lines = []
-    buy_block_lines.append("is_buy_action = code not in set(current_holdings)")
-    if suspend_skip_code:
-        buy_block_lines.append(suspend_skip_code)
-    if limit_up_skip_code:
-        buy_block_lines.append(limit_up_skip_code)
-    buy_block_lines.append("order_target_value(code, target_value)")
-    buy_block_lines.append("if is_buy_action:")
-    buy_block_lines.append("    buy_count += 1")
-    buy_block_lines.append("    log.info('buy order: %s, value=%.2f' % (code, target_value))")
-    buy_block = textwrap.indent("\n".join(buy_block_lines), "        ")
-
     return (
         textwrap.dedent(f"""\
 def compute_and_store_scores(context):
@@ -688,6 +670,17 @@ def compute_and_store_scores(context):
     if not scores:
         log.info('no scores, return')
         g.stored_scores = {{}}
+        g.stored_to_sell = []
+        g.stored_new_buys = []
+        return
+
+    # min_score_coverage check
+    pool_size = len(get_index_stocks(INDEX_CODE, date=context.current_dt.date()))
+    if pool_size > 0 and len(scores) / pool_size < MIN_SCORE_COVERAGE:
+        log.info('score coverage %.2f < %.2f, skip rebalance' % (len(scores) / pool_size, MIN_SCORE_COVERAGE))
+        g.stored_scores = {{}}
+        g.stored_to_sell = []
+        g.stored_new_buys = []
         return
 
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
@@ -698,34 +691,43 @@ def compute_and_store_scores(context):
 
     current_holdings = list(context.portfolio.positions.keys())
     log.info('current_holdings: %s' % str(current_holdings))
+
+    # determine sell set
     drop_candidates = [c for c in current_holdings if c not in keep_rank_set]
     drop_candidates = sorted(drop_candidates, key=lambda c: scores.get(c, -np.inf))
-    to_sell_set = set(drop_candidates[:MAX_DROP_PER_DAY])
+    to_sell_count = min(len(drop_candidates), MAX_DROP_PER_DAY)
+    to_sell_set = set(drop_candidates[:to_sell_count])
     kept = [c for c in current_holdings if c not in to_sell_set]
 
-    max_new_buys = len(to_sell_set) if current_holdings else HOLDING_COUNT
-    added = 0
+    # determine buy set with position replenishment
+    max_new_buys = to_sell_count if current_holdings else HOLDING_COUNT
+    if current_holdings:
+        shortfall = HOLDING_COUNT - len(current_holdings) + to_sell_count
+        max_new_buys = max(max_new_buys, shortfall)
+    new_buys = []
     for code in top_buy_codes:
         if code in kept:
             continue
-        if len(kept) >= HOLDING_COUNT:
+        if len(kept) + len(new_buys) >= HOLDING_COUNT:
             break
-        if current_holdings and added >= max_new_buys:
+        if len(new_buys) >= max_new_buys:
             break
         if TIMING_ENABLED:
             skip_new_open = False
 {timing_filter_code}
             if skip_new_open:
                 continue
-        kept.append(code)
-        added += 1
+        new_buys.append(code)
 
-    target_holdings = kept[:HOLDING_COUNT]
-    log.info('target_holdings: %s' % str(target_holdings))
+    log.info('to_sell: %s' % str(list(to_sell_set)))
+    log.info('new_buys: %s' % str(new_buys))
+    log.info('kept: %d, sell: %d, buy: %d' % (len(kept), len(to_sell_set), len(new_buys)))
 
     g.stored_scores = scores
-    g.stored_target_holdings = target_holdings
-    log.info('scores and target_holdings stored')
+    g.stored_to_sell = list(to_sell_set)
+    g.stored_new_buys = new_buys
+    g.stored_target_count = len(kept) + len(new_buys)
+    log.info('scores and trade plan stored')
 
 
 def execute_trades(context):
@@ -734,20 +736,9 @@ def execute_trades(context):
         log.info('no stored scores, return')
         return
 
-    scores = g.stored_scores
-    target_holdings = g.stored_target_holdings
-    target_set = set(target_holdings)
-    log.info('target_holdings: %s' % str(target_holdings))
-
-    if not target_set:
-        log.info('target_set empty, clear all positions')
-        for code in list(context.portfolio.positions.keys()):
-            order_target(code, 0)
-        g.current_holdings = []
-        g.stored_scores = {{}}
-        return
-
-{weight_calc}
+    to_sell = g.stored_to_sell
+    new_buys = g.stored_new_buys
+    target_count = max(getattr(g, 'stored_target_count', HOLDING_COUNT), 1)
     current_data = get_current_data()
     total_value = context.portfolio.total_value
     log.info('total_value: %.2f' % total_value)
@@ -755,54 +746,105 @@ def execute_trades(context):
     current_holdings = list(context.portfolio.positions.keys())
     sell_count = 0
     buy_count = 0
-    for code in current_holdings:
-        if code not in target_set:
+    sold_codes = []
+
+    # sell: only sell stocks in to_sell list (做法B: 不调整继续持有股票的权重)
+    for code in to_sell:
+        if code not in current_holdings:
+            continue
+        if current_data[code].paused:
+            log.info('sell skip (paused): %s' % code)
+            continue
+        if current_data[code].last_price <= current_data[code].low_limit:
+            log.info('sell skip (limit_down): %s, will retry' % code)
+            if not hasattr(g, 'pending_limit_down_sells'):
+                g.pending_limit_down_sells = []
+            g.pending_limit_down_sells.append(code)
+            continue
+        # 科创板(688开头)需使用限价单
+        if code.startswith('688'):
+            limit_price = current_data[code].last_price * 0.98
+            order_target_value(code, 0, style=LimitOrderStyle(limit_price))
+        else:
+            order_target_value(code, 0)
+        sell_count += 1
+        sold_codes.append(code)
+        log.info('sell order: %s' % code)
+
+    # buy: only buy stocks in new_buys list (做法B: 继续持有的股票不做任何操作)
+    weight_per_stock = 1.0 / target_count
+    available_cash = context.portfolio.available_cash
+    reserved_cash = total_value * CASH_BUFFER_RATIO
+    usable_cash = max(0, available_cash - reserved_cash)
+
+    total_buy_value = 0.0
+    for code in new_buys:
+        current_pos_value = 0.0
+        if code in context.portfolio.positions:
+            current_pos_value = context.portfolio.positions[code].value
+        delta = weight_per_stock * total_value - current_pos_value
+        if delta > 0:
+            total_buy_value += delta
+
+    scale = 1.0
+    if total_buy_value > usable_cash and total_buy_value > 0:
+        scale = usable_cash / total_buy_value
+
+    for code in new_buys:
+        target_value = weight_per_stock * total_value
+        current_pos_value = 0.0
+        if code in context.portfolio.positions:
+            current_pos_value = context.portfolio.positions[code].value
+        delta = target_value - current_pos_value
+        if delta > 0:
+            target_value = current_pos_value + delta * scale
+
+        if current_data[code].paused:
+            log.info('buy skip (paused): %s' % code)
+            continue
+        if current_data[code].last_price >= current_data[code].high_limit:
+            log.info('buy skip (limit_up): %s' % code)
+            continue
+        # 科创板(688开头)需使用限价单
+        if code.startswith('688'):
+            limit_price = current_data[code].last_price * 1.02
+            order_target_value(code, target_value, style=LimitOrderStyle(limit_price))
+        else:
+            order_target_value(code, target_value)
+        buy_count += 1
+        log.info('buy order: %s, value=%.2f' % (code, target_value))
+
+    g.current_holdings = [c for c in current_holdings if c not in set(sold_codes)] + new_buys[:buy_count]
+    g.stored_scores = {{}}
+    g.stored_to_sell = []
+    g.stored_new_buys = []
+    log.info('rebalance done: sell=%d, buy=%d' % (sell_count, buy_count))
+
+
+def retry_limit_down_sells(context):
+    '''跌停重试：每日开盘时重试之前因跌停未能卖出的股票'''
+    if not hasattr(g, 'pending_limit_down_sells') or not g.pending_limit_down_sells:
+        return
+    current_data = get_current_data()
+    remaining = []
+    for code in g.pending_limit_down_sells:
+        if code not in context.portfolio.positions:
+            continue
+        if current_data[code].paused:
+            continue
+        if current_data[code].last_price <= current_data[code].low_limit:
+            remaining.append(code)
+            log.info('retry sell skip (still limit_down): %s' % code)
+            continue
+        # 科创板(688开头)需使用限价单
+        if code.startswith('688'):
+            limit_price = current_data[code].last_price * 0.98
+            order_target_value(code, 0, style=LimitOrderStyle(limit_price))
+        else:
+            order_target_value(code, 0)
+        log.info('retry sell success: %s' % code)
+    g.pending_limit_down_sells = remaining
 """)
-        + "            is_buy_action = False\n"
-        + ("            " + suspend_skip_code + "\n" if suspend_skip_code else "")
-        + ("            " + limit_down_skip_code + "\n" if limit_down_skip_code else "")
-        + "            order_target_value(code, 0)\n"
-        + "            sell_count += 1\n"
-        + "            log.info('sell order: %s' % code)\n"
-        + "    # 计算可用资金，预留缓冲\n"
-        + "    available_cash = context.portfolio.available_cash\n"
-        + "    reserved_cash = total_value * CASH_BUFFER_RATIO\n"
-        + "    usable_cash = max(0, available_cash - reserved_cash)\n"
-        + "    \n"
-        + "    # 计算买入需要的总资金\n"
-        + "    buy_codes = [code for code in target_holdings if code not in set(current_holdings)]\n"
-        + "    total_buy_value = sum(weight * total_value for _ in buy_codes)\n"
-        + "    \n"
-        + "    # 如果资金不足，等比例缩放\n"
-        + "    scale = 1.0\n"
-        + "    if total_buy_value > usable_cash and total_buy_value > 0:\n"
-        + "        scale = usable_cash / total_buy_value\n"
-        + "    \n"
-        + "    for code in target_holdings:\n"
-        + "        if weight is not None:\n"
-        + "            target_value = weight * total_value\n"
-        + "        else:\n"
-        + "            target_value = weights_arr[target_holdings.index(code)] * total_value\n"
-        + "        \n"
-        + "        # 如果是买入操作，应用缩放\n"
-        + "        is_buy_action = code not in set(current_holdings)\n"
-        + "        if is_buy_action:\n"
-        + "            target_value = target_value * scale\n"
-        + "        \n"
-        + ("        " + suspend_skip_code + "\n" if suspend_skip_code else "")
-        + ("        " + limit_up_skip_code + "\n" if limit_up_skip_code else "")
-        + "        # 科创板(688开头)需使用限价单，其他用市价单\n"
-        + "        if code.startswith('688'):\n"
-        + "            limit_price = current_data[code].last_price * 1.02\n"
-        + "            order_target_value(code, target_value, style=LimitOrderStyle(limit_price))\n"
-        + "        else:\n"
-        + "            order_target_value(code, target_value)\n"
-        + "        if is_buy_action:\n"
-        + "            buy_count += 1\n"
-        + "            log.info('buy order: %s, value=%.2f' % (code, target_value))\n"
-        + "    g.current_holdings = target_holdings\n"
-        + "    g.stored_scores = {}\n"
-        + "    log.info('rebalance done: holdings=%d, sell=%d, buy=%d' % (len(target_holdings), sell_count, buy_count))\n"
     )
 
 
@@ -908,9 +950,7 @@ def _gen_enhanced_indexing_logic(
     limit_down_skip_code: str,
 ) -> str:
     holding_count = int(enhanced_cfg.get("holding_count", 30))
-    weight_mode = str(enhanced_cfg.get("weight_mode", "benchmark_tilt"))
     active_weight_bound = float(enhanced_cfg.get("active_weight_bound", 0.02))
-    tracking_error_limit = float(enhanced_cfg.get("tracking_error_limit", 0.05))
 
     timing_var = ""
     if timing_enabled:
@@ -948,54 +988,31 @@ def rebalance(context):
 
     n = len(selected_codes)
     base_weight = 1.0 / n
-    values = np.array([float(scores.get(c, 0)) for c in selected_codes], dtype=float)
-
-    if '{weight_mode}' == 'equal_weight_enhanced':
-        target_weights = {{c: base_weight for c in selected_codes}}
+    bw_map = getattr(g, 'benchmark_weights', {{}}) or {{}}
+    benchmark_w = np.array([float(bw_map.get(c, base_weight)) for c in selected_codes], dtype=float)
+    bw_sum = float(benchmark_w.sum())
+    if not np.isfinite(bw_sum) or bw_sum <= 0:
+        benchmark_w = np.full(n, base_weight)
     else:
-        bound = {active_weight_bound}
-        if '{weight_mode}' == 'score_tilt':
-            min_value = float(np.nanmin(values))
-            shifted = np.where(np.isfinite(values), values - min_value + 1e-12, 0.0)
-            denom = float(np.nansum(shifted))
-            if not np.isfinite(denom) or denom <= 0:
-                target_weights = {{c: base_weight for c in selected_codes}}
-            else:
-                raw = shifted / denom
-                tilt = raw - base_weight
-                raw_tilt = np.clip(tilt, -bound, bound)
-                current_te = float(np.sqrt(np.mean(np.square(raw_tilt))))
-                te_limit = {tracking_error_limit}
-                if te_limit > 0 and current_te > te_limit:
-                    raw_tilt = raw_tilt * (te_limit / current_te)
-                weights_arr = base_weight + raw_tilt
-                weights_arr = np.clip(weights_arr, 0.0, None)
-                denom2 = float(weights_arr.sum())
-                if not np.isfinite(denom2) or denom2 <= 0:
-                    target_weights = {{c: base_weight for c in selected_codes}}
-                else:
-                    weights_arr = weights_arr / denom2
-                    target_weights = {{c: float(w) for c, w in zip(selected_codes, weights_arr)}}
+        benchmark_w = benchmark_w / bw_sum
+
+    values = np.array([float(scores.get(c, 0)) for c in selected_codes], dtype=float)
+    bound = {active_weight_bound}
+    std = float(values.std(ddof=0))
+    if not np.isfinite(std) or std <= 1e-12:
+        target_weights = {{c: float(benchmark_w[i]) for i, c in enumerate(selected_codes)}}
+    else:
+        z = (values - float(values.mean())) / std
+        raw_tilt = z * bound
+        raw_tilt = np.clip(raw_tilt, -bound, bound)
+        weights_arr = benchmark_w + raw_tilt
+        weights_arr = np.clip(weights_arr, 0.0, None)
+        denom2 = float(weights_arr.sum())
+        if not np.isfinite(denom2) or denom2 <= 0:
+            target_weights = {{c: float(benchmark_w[i]) for i, c in enumerate(selected_codes)}}
         else:
-            std = float(values.std(ddof=0))
-            if not np.isfinite(std) or std <= 1e-12:
-                target_weights = {{c: base_weight for c in selected_codes}}
-            else:
-                z = (values - float(values.mean())) / std
-                raw_tilt = z * bound
-                raw_tilt = np.clip(raw_tilt, -bound, bound)
-                current_te = float(np.sqrt(np.mean(np.square(raw_tilt))))
-                te_limit = {tracking_error_limit}
-                if te_limit > 0 and current_te > te_limit:
-                    raw_tilt = raw_tilt * (te_limit / current_te)
-                weights_arr = base_weight + raw_tilt
-                weights_arr = np.clip(weights_arr, 0.0, None)
-                denom2 = float(weights_arr.sum())
-                if not np.isfinite(denom2) or denom2 <= 0:
-                    target_weights = {{c: base_weight for c in selected_codes}}
-                else:
-                    weights_arr = weights_arr / denom2
-                    target_weights = {{c: float(w) for c, w in zip(selected_codes, weights_arr)}}
+            weights_arr = weights_arr / denom2
+            target_weights = {{c: float(w) for c, w in zip(selected_codes, weights_arr)}}
 
     if TIMING_ENABLED:
         current_holdings = list(context.portfolio.positions.keys())
