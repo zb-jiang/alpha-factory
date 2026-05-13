@@ -320,6 +320,7 @@ def _generate_strategy_code(
     allowed_raw: set[str],
     has_chip: bool,
     chip_windows: list[int],
+    has_turnover: bool = False,
 ) -> str:
     factor_name = str(factor["factor_name"])
     formula = str(factor["formula"])
@@ -486,6 +487,30 @@ def _generate_strategy_code(
 
     retry_schedule = "    run_daily(retry_limit_down_sells, time='09:30')" if limit_down_action == "delay_sell" else ""
 
+    if has_turnover:
+        turnover_prefetch = ""
+        turnover_assign = """            # Fetch historical turnover ratio from JoinQuant
+            hist['turnover'] = 0.0
+            try:
+                q = query(valuation.turnover_ratio).filter(valuation.code == code)
+                turnover_df = get_fundamentals_continuously(q, end_date=context.current_dt, count=HISTORY_WINDOW, panel=False)
+                if turnover_df is not None and not turnover_df.empty:
+                    if 'day' in turnover_df.columns:
+                        turnover_df = turnover_df.set_index('day')
+                    if isinstance(turnover_df.columns, pd.MultiIndex):
+                        turnover_df.columns = [c[0] if isinstance(c, tuple) else c for c in turnover_df.columns]
+                    col_name = [c for c in turnover_df.columns if c != 'code' and 'turnover' in c.lower()]
+                    col_name = col_name[0] if col_name else turnover_df.columns[0]
+                    turnover_df.index = pd.to_datetime(turnover_df.index).strftime('%Y-%m-%d')
+                    turnover_map = turnover_df[col_name].to_dict()
+                    hist['turnover'] = hist.index.map(lambda d: turnover_map.get(str(d)[:10], 0.0) if pd.notna(turnover_map.get(str(d)[:10])) else 0.0)
+                    log.info('code=%s, turnover nonzero=%d, sample=%s' % (code, int((hist['turnover'] != 0).sum()), str(hist['turnover'].tail(3).tolist())))
+            except Exception as e:
+                log.info('code=%s, turnover fetch failed: %s' % (code, str(e)))"""
+    else:
+        turnover_prefetch = ""
+        turnover_assign = "            hist['turnover'] = 0.0"
+
     rebalance_schedule = ""
     if rebalance == "weekly":
         if rebalance_anchor == "first_trading_day_of_week":
@@ -569,6 +594,7 @@ def compute_factor_scores(context):
 
     scores = {{}}
     log.info('compute_factor_scores: stocks count=%d' % len(stocks))
+{turnover_prefetch}
     for code in stocks:
         try:
             hist = get_bars(code, count=HISTORY_WINDOW, unit='1d',
@@ -582,7 +608,7 @@ def compute_factor_scores(context):
             hist = hist.set_index('date')
             hist['amount'] = hist['money']
             hist['vwap'] = hist['money'] / hist['volume'].replace(0, np.nan)
-            hist['turnover'] = 0.0
+{turnover_assign}
 
             close = hist['close']
             open_ = hist['open']
@@ -1075,9 +1101,11 @@ def run() -> None:
 
     has_chip = _has_chip_features(required_features)
     chip_windows = _detect_chip_windows(required_features) if has_chip else []
+    has_turnover = any("turnover" in name for name in sorted_feature_names) or any("turnover" in expr for expr in required_features.values())
 
     print(f"  required features: {sorted_feature_names}")
     print(f"  has chip features: {has_chip}")
+    print(f"  has turnover features: {has_turnover}")
     if has_chip:
         print(f"  chip windows: {chip_windows}")
 
@@ -1093,6 +1121,7 @@ def run() -> None:
         allowed_raw=allowed_raw,
         has_chip=has_chip,
         chip_windows=chip_windows,
+        has_turnover=has_turnover,
     )
 
     output_dir = RUNTIME_ROOT / "joinquant"
