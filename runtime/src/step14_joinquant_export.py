@@ -358,6 +358,9 @@ def _generate_strategy_code(
     weight_mode = str(topk_cfg.get("weight_mode", "equal_weight"))
     max_drop_per_day = int(topk_cfg.get("max_drop_per_day", 5))
     min_score_coverage = float(topk_cfg.get("min_score_coverage", 0.90))
+    weight_func = str(soft_cfg.get("weight_func", "softmax"))
+    softmax_temperature = float(soft_cfg.get("softmax_temperature", 1.0))
+    rank_power_alpha = float(soft_cfg.get("rank_power_alpha", 1.0))
     initial_cash = float(execution_cfg.get("initial_cash", 1_000_000))
     buy_cost = float(execution_cfg.get("buy_cost", 0.0015))
     sell_cost = float(execution_cfg.get("sell_cost", 0.0025))
@@ -550,6 +553,9 @@ SELL_DROP_TO = {sell_drop_to}
 HOLDING_COUNT = {holding_count}
 MAX_DROP_PER_DAY = {max_drop_per_day}
 MIN_SCORE_COVERAGE = {min_score_coverage}
+WEIGHT_FUNC = '{weight_func}'
+SOFTMAX_TEMPERATURE = {softmax_temperature}
+RANK_POWER_ALPHA = {rank_power_alpha}
 
 # Execution cost
 BUY_COST = {buy_cost}
@@ -709,7 +715,7 @@ def compute_and_store_scores(context):
         g.stored_new_buys = []
         return
 
-    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    ranked = sorted(scores.items(), key=lambda x: (-x[1], x[0].split('.')[0]))
     log.info('top 5 scores: %s' % str(ranked[:5]))
     ranked_codes = [code for code, _ in ranked]
     top_buy_codes = ranked_codes[:BUY_TOP_N]
@@ -720,7 +726,7 @@ def compute_and_store_scores(context):
 
     # determine sell set
     drop_candidates = [c for c in current_holdings if c not in keep_rank_set]
-    drop_candidates = sorted(drop_candidates, key=lambda c: scores.get(c, -np.inf))
+    drop_candidates = sorted(drop_candidates, key=lambda c: (scores.get(c, -np.inf), c.split('.')[0]))
     to_sell_count = min(len(drop_candidates), MAX_DROP_PER_DAY)
     to_sell_set = set(drop_candidates[:to_sell_count])
     kept = [c for c in current_holdings if c not in to_sell_set]
@@ -882,52 +888,44 @@ def _gen_soft_topk_logic(
     limit_up_skip_code: str,
     limit_down_skip_code: str,
 ) -> str:
-    top_n = int(soft_cfg.get("top_n", 30))
     holding_count = int(soft_cfg.get("holding_count", 30))
     weight_func = str(soft_cfg.get("weight_func", "softmax"))
-
-    timing_var = ""
-    if timing_enabled:
-        timing_var = textwrap.indent(textwrap.dedent("""\
-    benchmark_hist = get_bars(g.benchmark_code, count=EMA_PERIOD + 10, unit='1d', fields=['date', 'close'], include_now=True, df=True)
-    benchmark_hist = benchmark_hist.set_index('date')
-    benchmark_ema = benchmark_hist['close'].ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean()
-    benchmark_close = benchmark_hist['close'].iloc[-1]
-    timing_active = benchmark_close < benchmark_ema.iloc[-1]
-    exposure_scale = TIMING_REDUCE_TO if timing_active else 1.0
-"""), "    ")
-
-    suspend_skip = suspend_skip_code
-
-    order_lines = ["order_target_value(code, w * total_value)"]
-    if suspend_skip_code:
-        order_lines.insert(0, suspend_skip_code)
-    order_block = textwrap.indent("\n".join(order_lines), "        ")
-
-    order_head = "    for code, w in weights.items():\n"
-    order_tail = "\n    g.current_holdings = list(weights.keys())\n    log.info('soft_topk: holdings=%d' % len(weights))\n"
+    softmax_temperature = float(soft_cfg.get("softmax_temperature", 1.0))
+    rank_power_alpha = float(soft_cfg.get("rank_power_alpha", 1.0))
 
     return (
         textwrap.dedent(f"""\
-def rebalance(context):
+def compute_and_store_scores(context):
+    log.info('=== compute_and_store_scores called at %s ===' % context.current_dt)
     scores = compute_factor_scores(context)
+    log.info('scores count: %d' % len(scores))
     if not scores:
+        log.info('no scores, return')
+        g.stored_target_weights = {{}}
         return
 
-{timing_var}
-    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    selected = ranked[:min({top_n}, {holding_count})]
+    pool_size = len(get_index_stocks(INDEX_CODE, date=context.current_dt.date()))
+    if pool_size > 0 and len(scores) / pool_size < MIN_SCORE_COVERAGE:
+        log.info('score coverage %.2f < %.2f, skip rebalance' % (len(scores) / pool_size, MIN_SCORE_COVERAGE))
+        g.stored_target_weights = {{}}
+        return
+
+    ranked = sorted(scores.items(), key=lambda x: (-x[1], x[0].split('.')[0]))
+    log.info('top 5 scores: %s' % str(ranked[:5]))
+    selected = ranked[:HOLDING_COUNT]
     if not selected:
+        g.stored_target_weights = {{}}
         return
 
     codes = [c for c, _ in selected]
     values = np.array([v for _, v in selected], dtype=float)
 
-    if '{weight_func}' == 'rank_power':
+    if WEIGHT_FUNC == 'rank_power':
+        alpha = max(RANK_POWER_ALPHA, 1e-9)
         ranks = np.arange(1, len(codes) + 1, dtype=float)
-        raw = 1.0 / np.power(ranks, 1.0)
+        raw = 1.0 / np.power(ranks, alpha)
     else:
-        temperature = 1.0
+        temperature = max(SOFTMAX_TEMPERATURE, 1e-9)
         shifted = (values - float(values.max())) / temperature
         shifted = np.clip(shifted, -60.0, 60.0)
         raw = np.exp(shifted)
@@ -935,35 +933,118 @@ def rebalance(context):
     denom = float(raw.sum())
     if not np.isfinite(denom) or denom <= 0:
         equal_w = 1.0 / len(codes)
-        weights = {{c: equal_w for c in codes}}
+        target_weights = {{c: equal_w for c in codes}}
     else:
         normalized = raw / denom
-        weights = {{c: float(w) for c, w in zip(codes, normalized)}}
+        target_weights = {{c: float(w) for c, w in zip(codes, normalized)}}
 
-    if TIMING_ENABLED:
-        current_holdings = list(context.portfolio.positions.keys())
-        filtered = {{}}
-        for c, w in weights.items():
-            skip_new_open = False
-            if c not in current_holdings:
-{timing_filter_code}
-                pass
-            if not skip_new_open:
-                filtered[c] = w
-        weight_sum = sum(filtered.values())
-        if weight_sum > 0:
-            filtered = {{c: w / weight_sum for c, w in filtered.items()}}
-        weights = filtered
-        for c, w in weights.items():
-            weights[c] = w * exposure_scale
+    current_holdings = list(context.portfolio.positions.keys())
+    for code in current_holdings:
+        if code not in target_weights:
+            target_weights[code] = 0.0
 
+    log.info('target_weights: %d stocks' % len(target_weights))
+    g.stored_target_weights = target_weights
+
+
+def execute_trades(context):
+    log.info('=== execute_trades called at %s ===' % context.current_dt)
+    if not hasattr(g, 'stored_target_weights') or not g.stored_target_weights:
+        log.info('no stored target weights, return')
+        return
+
+    target_weights = g.stored_target_weights
     current_data = get_current_data()
     total_value = context.portfolio.total_value
-    for code in list(context.portfolio.positions.keys()):
-        if code not in weights:
-            order_target_value(code, 0)
+    log.info('total_value: %.2f' % total_value)
+
+    sell_orders = []
+    buy_orders = []
+    limit_down_full_sells = []
+
+    for code, target_weight in target_weights.items():
+        if code not in context.portfolio.positions:
+            continue
+        pos = context.portfolio.positions[code]
+        if pos.total_amount <= 0:
+            continue
+        current_value = pos.value
+        current_weight = current_value / total_value if total_value > 0 else 0.0
+
+        if target_weight < current_weight - 0.005:
+            if current_data[code].paused:
+                continue
+            if current_data[code].last_price <= current_data[code].low_limit:
+                if target_weight <= 1e-6:
+                    limit_down_full_sells.append(code)
+                continue
+
+            target_value = target_weight * total_value
+            if target_weight > 1e-6:
+                target_shares = int(target_value / current_data[code].last_price / 100) * 100
+            else:
+                target_shares = 0
+            shares_to_sell = pos.total_amount - target_shares
+            if shares_to_sell > 0:
+                sell_orders.append((code, shares_to_sell))
+
+    pending_sell_value = 0.0
+    for code, shares in sell_orders:
+        pending_sell_value += shares * current_data[code].last_price
+
+    available_cash = context.portfolio.available_cash
+    reserved_cash = total_value * CASH_BUFFER_RATIO
+    usable_cash = max(0, available_cash + pending_sell_value - reserved_cash)
+
+    for code, target_weight in target_weights.items():
+        if target_weight <= 0:
+            continue
+        current_value = 0.0
+        if code in context.portfolio.positions:
+            current_value = context.portfolio.positions[code].value
+        current_weight = current_value / total_value if total_value > 0 else 0.0
+
+        if target_weight > current_weight + 0.005:
+            if current_data[code].paused:
+                continue
+            if current_data[code].last_price >= current_data[code].high_limit:
+                continue
+            delta = target_weight * total_value - current_value
+            buy_orders.append((code, delta))
+
+    total_buy_value = sum(delta for _, delta in buy_orders)
+    scale = 1.0
+    if total_buy_value > usable_cash and total_buy_value > 0:
+        scale = usable_cash / total_buy_value
+
+    for code, shares_to_sell in sell_orders:
+        if code.startswith('688'):
+            limit_price = current_data[code].last_price * 0.98
+            order_target(code, int(context.portfolio.positions[code].total_amount - shares_to_sell), style=LimitOrderStyle(limit_price))
+        else:
+            order_target(code, int(context.portfolio.positions[code].total_amount - shares_to_sell))
+        log.info('sell order: %s, shares=%d' % (code, shares_to_sell))
+
+    for code, delta in buy_orders:
+        target_value = delta * scale
+        if code in context.portfolio.positions:
+            target_value += context.portfolio.positions[code].value
+        if code.startswith('688'):
+            limit_price = current_data[code].last_price * 1.02
+            order_target_value(code, target_value, style=LimitOrderStyle(limit_price))
+        else:
+            order_target_value(code, target_value)
+        log.info('buy order: %s, value=%.2f' % (code, target_value))
+
+    for code in limit_down_full_sells:
+        if not hasattr(g, 'pending_limit_down_sells'):
+            g.pending_limit_down_sells = []
+        g.pending_limit_down_sells.append(code)
+        log.info('limit down sell deferred: %s' % code)
+
+    g.stored_target_weights = {{}}
+    retry_limit_down_sells(context)
 """)
-        + order_head + order_block + order_tail
     )
 
 
@@ -975,94 +1056,14 @@ def _gen_enhanced_indexing_logic(
     limit_up_skip_code: str,
     limit_down_skip_code: str,
 ) -> str:
-    holding_count = int(enhanced_cfg.get("holding_count", 30))
-    active_weight_bound = float(enhanced_cfg.get("active_weight_bound", 0.02))
+    return textwrap.dedent("""\
+def compute_and_store_scores(context):
+    log.info('EnhancedIndexing strategy not implemented yet')
+    g.stored_target_weights = {}
 
-    timing_var = ""
-    if timing_enabled:
-        timing_var = textwrap.indent(textwrap.dedent("""\
-    benchmark_hist = get_bars(g.benchmark_code, count=EMA_PERIOD + 10, unit='1d', fields=['date', 'close'], include_now=True, df=True)
-    benchmark_hist = benchmark_hist.set_index('date')
-    benchmark_ema = benchmark_hist['close'].ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean()
-    benchmark_close = benchmark_hist['close'].iloc[-1]
-    timing_active = benchmark_close < benchmark_ema.iloc[-1]
-    exposure_scale = TIMING_REDUCE_TO if timing_active else 1.0
-"""), "    ")
-
-    suspend_skip = suspend_skip_code
-
-    order_lines = ["order_target_value(code, w * total_value)"]
-    if suspend_skip_code:
-        order_lines.insert(0, suspend_skip_code)
-    order_block = textwrap.indent("\n".join(order_lines), "        ")
-
-    order_head = "    for code, w in target_weights.items():\n"
-    order_tail = "\n    g.current_holdings = list(target_weights.keys())\n    log.info('enhanced_indexing: holdings=%d' % len(target_weights))\n"
-
-    return (
-        textwrap.dedent(f"""\
-def rebalance(context):
-    scores = compute_factor_scores(context)
-    if not scores:
-        return
-
-{timing_var}
-    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    selected_codes = [c for c, _ in ranked[:{holding_count}]]
-    if not selected_codes:
-        return
-
-    n = len(selected_codes)
-    base_weight = 1.0 / n
-    bw_map = getattr(g, 'benchmark_weights', {{}}) or {{}}
-    benchmark_w = np.array([float(bw_map.get(c, base_weight)) for c in selected_codes], dtype=float)
-    bw_sum = float(benchmark_w.sum())
-    if not np.isfinite(bw_sum) or bw_sum <= 0:
-        benchmark_w = np.full(n, base_weight)
-    else:
-        benchmark_w = benchmark_w / bw_sum
-
-    values = np.array([float(scores.get(c, 0)) for c in selected_codes], dtype=float)
-    bound = {active_weight_bound}
-    std = float(values.std(ddof=0))
-    if not np.isfinite(std) or std <= 1e-12:
-        target_weights = {{c: float(benchmark_w[i]) for i, c in enumerate(selected_codes)}}
-    else:
-        z = (values - float(values.mean())) / std
-        raw_tilt = z * bound
-        raw_tilt = np.clip(raw_tilt, -bound, bound)
-        weights_arr = benchmark_w + raw_tilt
-        weights_arr = np.clip(weights_arr, 0.0, None)
-        denom2 = float(weights_arr.sum())
-        if not np.isfinite(denom2) or denom2 <= 0:
-            target_weights = {{c: float(benchmark_w[i]) for i, c in enumerate(selected_codes)}}
-        else:
-            weights_arr = weights_arr / denom2
-            target_weights = {{c: float(w) for c, w in zip(selected_codes, weights_arr)}}
-
-    if TIMING_ENABLED:
-        current_holdings = list(context.portfolio.positions.keys())
-        filtered = {{}}
-        for c, w in target_weights.items():
-            skip_new_open = False
-            if c not in current_holdings:
-{timing_filter_code}
-                pass
-            if not skip_new_open:
-                filtered[c] = w
-        weight_sum = sum(filtered.values())
-        if weight_sum > 0:
-            filtered = {{c: w / weight_sum for c, w in filtered.items()}}
-        target_weights = {{c: w * exposure_scale for c, w in filtered.items()}}
-
-    current_data = get_current_data()
-    total_value = context.portfolio.total_value
-    for code in list(context.portfolio.positions.keys()):
-        if code not in target_weights:
-            order_target_value(code, 0)
+def execute_trades(context):
+    pass
 """)
-        + order_head + order_block + order_tail
-    )
 
 
 def run() -> None:

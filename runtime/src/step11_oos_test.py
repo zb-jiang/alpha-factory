@@ -6,7 +6,7 @@ from common import OUTPUT_DIR, clear_runtime_context, ensure_runtime_dirs, env_c
 from step00_clean import run as run_step00
 from step01_precache_tushare import run as run_step01
 from step07_eval_factor import run as run_step07
-from step08_backtrader import run_backtrader_batch_export as run_step08
+from step08_backtrader import run_backtest_batch_export as run_step08
 from step09_score import run as run_step09
 
 

@@ -5,9 +5,9 @@ strategy_type: TopKDropout
 # TopKDropout（当前可执行）
 TopKDropout:
   # 买入规则：根据因子得分从高到低排序，优先候选前 N
-  buy_top_n: 20
+  buy_top_n: 40
   # 卖出规则：持仓股票若跌出前 M 名则卖出（宽幅缓冲降低换手）
-  sell_drop_to: 40
+  sell_drop_to: 200
   # 最终目标持仓数
   holding_count: 20
   # 权重模式：

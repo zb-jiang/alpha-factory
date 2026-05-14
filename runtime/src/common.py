@@ -1298,7 +1298,9 @@ def _calculate_chip_features(
 
 def _compute_group_features(group: pd.DataFrame, base_features: list[dict[str, str]]) -> pd.DataFrame:
     local = group.droplevel("instrument").copy()
-    env = {column: local[column] for column in local.columns}
+    valid_mask = local["close"].notna()
+    local_valid = local.loc[valid_mask].copy()
+    env = {column: local_valid[column] for column in local_valid.columns}
     values: dict[str, pd.Series] = {}
     
     chip_features_computed = False
@@ -1310,9 +1312,9 @@ def _compute_group_features(group: pd.DataFrame, base_features: list[dict[str, s
         
         if expr.startswith("chip.") and not chip_features_computed:
             required_cols = ["high", "low", "close", "volume"]
-            if all(col in local.columns for col in required_cols):
+            if all(col in local_valid.columns for col in required_cols):
                 chip_features_df = _calculate_chip_features(
-                    local["high"], local["low"], local["close"], local["volume"]
+                    local_valid["high"], local_valid["low"], local_valid["close"], local_valid["volume"]
                 )
                 for col in chip_features_df.columns:
                     env[col] = chip_features_df[col]
@@ -1323,13 +1325,15 @@ def _compute_group_features(group: pd.DataFrame, base_features: list[dict[str, s
                 values[name] = chip_features_df[name]
                 env[name] = values[name]
             else:
-                values[name] = pd.Series(np.nan, index=local.index)
+                values[name] = pd.Series(np.nan, index=local_valid.index)
                 env[name] = values[name]
         else:
             values[name] = eval(expr, {"__builtins__": {}}, env)
             env[name] = values[name]
     
-    result = pd.DataFrame(values, index=local.index)
+    result_valid = pd.DataFrame(values, index=local_valid.index)
+    result = pd.DataFrame(np.nan, index=local.index, columns=result_valid.columns)
+    result.loc[valid_mask] = result_valid.values
     result.index.name = "datetime"
     result["instrument"] = group.index.get_level_values("instrument")[0]
     result = result.set_index("instrument", append=True).reorder_levels(["instrument", "datetime"])
@@ -2017,6 +2021,7 @@ def apply_factor_preprocess(
         if market_cap_field not in raw_frame.columns:
             raise KeyError(f"行业市值中性化失败：原始数据中不存在字段 {market_cap_field}")
         score = neutralize_by_industry_and_market_cap(score, raw_frame[industry_field], raw_frame[market_cap_field])
+    score = score.groupby(level="instrument").ffill()
     return score.rename(factor_series.name)
 
 
