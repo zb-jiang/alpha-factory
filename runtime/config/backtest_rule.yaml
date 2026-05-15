@@ -24,25 +24,25 @@ TopKDropout:
 # EnhancedIndexing（指数增强策略）
 # 核心思想：以指数真实成分股权重为基底，用因子得分做有约束的 z-score 倾斜，
 # 在跟踪指数的前提下获取超额收益。
-EnhancedIndexing:
+#EnhancedIndexing:
   # 单只股票主动权重偏离上限（Active Weight Bound）
   # 含义：某只股票相对其指数基准权重的增减幅度不超过该值（如 ±2%）
   # 示例：基准权重5%的股票，实际权重范围 [3%, 7%]
-  active_weight_bound: 0.02
+  #active_weight_bound: 0.02
   # 组合目标持仓数（从指数成分股中选因子得分排名前N的股票）
   # 数量更大：覆盖更广，跟踪更紧密；数量更小：Alpha更集中
-  holding_count: 30
+  #holding_count: 30
   # 权重模式（当前仅支持 benchmark_tilt）：
   # - benchmark_tilt：以指数真实成分股权重为基底，z-score 倾斜
-  weight_mode: benchmark_tilt
+  #weight_mode: benchmark_tilt
   # 因子分数保有率阈值
   # 含义：调仓日因子分数非缺失的成分股数占成分股总数的最低比例
   # 低于此值本调仓日不操作（排名都做不了，后续动作没有意义）
-  min_score_coverage: 0.90
+  #min_score_coverage: 0.90
   # 成分权重保有率阈值
   # 含义：入选的前holding_count只股票中，拥有成分权重数据的最低比例
   # 低于此值本调仓日不操作（权重数据都没有，做动作没有意义）
-  min_weight_coverage: 0.90
+  #min_weight_coverage: 0.90
 
 # SoftTopK（软性TopK策略）
 # 核心思想：先选出Top-N股票，再按分数连续分配权重（而不是简单等权），
@@ -82,7 +82,7 @@ MarketTiming:
   # 个股开仓过滤器（仅对“新开仓”生效，老持仓不受该过滤影响）：
   # - none：不开启个股过滤
   # - ema：仅当个股 close >= 个股EMA(stock_ema_period) 才允许新开仓
-  # - rsi：仅当个股 RSI(period) <= rsi_buy_max 才允许新开仓（方案A）
+  # - rsi：仅当个股 RSI(period) <= rsi_buy_max 才允许新开仓
   stock_open_filter: rsi
   # 个股 EMA 开仓过滤周期（仅 stock_open_filter=ema 时生效）
   # 例如 20 表示用个股 20 日 EMA 判断是否允许新开仓
