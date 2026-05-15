@@ -308,6 +308,7 @@ def _generate_feature_compute_block(
             continue
         translated = _translate_expr_to_single_stock(expr)
         lines.append(f"{indent}feature_vals['{name}'] = {translated}")
+        lines.append(f"{indent}{name} = feature_vals['{name}']")
     return "\n".join(lines)
 
 

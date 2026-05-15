@@ -20,7 +20,10 @@ def _min_lot(code: str) -> int:
 
 def _round_to_lot(code: str, shares: int) -> int:
     lot = _min_lot(code)
-    return max(0, (shares // lot) * lot)
+    if shares <= 0:
+        return 0
+    lots = shares // lot
+    return lots * lot
 
 
 @dataclass
@@ -386,34 +389,26 @@ class BacktestEngine:
         buy_orders: list[tuple[str, float, float]] = []
         limit_down_full_sells: list[str] = []
 
-        for code, target_weight in target_weights.items():
+        to_sell_codes = set(plan.to_sell.keys())
+        to_buy_codes = set(plan.to_buy.keys())
+
+        for code in to_sell_codes:
             pos = self._portfolio.get_position(code)
             current_shares = pos.shares if not pos.is_empty else 0
+            if current_shares <= 0:
+                continue
             open_price = self._market.get_open(code, date)
-
-            if current_shares > 0:
-                current_price = open_price if not np.isnan(open_price) else prices.get(code, 0.0)
-                current_value = current_shares * current_price
-                current_weight = current_value / total_value if total_value > 0 else 0.0
-                target_value = target_weight * total_value
-
-                if target_weight < current_weight - 0.005:
-                    if self._market.is_suspended(code, date):
-                        _backtest_logger.info("sell skip (paused): %s", code)
-                        continue
-                    if np.isnan(open_price):
-                        _backtest_logger.info("sell skip (no open price): %s", code)
-                        continue
-                    if self._market.is_limit_down(code, date):
-                        _backtest_logger.info("sell skip (limit_down): %s, will retry", code)
-                        if target_weight <= 1e-6:
-                            limit_down_full_sells.append(code)
-                        continue
-
-                    target_shares = _round_to_lot(code, int(target_value / open_price)) if target_weight > 1e-6 else 0
-                    shares_to_sell = current_shares - target_shares
-                    if shares_to_sell > 0:
-                        sell_orders.append((code, shares_to_sell))
+            if np.isnan(open_price):
+                _backtest_logger.info("sell skip (no open price): %s", code)
+                continue
+            if self._market.is_suspended(code, date):
+                _backtest_logger.info("sell skip (paused): %s", code)
+                continue
+            if self._market.is_limit_down(code, date):
+                _backtest_logger.info("sell skip (limit_down): %s, will retry", code)
+                limit_down_full_sells.append(code)
+                continue
+            sell_orders.append((code, current_shares))
 
         pending_sell_value = 0.0
         for code, shares in sell_orders:
@@ -423,27 +418,24 @@ class BacktestEngine:
 
         available_cash = self._portfolio.available_cash_after_buffer(total_value, pending_sell_value)
 
-        for code, target_weight in target_weights.items():
+        for code in to_buy_codes:
+            target_weight = plan.to_buy.get(code, 0.0)
             if target_weight <= 0:
                 continue
-            pos = self._portfolio.get_position(code)
-            current_shares = pos.shares if not pos.is_empty else 0
             open_price = self._market.get_open(code, date)
             if np.isnan(open_price):
                 continue
-
-            current_value = current_shares * open_price if current_shares > 0 else 0.0
-            current_weight = current_value / total_value if total_value > 0 else 0.0
+            if self._market.is_suspended(code, date):
+                _backtest_logger.info("buy skip (paused): %s", code)
+                continue
+            if self._market.is_limit_up(code, date):
+                _backtest_logger.info("buy skip (limit_up): %s", code)
+                continue
+            pos = self._portfolio.get_position(code)
+            current_value = pos.value if not pos.is_empty else 0.0
             target_value = target_weight * total_value
-
-            if target_weight > current_weight + 0.005:
-                if self._market.is_suspended(code, date):
-                    _backtest_logger.info("buy skip (paused): %s", code)
-                    continue
-                if self._market.is_limit_up(code, date):
-                    _backtest_logger.info("buy skip (limit_up): %s", code)
-                    continue
-                delta = target_value - current_value
+            delta = target_value - current_value
+            if delta > 0:
                 buy_orders.append((code, delta, open_price))
 
         total_buy_value = sum(delta for _, delta, _ in buy_orders)
@@ -473,7 +465,8 @@ class BacktestEngine:
 
         for code, delta, open_price in buy_orders:
             adjusted_value = delta * scale
-            shares_needed = _round_to_lot(code, int(adjusted_value / open_price))
+            price_for_calc = open_price * 1.02 if code[2:].startswith("688") else open_price
+            shares_needed = _round_to_lot(code, int(adjusted_value / price_for_calc))
             if shares_needed > 0:
                 actual_shares, commission = self._portfolio.buy(code, shares_needed, open_price)
                 if actual_shares > 0:
@@ -488,6 +481,8 @@ class BacktestEngine:
                     ))
                     buy_count += 1
                     _backtest_logger.info("buy order: %s, value=%.2f, shares=%d, price=%.4f", code, actual_shares * open_price, int(actual_shares), open_price)
+            else:
+                _backtest_logger.info("buy skip (shares < min_lot): %s, target_value=%.2f, price=%.4f", code, adjusted_value, open_price)
 
         if limit_down_full_sells:
             _backtest_logger.info("pending_limit_down_sells: %s", limit_down_full_sells)
