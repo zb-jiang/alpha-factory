@@ -22,6 +22,7 @@ from common import (
 )
 from engine import BacktestEngine, MarketData
 from engine.enhanced_indexing import EnhancedIndexingStrategy
+from engine.market_timing import MarketTimingFilter
 from engine.soft_topk import SoftTopKStrategy
 from engine.topk_dropout import TopKDropoutStrategy
 
@@ -136,7 +137,16 @@ def _build_data_bundle_for_factor(
 def build_data_bundle(config: dict[str, Any] | None = None) -> BacktestDataBundle:
     cfg = config or env_config()
     raw_fields = list(feature_pool_config().get("raw_fields", []))
-    raw_frame = load_raw_data(cfg, raw_fields)
+    rule = backtest_rule_config()
+    mt_cfg = dict(rule.get("MarketTiming", {}))
+    mt_enabled = bool(mt_cfg.get("enabled", False))
+    warmup = 0
+    if mt_enabled:
+        ema_p = int(str(mt_cfg.get("market_indicator", "EMA_60")).split("_")[-1])
+        rsi_p = int(mt_cfg.get("rsi_period", 14))
+        stock_ema_p = int(mt_cfg.get("stock_ema_period", 60))
+        warmup = max(ema_p, rsi_p + 1, stock_ema_p) + 10
+    raw_frame = load_raw_data(cfg, raw_fields, warmup_trading_days=warmup)
     ohlcv_map = _build_ohlcv_by_instrument(raw_frame)
     factor_values = _load_factor_values()
     factor_name = _select_factor_name(factor_values, cfg)
@@ -203,11 +213,35 @@ def _build_strategy(rule: dict[str, Any]):
     raise ValueError(f"不支持的 strategy_type: {strategy_type}")
 
 
+def _build_market_timing(rule: dict[str, Any], ohlcv_map: dict[str, pd.DataFrame]) -> MarketTimingFilter | None:
+    mt_cfg = dict(rule.get("MarketTiming", {}))
+    enabled = bool(mt_cfg.get("enabled", False))
+    if not enabled:
+        return None
+    return MarketTimingFilter(
+        market_indicator=str(mt_cfg.get("market_indicator", "EMA_60")),
+        reduce_to=float(mt_cfg.get("reduce_to", 0.5)),
+        stock_open_filter=str(mt_cfg.get("stock_open_filter", "none")),
+        stock_ema_period=int(mt_cfg.get("stock_ema_period", 60)),
+        rsi_period=int(mt_cfg.get("rsi_period", 14)),
+        rsi_buy_max=float(mt_cfg.get("rsi_buy_max", 70.0)),
+        ohlcv_map=ohlcv_map,
+    )
+
+
 def run_backtest_batch_export() -> None:
     cfg = env_config()
     rule = backtest_rule_config()
     raw_fields = list(feature_pool_config().get("raw_fields", []))
-    raw_frame = load_raw_data(cfg, raw_fields)
+    mt_cfg = dict(rule.get("MarketTiming", {}))
+    mt_enabled = bool(mt_cfg.get("enabled", False))
+    warmup = 0
+    if mt_enabled:
+        ema_p = int(str(mt_cfg.get("market_indicator", "EMA_60")).split("_")[-1])
+        rsi_p = int(mt_cfg.get("rsi_period", 14))
+        stock_ema_p = int(mt_cfg.get("stock_ema_period", 60))
+        warmup = max(ema_p, rsi_p + 1, stock_ema_p) + 10
+    raw_frame = load_raw_data(cfg, raw_fields, warmup_trading_days=warmup)
     ohlcv_map = _build_ohlcv_by_instrument(raw_frame)
     factor_values = _load_factor_values()
     factor_names = [str(item) for item in factor_values.index.get_level_values("factor_name").unique()]
@@ -276,6 +310,8 @@ def run_backtest_batch_export() -> None:
                 factor_scores=bundle.factor_scores,
             )
 
+            market_timing = _build_market_timing(rule, bundle.frames_by_instrument)
+
             engine = BacktestEngine(
                 market_data=market_data,
                 strategy=strategy,
@@ -285,6 +321,7 @@ def run_backtest_batch_export() -> None:
                 stamp_duty=stamp_duty,
                 slippage=slippage,
                 cash_buffer_ratio=cash_buffer_ratio,
+                market_timing=market_timing,
             )
 
             print(f"backtest run: factor={factor_name}, strategy={strategy.__class__.__name__}")

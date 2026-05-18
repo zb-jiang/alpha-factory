@@ -356,6 +356,8 @@ def _generate_strategy_code(
     buy_top_n = int(topk_cfg.get("buy_top_n", 20))
     sell_drop_to = int(topk_cfg.get("sell_drop_to", 40))
     holding_count = int(topk_cfg.get("holding_count", 20))
+    if strategy_type == "SoftTopK":
+        holding_count = int(soft_cfg.get("holding_count", 30))
     weight_mode = str(topk_cfg.get("weight_mode", "equal_weight"))
     max_drop_per_day = int(topk_cfg.get("max_drop_per_day", 5))
     min_score_coverage = float(topk_cfg.get("min_score_coverage", 0.90))
@@ -365,6 +367,7 @@ def _generate_strategy_code(
     initial_cash = float(execution_cfg.get("initial_cash", 1_000_000))
     buy_cost = float(execution_cfg.get("buy_cost", 0.0015))
     sell_cost = float(execution_cfg.get("sell_cost", 0.0025))
+    stamp_duty = float(execution_cfg.get("stamp_duty", 0.001))
     slippage_val = float(execution_cfg.get("slippage", 0.0005))
     cash_buffer_ratio = float(execution_cfg.get("cash_buffer_ratio", 0.02))
     trade_price = str(execution_cfg.get("trade_price", "next_open"))
@@ -423,24 +426,65 @@ def _generate_strategy_code(
     if direction == "lower_better":
         direction_flip = "            score = -score  # lower_better: flip direction\n"
 
+    timing_init_code = ""
     timing_code = ""
     if timing_enabled:
+        timing_init_code = ""
         timing_code = textwrap.dedent(f"""\
-    benchmark_hist = get_bars(g.benchmark_code, count={ema_period + 10}, unit='1d', fields=['date', 'close'], include_now=True, df=True)
-    benchmark_hist = benchmark_hist.set_index('date')
-    benchmark_ema = benchmark_hist['close'].ewm(span={ema_period}, adjust=False, min_periods={ema_period}).mean()
-    benchmark_close = benchmark_hist['close'].iloc[-1]
-    timing_active = benchmark_close < benchmark_ema.iloc[-1]
+    all_dates = get_trade_days(end_date=context.current_dt.date(), count={ema_period + 30})
+    pool_stocks_init = get_index_stocks(INDEX_CODE, date=context.current_dt.date())
+    price_panel = get_price(pool_stocks_init, start_date=all_dates[0], end_date=context.current_dt, frequency='daily', fields=['close'], fq='pre')
+    bench_series = pd.Series(dtype=float)
+    if price_panel is not None:
+        try:
+            if hasattr(price_panel, 'items') and hasattr(price_panel, 'minor_axis'):
+                if len(price_panel.items) == 1 and 'close' in price_panel.items:
+                    bench_series = price_panel['close'].mean(axis=1)
+                elif len(price_panel.minor_axis) == 1 and 'close' in price_panel.minor_axis:
+                    bench_series = price_panel.minor_xs('close').mean(axis=1)
+                else:
+                    bench_series = price_panel[:,:,'close'].mean(axis=1)
+            elif isinstance(price_panel, pd.DataFrame):
+                if isinstance(price_panel.columns, pd.MultiIndex):
+                    bench_series = price_panel.xs('close', axis=1, level=0).mean(axis=1)
+                elif 'close' in price_panel.columns:
+                    bench_series = price_panel['close']
+            elif isinstance(price_panel, dict):
+                all_closes = []
+                for _sec, _df in price_panel.items():
+                    if isinstance(_df, pd.DataFrame) and 'close' in _df.columns:
+                        all_closes.append(_df['close'])
+                    elif isinstance(_df, pd.Series):
+                        all_closes.append(_df)
+                if all_closes:
+                    bench_series = pd.concat(all_closes, axis=1).mean(axis=1)
+        except Exception as e:
+            log.info('benchmark computation failed: %s' % str(e))
+    if len(bench_series) > 0:
+        _bench_df = pd.DataFrame(bench_series, columns=['close'])
+        _bench_df.index = pd.to_datetime(_bench_df.index).normalize()
+        benchmark_close = float(_bench_df['close'].iloc[-1])
+        if len(_bench_df) >= {ema_period}:
+            benchmark_ema = _bench_df['close'].ewm(span={ema_period}, adjust=False).mean()
+            ema_val = float(benchmark_ema.iloc[-1])
+            timing_active = benchmark_close < ema_val
+        else:
+            ema_val = 0.0
+            timing_active = False
+    else:
+        benchmark_close = 0.0
+        ema_val = 0.0
+        timing_active = False
     exposure_scale = {timing_reduce_to} if timing_active else 1.0
-    log.info('timing_active=%s, benchmark_close=%.2f, ema=%.2f, scale=%.2f' %% (timing_active, benchmark_close, benchmark_ema.iloc[-1], exposure_scale))
+    log.info('timing_active=%s, benchmark_close=%.2f, ema=%.2f, scale=%.2f' % (timing_active, benchmark_close, ema_val, exposure_scale))
 """)
 
     timing_filter_code = ""
     if timing_enabled and stock_open_filter != "none":
         if stock_open_filter == "rsi":
             timing_filter_code = textwrap.indent(textwrap.dedent(f"""\
-        stock_hist_rsi = get_bars(code, count={rsi_period + 10}, unit='1d', fields=['date', 'close'], include_now=True, df=True)
-        stock_hist_rsi = stock_hist_rsi.set_index('date')
+        stock_hist_rsi = get_price(code, end_date=context.current_dt, frequency='daily', fields=['close'], count={rsi_period + 30}, fq='pre')
+        stock_hist_rsi = stock_hist_rsi.sort_index()
         delta = stock_hist_rsi['close'].diff()
         gain = delta.clip(lower=0)
         loss = (-delta).clip(lower=0)
@@ -449,15 +493,17 @@ def _generate_strategy_code(
         rs = avg_gain / avg_loss.replace(0, np.nan)
         rsi_val = 100 - (100 / (1 + rs))
         current_rsi = rsi_val.iloc[-1]
+        log.info('stock filter (rsi): %s RSI=%.1f' % (code, current_rsi))
         if not np.isnan(current_rsi) and current_rsi > {rsi_buy_max}:
             skip_new_open = True
 """), "            ")
         elif stock_open_filter == "ema":
             timing_filter_code = textwrap.indent(textwrap.dedent(f"""\
-        stock_hist_ema = get_bars(code, count={stock_ema_period + 10}, unit='1d', fields=['date', 'close'], include_now=True, df=True)
-        stock_hist_ema = stock_hist_ema.set_index('date')
+        stock_hist_ema = get_price(code, end_date=context.current_dt, frequency='daily', fields=['close'], count={stock_ema_period + 30}, fq='pre')
+        stock_hist_ema = stock_hist_ema.sort_index()
         stock_ema_val = stock_hist_ema['close'].ewm(span={stock_ema_period}, adjust=False, min_periods={stock_ema_period}).mean()
         stock_close_val = stock_hist_ema['close'].iloc[-1]
+        log.info('stock filter (ema): %s close=%.2f, EMA=%.2f' % (code, stock_close_val, stock_ema_val.iloc[-1]))
         if stock_close_val < stock_ema_val.iloc[-1]:
             skip_new_open = True
 """), "            ")
@@ -478,11 +524,11 @@ def _generate_strategy_code(
     if strategy_type == "TopKDropout":
         strategy_logic = _gen_topk_dropout_logic(
             buy_top_n, sell_drop_to, holding_count, weight_mode, max_drop_per_day,
-            timing_enabled, timing_filter_code, suspend_skip_code, limit_up_skip_code, limit_down_skip_code
+            timing_enabled, timing_code, timing_filter_code, suspend_skip_code, limit_up_skip_code, limit_down_skip_code
         )
     elif strategy_type == "SoftTopK":
         strategy_logic = _gen_soft_topk_logic(
-            soft_cfg, timing_enabled, timing_filter_code, suspend_skip_code, limit_up_skip_code, limit_down_skip_code
+            soft_cfg, timing_enabled, timing_code, timing_filter_code, suspend_skip_code, limit_up_skip_code, limit_down_skip_code
         )
     elif strategy_type == "EnhancedIndexing":
         strategy_logic = _gen_enhanced_indexing_logic(
@@ -561,6 +607,7 @@ RANK_POWER_ALPHA = {rank_power_alpha}
 # Execution cost
 BUY_COST = {buy_cost}
 SELL_COST = {sell_cost}
+STAMP_DUTY = {stamp_duty}
 SLIPPAGE = {slippage_val}
 CASH_BUFFER_RATIO = {cash_buffer_ratio}
 
@@ -604,15 +651,13 @@ def compute_factor_scores(context):
 {turnover_prefetch}
     for code in stocks:
         try:
-            hist = get_bars(code, count=HISTORY_WINDOW, unit='1d',
-                           fields=['date', 'open', 'high', 'low', 'close', 'volume', 'money'],
-                           include_now=True, df=True)
-            log.info('code=%s, hist_len=%d' % (code, len(hist)))
+            hist = get_price(code, end_date=context.current_dt, frequency='daily',
+                           fields=['open', 'high', 'low', 'close', 'volume', 'money'],
+                           count=HISTORY_WINDOW, fq='pre')
             if hist.empty or len(hist) < 5:
-                log.info('code=%s, hist too short, skip' % code)
                 continue
 
-            hist = hist.set_index('date')
+            hist = hist.sort_index()
             hist['amount'] = hist['money']
             hist['vwap'] = hist['money'] / hist['volume'].replace(0, np.nan)
 {turnover_assign}
@@ -633,16 +678,12 @@ def compute_factor_scores(context):
             env['np'] = np
             env['pd'] = pd
             score = eval(FACTOR_FORMULA, {{"__builtins__": {{}}}}, env)
-            log.info('code=%s, score_type=%s' % (code, type(score).__name__))
             if isinstance(score, pd.Series):
                 score = float(score.iloc[-1])
-            log.info('code=%s, score=%s' % (code, str(score)))
             if np.isnan(score) or np.isinf(score):
-                log.info('code=%s, score is nan/inf, skip' % code)
                 continue
 {direction_flip}
             scores[code] = score
-            log.info('code=%s, final score=%.4f' % (code, score))
         except Exception as e:
             log.info('code=%s, exception: %s' % (code, str(e)))
             continue
@@ -660,17 +701,18 @@ def initialize(context):
     set_option('use_real_price', True)
     set_order_cost(OrderCost(
         open_tax=0,
-        close_tax=0.001,
+        close_tax=STAMP_DUTY,
         open_commission=BUY_COST,
         close_commission=SELL_COST,
         close_today_commission=0,
         min_commission=5
     ), type='stock')
-    set_slippage(FixedSlippage(SLIPPAGE * 100))
+    set_slippage(PriceRelatedSlippage(SLIPPAGE))
 
     g.benchmark_code = '{index_code_jq}'
     g.current_holdings = []
     g.pending_limit_down_sells = []
+{timing_init_code}
 
 {rebalance_schedule}
 {retry_schedule}
@@ -689,11 +731,13 @@ def _gen_topk_dropout_logic(
     weight_mode: str,
     max_drop_per_day: int,
     timing_enabled: bool,
+    timing_code: str,
     timing_filter_code: str,
     suspend_skip_code: str,
     limit_up_skip_code: str,
     limit_down_skip_code: str,
 ) -> str:
+    timing_code_indented = textwrap.indent(timing_code, "    ") if timing_code else ""
     return (
         textwrap.dedent(f"""\
 def compute_and_store_scores(context):
@@ -715,6 +759,10 @@ def compute_and_store_scores(context):
         g.stored_to_sell = []
         g.stored_new_buys = []
         return
+
+    # market timing: compute exposure_scale
+    exposure_scale = 1.0
+{timing_code_indented}
 
     ranked = sorted(scores.items(), key=lambda x: (-x[1], x[0].split('.')[0]))
     log.info('top 5 scores: %s' % str(ranked[:5]))
@@ -745,12 +793,22 @@ def compute_and_store_scores(context):
             break
         if len(new_buys) >= max_new_buys:
             break
-        if TIMING_ENABLED:
+        new_buys.append(code)
+
+    # stock-level timing filter: remove blocked new buys (no replacement)
+    if TIMING_ENABLED:
+        blocked_buys = []
+        filtered_buys = []
+        for code in new_buys:
             skip_new_open = False
 {timing_filter_code}
             if skip_new_open:
-                continue
-        new_buys.append(code)
+                blocked_buys.append(code)
+            else:
+                filtered_buys.append(code)
+        if blocked_buys:
+            log.info('blocked new buys: %s, allowed: %s' % (str(sorted(blocked_buys)), str(sorted(filtered_buys))))
+        new_buys = filtered_buys
 
     log.info('to_sell: %s' % str(list(to_sell_set)))
     log.info('new_buys: %s' % str(new_buys))
@@ -760,7 +818,21 @@ def compute_and_store_scores(context):
     g.stored_to_sell = list(to_sell_set)
     g.stored_new_buys = new_buys
     g.stored_target_count = len(kept) + len(new_buys)
+    g.stored_exposure_scale = exposure_scale
     log.info('scores and trade plan stored')
+
+
+def _min_lot(code):
+    pure = code[:6]
+    if pure.startswith('688'):
+        return 200
+    return 100
+
+def _round_to_lot(code, shares):
+    lot = _min_lot(code)
+    if shares <= 0:
+        return 0
+    return (shares // lot) * lot
 
 
 def execute_trades(context):
@@ -772,16 +844,18 @@ def execute_trades(context):
     to_sell = g.stored_to_sell
     new_buys = g.stored_new_buys
     target_count = max(getattr(g, 'stored_target_count', HOLDING_COUNT), 1)
+    exposure_scale = getattr(g, 'stored_exposure_scale', 1.0)
     current_data = get_current_data()
     total_value = context.portfolio.total_value
-    log.info('total_value: %.2f' % total_value)
+    log.info('total_value: %.2f, exposure_scale: %.2f' % (total_value, exposure_scale))
 
     current_holdings = list(context.portfolio.positions.keys())
     sell_count = 0
     buy_count = 0
     sold_codes = []
+    pending_sell_value = 0.0
 
-    # sell: only sell stocks in to_sell list (做法B: 不调整继续持有股票的权重)
+    # sell: stocks in to_sell list (full sell)
     for code in to_sell:
         if code not in current_holdings:
             continue
@@ -794,35 +868,56 @@ def execute_trades(context):
                 g.pending_limit_down_sells = []
             g.pending_limit_down_sells.append(code)
             continue
-        # 科创板(688开头)需使用限价单
-        if code.startswith('688'):
-            limit_price = current_data[code].last_price * 0.98
-            order_target_value(code, 0, style=LimitOrderStyle(limit_price))
-        else:
-            order_target_value(code, 0)
-        sell_count += 1
-        sold_codes.append(code)
-        log.info('sell order: %s' % code)
+        pos = context.portfolio.positions[code]
+        shares_to_sell = pos.total_amount
+        if shares_to_sell > 0:
+            if code.startswith('688'):
+                limit_price = current_data[code].last_price * 0.98
+                order(code, -shares_to_sell, style=LimitOrderStyle(limit_price))
+            else:
+                order(code, -shares_to_sell)
+            pending_sell_value += shares_to_sell * current_data[code].last_price
+            sell_count += 1
+            sold_codes.append(code)
+            log.info('sell order: %s, shares=%d' % (code, shares_to_sell))
 
-    # buy: only buy stocks in new_buys list (做法B: 继续持有的股票不做任何操作)
-    weight_per_stock = 1.0 / target_count
+    # timing: partial sell for kept stocks when exposure_scale < 1.0
+    if TIMING_ENABLED and exposure_scale < 1.0 - 1e-6:
+        kept_codes = [c for c in current_holdings if c not in set(to_sell)]
+        for code in kept_codes:
+            if code not in context.portfolio.positions:
+                continue
+            pos = context.portfolio.positions[code]
+            if pos.total_amount <= 0:
+                continue
+            current_weight = pos.value / total_value if total_value > 0 else 0.0
+            target_weight = current_weight * exposure_scale
+            if current_weight > target_weight + 0.005:
+                if current_data[code].paused:
+                    continue
+                if current_data[code].last_price <= current_data[code].low_limit:
+                    continue
+                target_shares = _round_to_lot(code, int(target_weight * total_value / current_data[code].last_price))
+                shares_to_sell = pos.total_amount - target_shares
+                shares_to_sell = _round_to_lot(code, shares_to_sell)
+                if shares_to_sell > 0:
+                    if code.startswith('688'):
+                        limit_price = current_data[code].last_price * 0.98
+                        order(code, -shares_to_sell, style=LimitOrderStyle(limit_price))
+                    else:
+                        order(code, -shares_to_sell)
+                    pending_sell_value += shares_to_sell * current_data[code].last_price
+                    sell_count += 1
+                    log.info('timing partial sell: %s, current_weight=%.4f, target_weight=%.4f, shares=%d' % (code, current_weight, target_weight, shares_to_sell))
+
+    # buy: stocks in new_buys list
+    weight_per_stock = exposure_scale / target_count
     available_cash = context.portfolio.available_cash
     reserved_cash = total_value * CASH_BUFFER_RATIO
-    usable_cash = max(0, available_cash - reserved_cash)
+    usable_cash = max(0, available_cash + pending_sell_value - reserved_cash)
 
+    buy_plan = []
     total_buy_value = 0.0
-    for code in new_buys:
-        current_pos_value = 0.0
-        if code in context.portfolio.positions:
-            current_pos_value = context.portfolio.positions[code].value
-        delta = weight_per_stock * total_value - current_pos_value
-        if delta > 0:
-            total_buy_value += delta
-
-    scale = 1.0
-    if total_buy_value > usable_cash and total_buy_value > 0:
-        scale = usable_cash / total_buy_value
-
     for code in new_buys:
         target_value = weight_per_stock * total_value
         current_pos_value = 0.0
@@ -830,22 +925,34 @@ def execute_trades(context):
             current_pos_value = context.portfolio.positions[code].value
         delta = target_value - current_pos_value
         if delta > 0:
-            target_value = current_pos_value + delta * scale
+            buy_plan.append((code, delta))
+            total_buy_value += delta
 
+    scale = 1.0
+    if total_buy_value > usable_cash and total_buy_value > 0:
+        scale = usable_cash / total_buy_value
+        log.info('cash scale: %.4f (buy_value=%.2f, available=%.2f)' % (scale, total_buy_value, usable_cash))
+
+    for code, delta in buy_plan:
         if current_data[code].paused:
             log.info('buy skip (paused): %s' % code)
             continue
         if current_data[code].last_price >= current_data[code].high_limit:
             log.info('buy skip (limit_up): %s' % code)
             continue
-        # 科创板(688开头)需使用限价单
+        adjusted_value = delta * scale
+        price_for_calc = current_data[code].last_price * 1.02 if code[:6].startswith('688') else current_data[code].last_price
+        actual_shares = _round_to_lot(code, int(adjusted_value / price_for_calc))
+        if actual_shares <= 0:
+            log.info('buy skip (shares < min_lot): %s, target_value=%.2f, price=%.4f' % (code, adjusted_value, current_data[code].last_price))
+            continue
         if code.startswith('688'):
             limit_price = current_data[code].last_price * 1.02
-            order_target_value(code, target_value, style=LimitOrderStyle(limit_price))
+            order(code, actual_shares, style=LimitOrderStyle(limit_price))
         else:
-            order_target_value(code, target_value)
+            order(code, actual_shares)
         buy_count += 1
-        log.info('buy order: %s, value=%.2f' % (code, target_value))
+        log.info('buy order: %s, shares=%d, value=%.2f' % (code, actual_shares, actual_shares * current_data[code].last_price))
 
     g.current_holdings = [c for c in current_holdings if c not in set(sold_codes)] + new_buys[:buy_count]
     g.stored_scores = {{}}
@@ -869,12 +976,11 @@ def retry_limit_down_sells(context):
             remaining.append(code)
             log.info('retry sell skip (still limit_down): %s' % code)
             continue
-        # 科创板(688开头)需使用限价单
         if code.startswith('688'):
             limit_price = current_data[code].last_price * 0.98
-            order_target_value(code, 0, style=LimitOrderStyle(limit_price))
+            order(code, -context.portfolio.positions[code].total_amount, style=LimitOrderStyle(limit_price))
         else:
-            order_target_value(code, 0)
+            order(code, -context.portfolio.positions[code].total_amount)
         log.info('retry sell success: %s' % code)
     g.pending_limit_down_sells = remaining
 """)
@@ -884,6 +990,7 @@ def retry_limit_down_sells(context):
 def _gen_soft_topk_logic(
     soft_cfg: dict,
     timing_enabled: bool,
+    timing_code: str,
     timing_filter_code: str,
     suspend_skip_code: str,
     limit_up_skip_code: str,
@@ -893,6 +1000,8 @@ def _gen_soft_topk_logic(
     weight_func = str(soft_cfg.get("weight_func", "softmax"))
     softmax_temperature = float(soft_cfg.get("softmax_temperature", 1.0))
     rank_power_alpha = float(soft_cfg.get("rank_power_alpha", 1.0))
+
+    timing_code_indented = textwrap.indent(timing_code, "    ") if timing_code else ""
 
     return (
         textwrap.dedent(f"""\
@@ -910,6 +1019,10 @@ def compute_and_store_scores(context):
         log.info('score coverage %.2f < %.2f, skip rebalance' % (len(scores) / pool_size, MIN_SCORE_COVERAGE))
         g.stored_target_weights = {{}}
         return
+
+    # market timing: compute exposure_scale
+    exposure_scale = 1.0
+{timing_code_indented}
 
     ranked = sorted(scores.items(), key=lambda x: (-x[1], x[0].split('.')[0]))
     log.info('top 5 scores: %s' % str(ranked[:5]))
@@ -939,6 +1052,41 @@ def compute_and_store_scores(context):
         normalized = raw / denom
         target_weights = {{c: float(w) for c, w in zip(codes, normalized)}}
 
+    # apply market timing: scale all weights by exposure_scale
+    if TIMING_ENABLED and exposure_scale < 1.0 - 1e-6:
+        for code in list(target_weights.keys()):
+            target_weights[code] *= exposure_scale
+        log.info('timing scale applied: exposure_scale=%.2f' % exposure_scale)
+
+    # apply stock-level timing filter: block new opens
+    if TIMING_ENABLED:
+        current_holdings_list = list(context.portfolio.positions.keys())
+        blocked = []
+        for code in list(target_weights.keys()):
+            if code in current_holdings_list:
+                continue
+            if target_weights[code] <= 0:
+                continue
+            skip_new_open = False
+{timing_filter_code}
+            if skip_new_open:
+                blocked.append(code)
+        if blocked:
+            log.info('timing stock filter blocked: %s' % str(blocked))
+            for code in blocked:
+                target_weights[code] = 0.0
+            if exposure_scale < 1.0 - 1e-6:
+                log.info('RISK STATE: skip renormalize, kept stocks keep reduced weights')
+            else:
+                remaining_sum = sum(w for w in target_weights.values() if w > 0)
+                original_sum = exposure_scale
+                if remaining_sum > 0 and original_sum > 0 and abs(remaining_sum - original_sum) > 0.001:
+                    factor = original_sum / remaining_sum
+                    log.info('timing renormalize factor: %.3f' % factor)
+                    for code in target_weights:
+                        if target_weights[code] > 0:
+                            target_weights[code] *= factor
+
     current_holdings = list(context.portfolio.positions.keys())
     for code in current_holdings:
         if code not in target_weights:
@@ -946,6 +1094,19 @@ def compute_and_store_scores(context):
 
     log.info('target_weights: %d stocks' % len(target_weights))
     g.stored_target_weights = target_weights
+
+
+def _min_lot(code):
+    pure = code[:6]
+    if pure.startswith('688'):
+        return 200
+    return 100
+
+def _round_to_lot(code, shares):
+    lot = _min_lot(code)
+    if shares <= 0:
+        return 0
+    return (shares // lot) * lot
 
 
 def execute_trades(context):
@@ -982,10 +1143,11 @@ def execute_trades(context):
 
             target_value = target_weight * total_value
             if target_weight > 1e-6:
-                target_shares = int(target_value / current_data[code].last_price / 100) * 100
+                target_shares = _round_to_lot(code, int(target_value / current_data[code].last_price))
             else:
                 target_shares = 0
             shares_to_sell = pos.total_amount - target_shares
+            shares_to_sell = _round_to_lot(code, shares_to_sell)
             if shares_to_sell > 0:
                 sell_orders.append((code, shares_to_sell))
 
@@ -1017,25 +1179,35 @@ def execute_trades(context):
     scale = 1.0
     if total_buy_value > usable_cash and total_buy_value > 0:
         scale = usable_cash / total_buy_value
+        log.info('cash scale: %.4f (buy_value=%.2f, available=%.2f)' % (scale, total_buy_value, usable_cash))
 
     for code, shares_to_sell in sell_orders:
         if code.startswith('688'):
             limit_price = current_data[code].last_price * 0.98
-            order_target(code, int(context.portfolio.positions[code].total_amount - shares_to_sell), style=LimitOrderStyle(limit_price))
+            order(code, -shares_to_sell, style=LimitOrderStyle(limit_price))
         else:
-            order_target(code, int(context.portfolio.positions[code].total_amount - shares_to_sell))
+            order(code, -shares_to_sell)
         log.info('sell order: %s, shares=%d' % (code, shares_to_sell))
 
     for code, delta in buy_orders:
-        target_value = delta * scale
-        if code in context.portfolio.positions:
-            target_value += context.portfolio.positions[code].value
+        if current_data[code].paused:
+            log.info('buy skip (paused): %s' % code)
+            continue
+        if current_data[code].last_price >= current_data[code].high_limit:
+            log.info('buy skip (limit_up): %s' % code)
+            continue
+        adjusted_value = delta * scale
+        price_for_calc = current_data[code].last_price * 1.02 if code[:6].startswith('688') else current_data[code].last_price
+        actual_shares = _round_to_lot(code, int(adjusted_value / price_for_calc))
+        if actual_shares <= 0:
+            log.info('buy skip (shares < min_lot): %s, target_value=%.2f, price=%.4f' % (code, adjusted_value, current_data[code].last_price))
+            continue
         if code.startswith('688'):
             limit_price = current_data[code].last_price * 1.02
-            order_target_value(code, target_value, style=LimitOrderStyle(limit_price))
+            order(code, actual_shares, style=LimitOrderStyle(limit_price))
         else:
-            order_target_value(code, target_value)
-        log.info('buy order: %s, value=%.2f' % (code, target_value))
+            order(code, actual_shares)
+        log.info('buy order: %s, shares=%d, value=%.2f' % (code, actual_shares, actual_shares * current_data[code].last_price))
 
     for code in limit_down_full_sells:
         if not hasattr(g, 'pending_limit_down_sells'):
@@ -1045,6 +1217,30 @@ def execute_trades(context):
 
     g.stored_target_weights = {{}}
     retry_limit_down_sells(context)
+
+
+def retry_limit_down_sells(context):
+    '''跌停重试：每日开盘时重试之前因跌停未能卖出的股票'''
+    if not hasattr(g, 'pending_limit_down_sells') or not g.pending_limit_down_sells:
+        return
+    current_data = get_current_data()
+    remaining = []
+    for code in g.pending_limit_down_sells:
+        if code not in context.portfolio.positions:
+            continue
+        if current_data[code].paused:
+            continue
+        if current_data[code].last_price <= current_data[code].low_limit:
+            remaining.append(code)
+            log.info('retry sell skip (still limit_down): %s' % code)
+            continue
+        if code.startswith('688'):
+            limit_price = current_data[code].last_price * 0.98
+            order(code, -context.portfolio.positions[code].total_amount, style=LimitOrderStyle(limit_price))
+        else:
+            order(code, -context.portfolio.positions[code].total_amount)
+        log.info('retry sell success: %s' % code)
+    g.pending_limit_down_sells = remaining
 """)
     )
 

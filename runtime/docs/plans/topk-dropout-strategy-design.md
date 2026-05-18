@@ -88,3 +88,5 @@ Execution:
 ```
 8. **调仓日独立性**：每个调仓日独立计算信号，不考虑前序调仓日的遗留交易（停牌、涨停、跌停而导致的交易失败）
 9. 现金缓冲 ：保留cash_buffer_ratio的现金缓冲，防止因滑点导致资金不足，导致交易失败
+10. **择时覆盖层与方式B的关系**：方式B（继续持有的股票保持当前权重不变）是**正常情况**下的规则。当开启择时功能后，择时作为独立的风控覆盖层，会对所有 target_weights 进行缩放（如 RISK STATE 下乘以 reduce_to=0.6），此时 kept 股票的 target_weight 变为 `reduce_to × 市值权重`，而实际持仓的 current_weight 仍为 `1.0 × 市值权重`，会触发 partial sell 将仓位降到目标水平。这是择时驱动的风控减仓，与方式B的"不调整"不矛盾——方式B说的是正常情况下不调整，择时是额外的风控层。
+11. **RISK STATE下不renormalize**：当RISK STATE下股票级过滤（RSI）阻止了部分新买入股票时，被阻止股票的权重直接设为0，**不进行权重重新归一化（renormalize）**。原因是：RISK STATE的目的是降低总仓位到reduce_to水平，将被阻止股票的权重重新分配给其他股票会违背减仓意图。因此kept股票的target_weight保持为`原始权重 × reduce_to`，确保partial sell正确触发。

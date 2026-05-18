@@ -53,6 +53,8 @@ class TradePlan:
     to_sell: dict[str, float] = field(default_factory=dict)
     to_buy: dict[str, float] = field(default_factory=dict)
     target_weights: dict[str, float] = field(default_factory=dict)
+    timing_risk_state: bool = False
+    timing_reduce_to: float = 1.0
 
 
 class Portfolio:
@@ -221,11 +223,11 @@ class MarketData:
         prev_close = self.get_prev_close(code, date)
         if any(np.isnan(v) for v in [open_price, prev_close]) or prev_close <= 0:
             return False
-        threshold = 0.098
+        limit_rate = 0.10
         pure_code = code[2:] if len(code) > 2 and code[:2] in ("SH", "SZ") else code
         if pure_code.startswith("688") or pure_code.startswith("300"):
-            threshold = 0.198
-        high_limit = prev_close * (1 + threshold)
+            limit_rate = 0.20
+        high_limit = round(prev_close * (1 + limit_rate), 2)
         return open_price >= high_limit
 
     def is_limit_down(self, code: str, date: pd.Timestamp) -> bool:
@@ -233,11 +235,11 @@ class MarketData:
         prev_close = self.get_prev_close(code, date)
         if any(np.isnan(v) for v in [open_price, prev_close]) or prev_close <= 0:
             return False
-        threshold = -0.098
+        limit_rate = 0.10
         pure_code = code[2:] if len(code) > 2 and code[:2] in ("SH", "SZ") else code
         if pure_code.startswith("688") or pure_code.startswith("300"):
-            threshold = -0.198
-        low_limit = prev_close * (1 + threshold)
+            limit_rate = 0.20
+        low_limit = round(prev_close * (1 - limit_rate), 2)
         return open_price <= low_limit
 
     def cross_section_scores(self, date: pd.Timestamp) -> dict[str, float]:
@@ -279,9 +281,11 @@ class BacktestEngine:
         stamp_duty: float = 0.001,
         slippage: float = 0.0005,
         cash_buffer_ratio: float = 0.02,
+        market_timing: Any | None = None,
     ) -> None:
         self._market = market_data
         self._strategy = strategy
+        self._market_timing = market_timing
         self._portfolio = Portfolio(
             initial_cash=initial_cash,
             buy_cost=buy_cost,
@@ -327,6 +331,7 @@ class BacktestEngine:
         return self._build_results()
 
     def _on_signal_day(self, date: pd.Timestamp) -> None:
+        self._pending_limit_down_sells = []
         _backtest_logger.info("=== compute_and_store_scores called at %s ===", date)
         scores = self._market.cross_section_scores(date)
         if not scores:
@@ -356,6 +361,9 @@ class BacktestEngine:
             signal_date=date,
         )
 
+        if self._market_timing is not None:
+            plan = self._market_timing.apply(plan, self._market, self._portfolio.positions, date)
+
         to_sell_codes = sorted(plan.to_sell.keys())
         to_buy_codes = sorted(plan.to_buy.keys())
         kept = [c for c in current_holdings if c not in plan.to_sell]
@@ -382,33 +390,67 @@ class BacktestEngine:
             return
 
         total_value = self._current_total_value(date)
-        prices = self._get_all_prices(date)
-        _backtest_logger.info("total_value: %.2f", total_value)
+        open_prices = self._get_all_open_prices(date)
+        total_value_open = self._portfolio.total_value(open_prices)
+        _backtest_logger.info("total_value: %.2f (close=%.2f)", total_value_open, total_value)
 
         sell_orders: list[tuple[str, int]] = []
         buy_orders: list[tuple[str, float, float]] = []
         limit_down_full_sells: list[str] = []
 
-        to_sell_codes = set(plan.to_sell.keys())
-        to_buy_codes = set(plan.to_buy.keys())
+        all_codes_in_plan = set(target_weights.keys()) | set(self._portfolio.positions.keys())
 
-        for code in to_sell_codes:
+        for code in all_codes_in_plan:
+            tw = target_weights.get(code, 0.0)
             pos = self._portfolio.get_position(code)
             current_shares = pos.shares if not pos.is_empty else 0
-            if current_shares <= 0:
-                continue
-            open_price = self._market.get_open(code, date)
-            if np.isnan(open_price):
-                _backtest_logger.info("sell skip (no open price): %s", code)
-                continue
-            if self._market.is_suspended(code, date):
-                _backtest_logger.info("sell skip (paused): %s", code)
-                continue
-            if self._market.is_limit_down(code, date):
-                _backtest_logger.info("sell skip (limit_down): %s, will retry", code)
-                limit_down_full_sells.append(code)
-                continue
-            sell_orders.append((code, current_shares))
+            current_value = 0.0
+            current_weight = 0.0
+            if current_shares > 0:
+                open_price = self._market.get_open(code, date)
+                if not np.isnan(open_price):
+                    current_value = current_shares * open_price
+                    current_weight = current_value / total_value_open if total_value_open > 0 else 0.0
+
+            if tw < current_weight - 0.005:
+                if current_shares <= 0:
+                    continue
+                open_price = self._market.get_open(code, date)
+                if np.isnan(open_price):
+                    _backtest_logger.info("sell skip (no open price): %s", code)
+                    continue
+                if self._market.is_suspended(code, date):
+                    _backtest_logger.info("sell skip (paused): %s", code)
+                    continue
+                if self._market.is_limit_down(code, date):
+                    if tw <= 1e-6:
+                        limit_down_full_sells.append(code)
+                    _backtest_logger.info("sell skip (limit_down): %s, will retry", code)
+                    continue
+                if tw <= 1e-6:
+                    sell_orders.append((code, current_shares))
+                else:
+                    target_shares = _round_to_lot(code, int(tw * total_value_open / open_price))
+                    shares_to_sell = max(0, current_shares - target_shares)
+                    shares_to_sell = _round_to_lot(code, shares_to_sell)
+                    if shares_to_sell > 0:
+                        sell_orders.append((code, shares_to_sell))
+                        _backtest_logger.info("partial sell: %s, current=%d, target=%d, sell=%d", code, current_shares, target_shares, shares_to_sell)
+
+            elif tw > current_weight + 0.005:
+                open_price = self._market.get_open(code, date)
+                if np.isnan(open_price):
+                    continue
+                if self._market.is_suspended(code, date):
+                    _backtest_logger.info("buy skip (paused): %s", code)
+                    continue
+                if self._market.is_limit_up(code, date):
+                    _backtest_logger.info("buy skip (limit_up): %s", code)
+                    continue
+                target_value = tw * total_value_open
+                delta = target_value - current_value
+                if delta > 0:
+                    buy_orders.append((code, delta, open_price))
 
         pending_sell_value = 0.0
         for code, shares in sell_orders:
@@ -416,27 +458,7 @@ class BacktestEngine:
             if not np.isnan(open_price):
                 pending_sell_value += shares * open_price
 
-        available_cash = self._portfolio.available_cash_after_buffer(total_value, pending_sell_value)
-
-        for code in to_buy_codes:
-            target_weight = plan.to_buy.get(code, 0.0)
-            if target_weight <= 0:
-                continue
-            open_price = self._market.get_open(code, date)
-            if np.isnan(open_price):
-                continue
-            if self._market.is_suspended(code, date):
-                _backtest_logger.info("buy skip (paused): %s", code)
-                continue
-            if self._market.is_limit_up(code, date):
-                _backtest_logger.info("buy skip (limit_up): %s", code)
-                continue
-            pos = self._portfolio.get_position(code)
-            current_value = pos.value if not pos.is_empty else 0.0
-            target_value = target_weight * total_value
-            delta = target_value - current_value
-            if delta > 0:
-                buy_orders.append((code, delta, open_price))
+        available_cash = self._portfolio.available_cash_after_buffer(total_value_open, pending_sell_value)
 
         total_buy_value = sum(delta for _, delta, _ in buy_orders)
         scale = 1.0
@@ -545,6 +567,14 @@ class BacktestEngine:
             close = self._market.get_close(code, date)
             if not np.isnan(close):
                 prices[code] = close
+        return prices
+
+    def _get_all_open_prices(self, date: pd.Timestamp) -> dict[str, float]:
+        prices: dict[str, float] = {}
+        for code in self._market.instruments:
+            open_p = self._market.get_open(code, date)
+            if not np.isnan(open_p):
+                prices[code] = open_p
         return prices
 
     def _record_nav(self, date: pd.Timestamp) -> None:

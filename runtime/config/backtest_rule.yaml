@@ -55,7 +55,7 @@ SoftTopK:
   holding_count: 30
   # softmax 温度参数（仅 weight_func=softmax 时生效）
   # T 越小集中度越高，T 越大越接近等权
-  softmax_temperature: 1.0
+  softmax_temperature: 0.7
   # rank_power 衰减参数（仅 weight_func=rank_power 时生效）
   # α 越大头部越集中，α 越小越接近等权
   rank_power_alpha: 1.0
@@ -71,14 +71,14 @@ MarketTiming:
   # 是否启用择时过滤：
   # - false：不做择时，按主策略满仓执行
   # - true：按 market_indicator 判定风险状态并进行仓位缩放
-  enabled: false
+  enabled: true
   # 市场级择时指标类型（当前实现：EMA_60）
   # EMA_60 语义：当基准收盘价(股票池里各股票的 OHLCV 做平均生成的“合成基准”) < 60日EMA 时，视为风险抬升阶段
   market_indicator: EMA_60
   # 择时触发后的目标暴露比例（0~1）
   # 例如 0.5 表示风险状态下组合总体仓位压到约50%
   # 建议：先用 0.5 做基线，再按回撤容忍度调到 0.3~0.8
-  reduce_to: 0.5
+  reduce_to: 0.6
   # 个股开仓过滤器（仅对“新开仓”生效，老持仓不受该过滤影响）：
   # - none：不开启个股过滤
   # - ema：仅当个股 close >= 个股EMA(stock_ema_period) 才允许新开仓
