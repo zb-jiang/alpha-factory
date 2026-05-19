@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from common import OUTPUT_DIR, write_json, write_table
+from common import OUTPUT_DIR, log_step_end, log_step_start, write_json, write_table
 
 
 def normalize(series: pd.Series) -> pd.Series:
@@ -14,17 +14,15 @@ def normalize(series: pd.Series) -> pd.Series:
 
 
 def run() -> None:
+    log_step_start("09", "因子评分排序")
     factor_metrics = pd.read_csv(OUTPUT_DIR / "backtest" / "factor_metrics.csv", index_col=0)
     strategy_metrics = pd.read_csv(OUTPUT_DIR / "backtest" / "strategy_metrics.csv", index_col=0)
     
-    # 检查是否有因子进入回测
     if strategy_metrics.empty:
-        print("警告: 没有因子进入回测，无法进行评分")
-        print("请检查因子在样本外的表现是否满足筛选条件")
-        # 写入空结果
+        print("  警告: 没有因子进入回测，无法进行评分")
         write_table(OUTPUT_DIR / "backtest" / "final_score.csv", pd.DataFrame())
         write_json(OUTPUT_DIR / "backtest" / "top3_factors.json", {"top3": []})
-        print("score ok (no factors)")
+        log_step_end("09", "评分完成 (无因子)")
         return
     
     merged = factor_metrics.join(strategy_metrics, how="inner")
@@ -67,10 +65,11 @@ def run() -> None:
                 item["reason"] = detail.get("reason", "")
                 item["risk"] = detail.get("risk", "")
     except Exception as e:
-        print(f"Warning: Failed to enrich top3 factors with formula details: {e}")
+        print(f"  Warning: Failed to enrich top3 factors with formula details: {e}")
 
     write_json(OUTPUT_DIR / "backtest" / "top3_factors.json", {"top3": top3})
-    print("score ok")
+    top3_names = [item.get("factor_name", "?") for item in top3]
+    log_step_end("09", "评分完成", details=[f"Top3: {', '.join(top3_names)}" if top3_names else "无因子通过评分"])
 
 
 if __name__ == "__main__":

@@ -12,6 +12,9 @@ from common import (
     clear_runtime_context,
     ensure_runtime_dirs,
     env_config,
+    log_phase,
+    log_step_end,
+    log_step_start,
     read_json,
     set_runtime_context,
     write_json,
@@ -63,13 +66,13 @@ def _metric_value(row: dict, *keys: str) -> float:
 
 
 def _prepare_discovery_window(window: dict[str, str]) -> None:
-    # Step02/03 仅依赖窗口数据与配置，在同一窗口内可复用。
     set_runtime_context(_stage_context(window, "discovery", 1))
     run_step02()
     run_step03()
 
 
-def _run_discovery_iteration(iteration: int, window: dict[str, str], scope: str) -> None:
+def _run_discovery_iteration(iteration: int, total_iterations: int, window: dict[str, str], scope: str) -> None:
+    log_phase(f"{window['window_id']} | discovery | 迭代 {iteration}/{total_iterations}")
     set_runtime_context(_stage_context(window, "discovery", iteration))
     run_step04()
     run_step05()
@@ -122,13 +125,12 @@ def _collect_discovery_passed_factors(scope: str) -> list[dict]:
         reverse=True,
     )
     if not candidates:
-        print(f"================================================================")
-        print(f"警告: discovery 阶段没有任何通过回测筛选的候选因子，跳过该窗口的 validation")
-        print(f"================================================================")
+        print(f"  警告: discovery 阶段没有任何通过回测筛选的候选因子，跳过该窗口的 validation")
     return candidates
 
 
 def _run_validation(window: dict[str, str], candidates: list[dict]) -> list[dict]:
+    log_phase(f"{window['window_id']} | validation")
     set_runtime_context(_stage_context(window, "validation"))
     write_json(
         OUTPUT_DIR / "llm" / "factors_validated.json",
@@ -255,23 +257,31 @@ def run() -> None:
         print("请先将 analysis_rule.yaml 中的 run_mode 修改为 'train'，然后再运行此脚本。")
         print("================================================================")
         return
+
+    log_step_start("10", "因子挖掘迭代流程 (train 模式)")
+
     run_step00()
     run_step01()
     windows = build_training_windows(config)
     iterations = int(config.get("iteration_count", 3))
     write_json(OUTPUT_DIR / "backtest" / "training_windows.json", {"windows": windows})
+    print(f"  训练窗口: {len(windows)} 个, 每窗口迭代: {iterations} 次")
+
     validation_rows: list[dict] = []
     try:
         for window in windows:
+            log_phase(
+                f"窗口 {window['window_id']} | "
+                f"{window['discovery_start_date']} ~ {window['discovery_end_date']}"
+            )
             clean_outputs(dry_run=False)
             discovery_scope = f"train_windows/{window['window_id']}/discovery"
             _prepare_discovery_window(window)
             for iteration in range(1, iterations + 1):
-                _run_discovery_iteration(iteration, window, discovery_scope)
-                print(f"{window['window_id']} discovery iteration {iteration} ok")
+                _run_discovery_iteration(iteration, iterations, window, discovery_scope)
             candidates = _collect_discovery_passed_factors(discovery_scope)
             if not candidates:
-                print(f"{window['window_id']} 跳过 validation（无候选因子）")
+                print(f"  {window['window_id']} 跳过 validation（无候选因子）")
                 write_json(
                     OUTPUT_DIR / "train_windows" / window["window_id"] / "window_summary.json",
                     {
@@ -293,18 +303,21 @@ def run() -> None:
                 },
             )
             print(
-                f"{window['window_id']} validation ok, "
+                f"  {window['window_id']} validation ok, "
                 f"candidates={len(candidates)}, passed={len(validation_result)}"
             )
     finally:
         clear_runtime_context()
     _write_cross_window_outputs(validation_rows, windows)
     aggregated = _aggregate_cross_window_results(validation_rows, len(windows))
-    print(
-        "train workflow ok, "
-        f"windows={len(windows)}, "
-        f"validated_factors={len(validation_rows)}, "
-        f"aggregated={len(aggregated)}"
+    log_step_end(
+        "10",
+        "因子挖掘迭代完成",
+        details=[
+            f"训练窗口: {len(windows)} 个",
+            f"通过验证因子: {len(validation_rows)} 个",
+            f"聚合因子: {len(aggregated)} 个",
+        ],
     )
 
 if __name__ == "__main__":

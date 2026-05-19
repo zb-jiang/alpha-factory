@@ -5,6 +5,7 @@ import pandas as pd
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 from .tushare_provider import TushareProvider
+from common import log_progress_bar
 
 class TushareSQLiteProvider(TushareProvider):
     """
@@ -379,7 +380,6 @@ class TushareSQLiteProvider(TushareProvider):
             
         total = len(missing_tasks)
         print(f"  [SQLite] 从 Tushare 获取缺失的 {api_name} 数据, 涉及 {total} 只股票...")
-        
         fetched_count = 0
         for i, (ts_code, (req_start, req_end)) in enumerate(missing_tasks.items(), 1):
             df = self._call_pro_api(api_name, ts_code=ts_code, start_date=req_start, end_date=req_end)
@@ -467,8 +467,7 @@ class TushareSQLiteProvider(TushareProvider):
             conn.commit()
             
             fetched_count += 1
-            if i % 50 == 0 or i == total:
-                print(f"  [SQLite] {api_name} 拉取进度: {i}/{total}")
+            log_progress_bar(f"[SQLite] {api_name}", i, total, done=(i == total))
 
     def _load_from_ts_parquet(self, api_name: str, ts_code: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
         """

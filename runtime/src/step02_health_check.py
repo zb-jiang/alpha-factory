@@ -10,12 +10,15 @@ from common import (
     feature_pool_config,
     label_name,
     load_raw_data,
+    log_step_end,
+    log_step_start,
     write_json,
     write_table,
 )
 
 
 def run() -> None:
+    log_step_start("02", "特征健康检查")
     config = env_config()
     feature_cfg = feature_pool_config()
     raw_frame = load_raw_data(config, list(feature_cfg.get("raw_fields", [])))
@@ -27,7 +30,14 @@ def run() -> None:
     write_table(OUTPUT_DIR / "health" / "feature_stats.csv", stats)
     write_table(OUTPUT_DIR / "health" / "feature_corr.csv", corr)
     write_json(OUTPUT_DIR / "health" / "health_summary.json", summary)
-    print(f"health check ok, rows={len(feature_frame)}, features={len(stats)}")
+    log_step_end(
+        "02",
+        "健康检查完成",
+        details=[
+            f"数据行数: {len(feature_frame):,} (股票×交易日)",
+            f"特征数: {len(stats)} (含基础特征+衍生特征)",
+        ],
+    )
 
 
 if __name__ == "__main__":

@@ -18,6 +18,8 @@ from common import (
     feature_pool_config,
     label_signature,
     load_raw_data,
+    log_step_end,
+    log_step_start,
     preprocess_signature,
     read_json,
     write_table,
@@ -58,6 +60,7 @@ class FactorValueParquetWriter:
             self._writer.close()
 
 def run() -> None:
+    log_step_start("07", "因子评估 (IC/IR)")
     config = env_config()
     feature_cfg = feature_pool_config()
     validated = read_json(OUTPUT_DIR / "llm" / "factors_validated.json").get("factors", [])
@@ -83,10 +86,8 @@ def run() -> None:
     try:
         for i, item in enumerate(validated, start=1):
             factor_name = str(item["factor_name"])
-            print(f"  [{i}/{total}] {factor_name}: evaluating...", flush=True)
             raw_score = evaluate_formula(str(item["formula"]), factor_input)
             score = apply_factor_preprocess(raw_score, raw_frame, config)
-            print(f"  [{i}/{total}] {factor_name}: computing IC/IR metrics...", flush=True)
             metrics = factor_metrics_from_series(factor_name, score, label_series, config)
             metrics["llm_direction"] = str(item["llm_direction"])
             metrics["empirical_direction"] = "higher_better" if metrics["mean_rank_ic"] >= 0 else "lower_better"
@@ -105,7 +106,7 @@ def run() -> None:
         raise RuntimeError("没有可评估的合法因子")
     metrics = pd.DataFrame(metric_rows).set_index("factor_name").sort_index()
     write_table(OUTPUT_DIR / "backtest" / "factor_metrics.csv", metrics)
-    print(f"factor evaluation ok, factors={len(metrics)}")
+    log_step_end("07", "因子评估完成", details=[f"评估因子: {len(metrics)} 个"])
 
 
 if __name__ == "__main__":

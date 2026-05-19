@@ -5,6 +5,7 @@ from collections import Counter
 import json
 import math
 import re
+import sys
 from pathlib import Path
 from typing import Any, Literal
 
@@ -12,6 +13,54 @@ import numpy as np
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 import yaml
+
+
+_BANNER_WIDTH = 60
+
+
+def log_step_start(step_id: str, description: str = "") -> None:
+    label = f"Step {step_id}"
+    if description:
+        label = f"Step {step_id}: {description}"
+    print("", flush=True)
+    print("=" * _BANNER_WIDTH, flush=True)
+    print(f">> {label}", flush=True)
+    print("=" * _BANNER_WIDTH, flush=True)
+
+
+def log_step_end(step_id: str, summary: str = "", details: list[str] | None = None) -> None:
+    label = f"Step {step_id}"
+    if summary:
+        label = f"Step {step_id} {summary}"
+    print("-" * _BANNER_WIDTH, flush=True)
+    print(f"<< {label}", flush=True)
+    if details:
+        for line in details:
+            print(f"   {line}", flush=True)
+    print("-" * _BANNER_WIDTH, flush=True)
+
+
+def log_phase(phase_label: str) -> None:
+    print(f"  -->> {phase_label}", flush=True)
+
+
+def log_progress_bar(prefix: str, current: int, total: int, done: bool = False) -> None:
+    if total <= 0:
+        return
+    pct = current / total
+    bar_len = 20
+    filled = int(bar_len * pct)
+    bar = "█" * filled + "░" * (bar_len - filled)
+    status = "OK" if done else f"{int(pct * 100)}%"
+    line = f"  {prefix} {bar} {current}/{total} ({status})"
+    if done:
+        print(f"\r{line}", flush=True)
+    else:
+        print(f"\r{line}", end="", flush=True)
+
+
+def log_data_loading(start_time: str, end_time: str, instruments: int, rows: int) -> None:
+    print(f"   加载数据: {start_time} ~ {end_time}, {instruments} 只股票, {rows:,} 行", flush=True)
 
 
 RUNTIME_ROOT = Path(__file__).resolve().parents[1]
@@ -1069,36 +1118,18 @@ def load_raw_data(
         end_timestamp = (end_timestamp + pd.offsets.BDay(int(forward_trading_days) + 5)).normalize()
     start_time = _date_text(start_timestamp)
     end_time = _date_text(end_timestamp)
-    print(
-        f"加载原始数据窗口: {start_time} ~ {end_time} "
-        f"(fields={len(fields)}, warmup={warmup_trading_days}, forward={forward_trading_days})",
-        flush=True,
-    )
     if str(cfg.get("price_adjust_reference_date", "auto") or "auto").strip().lower() == "auto":
-        # 默认把前复权参考日固定到本次任务的 load_end，避免随运行日期漂移。
         cfg["price_adjust_reference_date"] = end_time
     
     if _dynamic_index_pool_enabled(cfg):
-        print("开始构建动态指数股票池...", flush=True)
         observation_dates = _observation_dates_from_run_window(cfg)
         component_map = _dynamic_index_components_by_observation_date(cfg, observation_dates)
         instruments = sorted({code for codes in component_map.values() for code in codes})
-        print(
-            f"使用动态股票池: 指数成分股按观测日变化，共 {len(observation_dates)} 个观测日，"
-            f"合并后 {len(instruments)} 只股票"
-        )
     else:
-        print("开始获取股票列表...", flush=True)
         instruments = list_instruments(cfg)
-        print(f"股票列表准备完成: {len(instruments)} 只", flush=True)
     
     provider = get_data_provider(cfg)
     provider.initialize()
-    print(
-        f"开始加载特征数据: instruments={len(instruments)}, fields={len(fields)}, "
-        f"freq={str(cfg.get('freq', 'day'))}",
-        flush=True,
-    )
     frame = provider.get_features(
         instruments=instruments,
         fields=raw_field_tokens(fields),
@@ -1106,7 +1137,7 @@ def load_raw_data(
         end_date=end_time,
         freq=str(cfg.get("freq", "day")),
     )
-    print(f"特征数据加载完成: rows={len(frame)}", flush=True)
+    log_data_loading(start_time, end_time, len(instruments), len(frame))
     
     frame = frame.sort_index()
     frame.columns = [column.replace("$", "") for column in frame.columns]

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import pandas as pd
 
-from common import OUTPUT_DIR, build_summary_payload, env_config, label_name, read_json, write_json
+from common import OUTPUT_DIR, build_summary_payload, env_config, label_name, log_step_end, log_step_start, read_json, write_json
 
 
 def run() -> None:
+    log_step_start("04", "构建 LLM 摘要")
     config = env_config()
     stats = pd.read_csv(OUTPUT_DIR / "health" / "feature_stats.csv")
     corr = pd.read_csv(OUTPUT_DIR / "health" / "feature_corr.csv", index_col=0)
@@ -15,7 +16,7 @@ def run() -> None:
     if previous_top_path.exists():
         summary["previous_round_top_factors"] = read_json(previous_top_path)
     write_json(OUTPUT_DIR / "health" / "llm_summary.json", summary)
-    print("llm summary ready")
+    log_step_end("04", "LLM 摘要构建完成")
 
 
 if __name__ == "__main__":

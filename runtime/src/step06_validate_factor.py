@@ -9,6 +9,8 @@ from common import (
     feature_pool_config,
     formula_feature_names,
     generation_constraints,
+    log_step_end,
+    log_step_start,
     parse_json_text,
     read_json,
     validate_formula,
@@ -32,6 +34,7 @@ class FactorPayload(BaseModel):
 
 
 def run() -> None:
+    log_step_start("06", "因子公式验证")
     raw = read_json(OUTPUT_DIR / "llm" / "raw_response.json")
     payload = parse_json_text(str(raw.get("content", "")))
     factor_payload = FactorPayload.model_validate(payload)
@@ -58,7 +61,6 @@ def run() -> None:
                 )
             factor_data = candidate.model_dump()
             factor_data["llm_direction"] = factor_data.pop("direction")
-            # 完全去耦：交易规则由 step08 从统一配置读取，不写入因子文件。
             factor_data.pop("backtest_rule", None)
             accepted.append(factor_data)
         except Exception as exc:
@@ -71,7 +73,7 @@ def run() -> None:
             )
     write_json(OUTPUT_DIR / "llm" / "factors_validated.json", {"factors": accepted})
     write_json(OUTPUT_DIR / "llm" / "factors_rejected.json", {"factors": rejected})
-    print(f"validated={len(accepted)}, rejected={len(rejected)}")
+    log_step_end("06", "因子验证完成", details=[f"通过: {len(accepted)}, 拒绝: {len(rejected)}"])
 
 
 if __name__ == "__main__":

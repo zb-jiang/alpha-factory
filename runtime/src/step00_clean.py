@@ -23,6 +23,8 @@ import shutil
 import sys
 from pathlib import Path
 
+from common import log_step_end, log_step_start
+
 
 def get_project_root() -> Path:
     """获取项目根目录"""
@@ -120,21 +122,19 @@ def clean_outputs(dry_run: bool = False) -> dict[str, int]:
 
 
 def run() -> None:
-    """执行清理操作"""
-    # 检查是否有 --dry-run 参数
     dry_run = "--dry-run" in sys.argv or "-n" in sys.argv
-    
+
+    log_step_start("00", "清理输出目录")
+
     if dry_run:
-        print("=" * 60)
-        print("干运行模式（预览模式）")
-        print("不会实际删除任何文件，仅显示将要删除的内容")
-        print("=" * 60)
-        print()
-    
+        print("  干运行模式（预览模式），不会实际删除任何文件")
+
     stats = clean_outputs(dry_run=dry_run)
-    
+
     if not dry_run and stats["files"] == 0 and stats["directories"] == 0:
-        print("outputs 目录已经是干净的，无需清理")
+        print("  outputs 目录已经是干净的，无需清理")
+
+    log_step_end("00", "清理完成", details=[f"删除 {stats['files']} 个文件, {stats['directories']} 个目录"])
 
 
 if __name__ == "__main__":

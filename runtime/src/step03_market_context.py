@@ -7,6 +7,8 @@ from common import (
     env_config,
     feature_pool_config,
     load_raw_data,
+    log_step_end,
+    log_step_start,
     market_context_config,
     write_json,
 )
@@ -19,6 +21,7 @@ def _cfg_int(payload: dict[str, object], key: str, default: int) -> int:
 
 
 def run() -> None:
+    log_step_start("03", "市场环境分析")
     config = env_config()
     mc_cfg = market_context_config()
     windows = dict(mc_cfg.get("windows", {}))
@@ -53,7 +56,17 @@ def run() -> None:
         "train_context": build_train_context(train_window, thresholds),
     }
     write_json(OUTPUT_DIR / "health" / "market_context.json", market_context)
-    print("market context ready")
+    train_ctx = market_context.get("train_context", {})
+    summary_text = train_ctx.get("summary_text", "")
+    regime_label = ""
+    if train_ctx.get("labels"):
+        regime_label = ", ".join(f"{k}={v}" for k, v in train_ctx["labels"].items())
+    details = []
+    if summary_text:
+        details.append(f"市场状态: {summary_text}")
+    if regime_label:
+        details.append(f"环境标签: {regime_label}")
+    log_step_end("03", "市场环境分析完成", details=details)
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ from .base_provider import BaseDataProvider
 
 
 class TushareProvider(BaseDataProvider):
+    _connection_logged = False
     """Tushare 数据提供者
     
     封装 Tushare 的数据访问功能，提供与 Qlib 兼容的统一接口。
@@ -581,10 +582,11 @@ class TushareProvider(BaseDataProvider):
             
             self._initialized = True
             
-            # 验证连接并打印信息
-            print(f"Tushare 数据连接成功")
-            print(f"  API Key: {self._api_key[:8]}...")
-            print(f"  缓存目录: {self.cache_dir}")
+            if not TushareProvider._connection_logged:
+                print(f"Tushare 数据连接成功")
+                print(f"  API Key: {self._api_key[:8]}...")
+                print(f"  缓存目录: {self.cache_dir}")
+                TushareProvider._connection_logged = True
             self._warn_multiple_cache_dirs_once()
             
         except ImportError:

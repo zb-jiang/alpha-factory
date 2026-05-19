@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from common import OUTPUT_DIR, clear_runtime_context, ensure_runtime_dirs, env_config, write_json
+from common import OUTPUT_DIR, clear_runtime_context, ensure_runtime_dirs, env_config, log_step_end, log_step_start, write_json
 from step00_clean import run as run_step00
 from step01_precache_tushare import run as run_step01
 from step07_eval_factor import run as run_step07
@@ -57,32 +57,27 @@ def run() -> None:
         print("================================================================")
         return
 
+    log_step_start("11", "样本外盲测 (OOS Test)")
+
     run_step01()
 
-    print("开始收集样本内 (In-Sample) 训练出的优秀因子...")
+    print("  收集样本内训练出的优秀因子...")
     factors = collect_train_top_factors()
     if not factors:
-        print("未找到任何训练生成的优秀因子。请先在 run_mode: train 下运行 step10_iterate.py。")
+        print("  未找到任何训练生成的优秀因子。请先在 run_mode: train 下运行 step10_iterate.py。")
+        log_step_end("11", "盲测中止 (无因子)")
         return
         
-    print(f"共收集到 {len(factors)} 个独立的优秀因子。")
+    print(f"  共收集到 {len(factors)} 个独立的优秀因子")
     
-    # 模拟大模型的输出，将收集到的好因子写入 factors_validated.json，供后续步骤读取
     (OUTPUT_DIR / "llm").mkdir(parents=True, exist_ok=True)
     write_json(OUTPUT_DIR / "llm" / "factors_validated.json", {"factors": factors})
     
-    print("开始进行样本外 (Out-of-Sample) 数据处理与回测...")
-    print("------------------------------------------------")
-    # 跳过 discovery 生成链路，直接评估、回测和打分
     run_step07()
     run_step08()
     run_step09()
-    print("------------------------------------------------")
     
-    print("\n样本外盲测完成！")
-    print("盲测结果保存在 D:/test/test/Qlib/runtime/outputs/backtest/ 中。")
-    print("你可以查看 outputs/backtest/top3_factors.json 和 strategy_metrics.csv 来评估这些因子是否真正有效。")
-    print("如需对最终 Top3 做 Alphalens 复盘，请继续运行: python src/step12_alphalens_report.py")
+    log_step_end("11", "样本外盲测完成", details=[f"测试因子: {len(factors)} 个"])
 
 
 if __name__ == "__main__":

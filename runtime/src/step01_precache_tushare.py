@@ -9,6 +9,7 @@ from copy import deepcopy
 import pandas as pd
 
 from common import (
+    OUTPUT_DIR,
     _dynamic_index_components_by_observation_date,
     _dynamic_index_pool_enabled,
     _observation_dates_from_run_window,
@@ -18,6 +19,9 @@ from common import (
     feature_pool_config,
     get_data_provider,
     list_instruments,
+    log_progress_bar,
+    log_step_end,
+    log_step_start,
 )
 
 
@@ -82,14 +86,10 @@ def _audit_remaining_gaps(
         for i, qlib_code in enumerate(instruments, 1):
             ts_code = provider._convert_to_ts_code(qlib_code)  # type: ignore[attr-defined]
             ranges = provider._get_unfetched_ranges(api_name, ts_code, start_ymd, end_ymd)  # type: ignore[attr-defined]
-            if not ranges:
-                if i % 100 == 0 or i == total:
-                    print(f"  审计 {api_name} 进度: {i}/{total}")
-                continue
-            missing_code_count += 1
-            missing_range_count += len(ranges)
-            if i % 100 == 0 or i == total:
-                print(f"  审计 {api_name} 进度: {i}/{total}")
+            if ranges:
+                missing_code_count += 1
+                missing_range_count += len(ranges)
+            log_progress_bar(f"审计 {api_name}", i, total, done=(i == total))
         summary.append(
             f"{api_name}: missing_codes={missing_code_count}, missing_ranges={missing_range_count}"
         )
@@ -103,6 +103,8 @@ def run() -> None:
     data_source = str(cfg.get("data_source", "tushare")).strip().lower()
     if data_source != "tushare":
         raise ValueError(f"当前仅支持 data_source=tushare，收到: {data_source}")
+
+    log_step_start("01", "预缓存 Tushare 数据")
 
     feature_cfg = feature_pool_config()
     warmup_days = estimate_required_warmup(feature_cfg, formulas=[])
@@ -122,20 +124,17 @@ def run() -> None:
     start_ymd = buffered_start.strftime("%Y%m%d")
     end_ymd = buffered_end.strftime("%Y%m%d")
 
-    print("开始预缓存 Tushare 核心日频数据...")
-    print(
-        f"  时间范围(含缓冲): {buffered_start.strftime('%Y-%m-%d')} ~ {buffered_end.strftime('%Y-%m-%d')}, "
-        f"warmup={warmup_days}, forward={forward_days}"
-    )
+    print(f"  时间范围(含缓冲): {buffered_start.strftime('%Y-%m-%d')} ~ {buffered_end.strftime('%Y-%m-%d')}")
     print(f"  股票数量: {len(instruments)}")
 
+    cached_apis = []
     for api_name in ("daily", "adj_factor", "daily_basic"):
-        print(f"预缓存 {api_name} ...")
+        print(f"  预缓存 {api_name} ...")
         provider._ensure_data_cached(api_name, instruments, start_ymd, end_ymd)
+        cached_apis.append(api_name)
 
     _audit_remaining_gaps(provider, instruments, start_ymd, end_ymd)
 
-    # 触发静态字段缓存，避免后续步骤第一次运行时再等待。
     provider.get_features(
         instruments=instruments,
         fields=["$industry"],
@@ -144,7 +143,8 @@ def run() -> None:
         freq=str(cfg.get("freq", "day")),
     )
 
-    print("Tushare 预缓存完成。现在可直接运行 step10_iterate.py / step11_oos_test.py。")
+    details = [f"{api}: {len(instruments)} 只股票 OK" for api in cached_apis]
+    log_step_end("01", "预缓存完成", details=details)
 
 
 if __name__ == "__main__":

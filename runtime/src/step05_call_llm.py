@@ -12,6 +12,8 @@ from common import (
     feature_pool_config,
     label_description,
     label_name,
+    log_step_end,
+    log_step_start,
     parse_json_text,
     read_json,
     write_json,
@@ -210,16 +212,16 @@ def run_multi_agent(env_cfg: dict | None = None) -> None:
     context = _build_multi_agent_context()
 
     # ── 阶段 1: 分析师团队（并行）──
-    print("[多Agent] 阶段1: 启动分析师团队...")
+    print("  [多Agent] 阶段1: 启动分析师团队...")
     analyst_outputs = run_analyst_team(env_cfg, context)
     _write_agent_outputs(analyst_outputs)
-    print(f"[多Agent] 分析师团队完成: {len(analyst_outputs)} 位分析师贡献了建议")
+    print(f"  [多Agent] 分析师团队完成: {len(analyst_outputs)} 位分析师贡献了建议")
 
     if not analyst_outputs:
         raise RuntimeError("多 Agent 模式: 没有分析师成功执行，无法继续")
 
     # ── 阶段 2: 首席分析师（串行）──
-    print("[多Agent] 阶段2: 启动首席分析师整合...")
+    print("  [多Agent] 阶段2: 启动首席分析师整合...")
     chief_cfg = env_cfg.get("llm_agents", {}).get("chief_analyst", {})
     if not chief_cfg.get("model"):
         raise RuntimeError("多 Agent 模式: 未配置 chief_analyst")
@@ -233,10 +235,10 @@ def run_multi_agent(env_cfg: dict | None = None) -> None:
     )
     design_direction = run_chief_analyst(chief_agent_config, analyst_outputs, context)
     write_json(OUTPUT_DIR / "llm" / "design_direction.json", design_direction)
-    print(f"[多Agent] 首席分析师完成: 主攻方向 = {design_direction.get('primary_focus', 'N/A')}")
+    print(f"  [多Agent] 首席分析师完成: 主攻方向 = {design_direction.get('primary_focus', 'N/A')}")
 
     # ── 阶段 3: 因子生成器（串行）──
-    print("[多Agent] 阶段3: 启动因子生成器...")
+    print("  [多Agent] 阶段3: 启动因子生成器...")
     gen_cfg = env_cfg.get("llm_agents", {}).get("generator", {})
     if not gen_cfg.get("model"):
         raise RuntimeError("多 Agent 模式: 未配置 generator")
@@ -250,10 +252,10 @@ def run_multi_agent(env_cfg: dict | None = None) -> None:
     )
     raw_response_draft = run_generator(gen_agent_config, design_direction, context)
     write_json(OUTPUT_DIR / "llm" / "raw_response_draft.json", raw_response_draft)
-    print(f"[多Agent] 生成器完成: 产出 {len(raw_response_draft.get('factors', []))} 个候选因子")
+    print(f"  [多Agent] 生成器完成: 产出 {len(raw_response_draft.get('factors', []))} 个候选因子")
 
     # ── 阶段 4: 因子评审员（串行）──
-    print("[多Agent] 阶段4: 启动因子评审员...")
+    print("  [多Agent] 阶段4: 启动因子评审员...")
     rev_cfg = env_cfg.get("llm_agents", {}).get("reviewer", {})
     if not rev_cfg.get("model"):
         raise RuntimeError("多 Agent 模式: 未配置 reviewer")
@@ -285,14 +287,14 @@ def run_multi_agent(env_cfg: dict | None = None) -> None:
     write_json(OUTPUT_DIR / "llm" / "raw_response.json", final_payload)
     write_json(OUTPUT_DIR / "llm" / "review_report.json", {"review_results": passed + rejected})
     write_json(OUTPUT_DIR / "llm" / "review_rejected.json", {"factors": rejected})
-    print(f"[多Agent] 评审完成: {len(final_factors)} 通过, {len(rejected)} 拒绝")
-    print("[多Agent] raw_response.json 已生成")
+    print(f"  [多Agent] 评审完成: {len(final_factors)} 通过, {len(rejected)} 拒绝")
+    log_step_end("05", "LLM 因子生成完成", details=[f"候选因子: {len(final_factors)} 通过, {len(rejected)} 拒绝"])
 
 
 def run() -> None:
+    log_step_start("05", "调用 LLM 生成因子")
     config = env_config()
 
-    # ── 多 Agent 模式路由 ──
     if config.get("enable_multi_agent", False):
         try:
             run_multi_agent(config)
@@ -342,7 +344,7 @@ def run() -> None:
     client = OpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
     messages = build_messages(candidate_count)
     
-    print(f"正在调用大模型 ({model})，请稍候...")
+    print(f"  正在调用大模型 ({model})，请稍候...")
     response = None
     content = ""
     last_error: Exception | None = None
@@ -413,7 +415,8 @@ def run() -> None:
         "raw": response.model_dump(),
     }
     write_json(OUTPUT_DIR / "llm" / "raw_response.json", payload)
-    print("llm response saved")
+    factor_count = len(parse_json_text(content).get("factors", []))
+    log_step_end("05", "LLM 因子生成完成", details=[f"候选因子: {factor_count} 个"])
 
 
 if __name__ == "__main__":

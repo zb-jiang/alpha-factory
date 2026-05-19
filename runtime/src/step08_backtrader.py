@@ -16,6 +16,8 @@ from common import (
     env_config,
     feature_pool_config,
     load_raw_data,
+    log_step_end,
+    log_step_start,
     weekly_rebalance_dates,
     write_json,
     write_table,
@@ -230,6 +232,7 @@ def _build_market_timing(rule: dict[str, Any], ohlcv_map: dict[str, pd.DataFrame
 
 
 def run_backtest_batch_export() -> None:
+    log_step_start("08", "因子回测")
     cfg = env_config()
     rule = backtest_rule_config()
     raw_fields = list(feature_pool_config().get("raw_fields", []))
@@ -280,17 +283,14 @@ def run_backtest_batch_export() -> None:
                 if abs(mean_rank_ic) < min_rank_ic_to_backtest:
                     reason = f"Rank IC too low (|{mean_rank_ic:.4f}| < {min_rank_ic_to_backtest})"
                     skipped_factors.append({"factor_name": factor_name, "reason": reason})
-                    print(f"skip factor={factor_name}, reason={reason}")
                     continue
                 if abs(rank_ic_ir) < min_rank_ic_ir_to_backtest:
                     reason = f"Rank IC IR too low (|{rank_ic_ir:.4f}| < {min_rank_ic_ir_to_backtest})"
                     skipped_factors.append({"factor_name": factor_name, "reason": reason})
-                    print(f"skip factor={factor_name}, reason={reason}")
                     continue
                 if enable_direction_filter and llm_direction != empirical_direction:
                     reason = f"Direction mismatch (LLM={llm_direction}, empirical={empirical_direction})"
                     skipped_factors.append({"factor_name": factor_name, "reason": reason})
-                    print(f"skip factor={factor_name}, reason={reason}")
                     continue
                 is_negative_ic = mean_rank_ic < 0
                 score_sign = -1.0 if is_negative_ic else 1.0
@@ -298,7 +298,6 @@ def run_backtest_batch_export() -> None:
                 if win_rate < min_positive_ic_ratio:
                     reason = f"Directional win rate too low ({win_rate:.2f} < {min_positive_ic_ratio})"
                     skipped_factors.append({"factor_name": factor_name, "reason": reason})
-                    print(f"skip factor={factor_name}, reason={reason}")
                     continue
 
             bundle = _build_data_bundle_for_factor(factor_name, factor_values, ohlcv_map, score_sign=score_sign)
@@ -324,7 +323,7 @@ def run_backtest_batch_export() -> None:
                 market_timing=market_timing,
             )
 
-            print(f"backtest run: factor={factor_name}, strategy={strategy.__class__.__name__}")
+            print(f"  回测: {factor_name} ({strategy.__class__.__name__})")
             _setup_backtest_logging(factor_name)
             results = engine.run(rebalance_dates)
 
@@ -349,7 +348,7 @@ def run_backtest_batch_export() -> None:
 
         except Exception as exc:
             skipped_factors.append({"factor_name": factor_name, "reason": str(exc)})
-            print(f"skip factor={factor_name}, reason={exc}")
+            print(f"  跳过: {factor_name} ({exc})")
 
     metrics_df = pd.DataFrame(metric_rows).set_index("factor_name") if metric_rows else pd.DataFrame()
     nav_curve = pd.DataFrame(nav_rows) if nav_rows else pd.DataFrame()
@@ -360,7 +359,7 @@ def run_backtest_batch_export() -> None:
     write_table(OUTPUT_DIR / "backtest" / "orders.parquet", orders)
     write_table(OUTPUT_DIR / "backtest" / "nav_curve.parquet", nav_curve)
     write_json(OUTPUT_DIR / "backtest" / "skipped_factors.json", skipped_factors)
-    print(f"backtest batch export ok, factors={len(metrics_df)}, skipped={len(skipped_factors)}")
+    log_step_end("08", "回测完成", details=[f"回测因子: {len(metrics_df)} 个, 跳过: {len(skipped_factors)} 个"])
 
 
 if __name__ == "__main__":
