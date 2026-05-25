@@ -11,6 +11,10 @@ raw_fields:
   - vwap    # 成交量加权平均价，在 Tushare 日频下由 amount 与 volume 派生，可用于近似刻画全天成交重心
   - turnover  # 换手率，来自 Tushare daily_basic.turnover_rate，可用于衡量筹码交换速度
   - market_cap  # 总市值，来自 Tushare daily_basic.total_mv，可用于容量与风格约束
+  - pe_ttm  # 滚动市盈率，来自 Tushare daily_basic.pe_ttm，可用于价值风格刻画
+  - pb  # 市净率，来自 Tushare daily_basic.pb，可用于估值与资产定价约束
+  - ps_ttm  # 滚动市销率，来自 Tushare daily_basic.ps_ttm，可用于成长股高估值识别
+  - dv_ttm  # 滚动股息率，来自 Tushare daily_basic.dv_ttm，可用于红利风格刻画
   - industry  # 行业分类，来自 Tushare stock_basic.industry，可用于行业分组或中性化处理
 
 # 基础特征 (Features): 相当于“切好、腌制好的半成品”，是基于原始数据经过简单计算得出的指标
@@ -78,6 +82,16 @@ base_features:
     expr: market_cap.pct_change(20)
   - name: market_cap_stability_20d  # 20日市值稳定度，衡量容量波动是否平稳
     expr: market_cap.pct_change().rolling(20).std()
+
+  # 基本面估值：用于支持价值、红利与成长风格的日频估值刻画
+  - name: pe_ttm                  # 滚动市盈率，值越低通常代表估值越便宜
+    expr: pe_ttm
+  - name: pb                      # 市净率，值越低通常代表资产相对价格更便宜
+    expr: pb
+  - name: ps_ttm                  # 滚动市销率，适合刻画高成长高估值与低估值销售倍率差异
+    expr: ps_ttm
+  - name: dv_ttm                  # 滚动股息率，值越高通常代表红利属性越强
+    expr: dv_ttm
 
   # 筹码分布特征：衡量筹码成本结构、集中度与获利盘比例
   # 筹码集中度：值越小代表筹码越集中，抛压越小

@@ -12,6 +12,7 @@ import rqdatac as rq
 
 from rq_factor_validator import (
     BASE_DATA_FIELDS,
+    FUNDAMENTAL_FIELD_CANDIDATES,
     _expand_formula_dependencies,
     _extract_formula_tokens,
     _load_feature_formula_map,
@@ -65,7 +66,7 @@ if ENABLE_GET_PRICE_VWAP_FALLBACK:
 # -----------------------------
 CONFIG = {
     "start_date": "2026-01-01",
-    "end_date": "2026-04-10",
+    "end_date": "2026-05-15",
     "stock_pool": {
         "type": "index_components",  # index_components | all_market | custom
         "index_code": "SH000300",
@@ -106,8 +107,7 @@ CONFIG = {
 # -----------------------------
 # Add/remove factors here. Each item is (factor_name, factor_formula).
 FACTORS = [
-     ("price_vwap_dev_OOS", "ret_20d - vwap_ret_20d"),
-    ("vol_stability_ratio_OOS", "volume_mean_20d / (1 + volume_vol_20d)"),
+    ("pe_gap_momentum_v1", "pe_ttm * gap_open_ret"),
 ]
 
 # -----------------------------
@@ -163,6 +163,16 @@ def _can_get_factor(order_book_id: str, start_date: str, end_date: str, factor_n
     return True, "ok"
 
 
+def _probe_factor_candidates(order_book_id: str, start_date: str, end_date: str, factor_names: list[str]) -> tuple[bool, str]:
+    reasons = []
+    for factor_name in factor_names:
+        ok, reason = _can_get_factor(order_book_id, start_date, end_date, factor_name)
+        reasons.append(f"{factor_name}: {reason}")
+        if ok:
+            return True, "; ".join(reasons)
+    return False, "; ".join(reasons)
+
+
 def _probe_raw_field_support(config: dict) -> dict[str, dict[str, str]]:
     probe_id = _pick_probe_instrument(config)
     probe_end = pd.Timestamp(config.get("end_date", "2025-12-31"))
@@ -213,6 +223,13 @@ def _probe_raw_field_support(config: dict) -> dict[str, dict[str, str]]:
         "status": "supported" if market_cap_ok else "unsupported",
         "reason": "; ".join(market_cap_reasons),
     }
+
+    for local_name, candidates in FUNDAMENTAL_FIELD_CANDIDATES.items():
+        ok, reason = _probe_factor_candidates(probe_id, probe_start, probe_date, candidates)
+        support[local_name] = {
+            "status": "supported" if ok else "unsupported",
+            "reason": reason,
+        }
 
     # Industry via shenwan API.
     if hasattr(rq, "shenwan_instrument_industry"):

@@ -29,8 +29,16 @@ INTERNAL_FIELD_ALIAS: dict[str, str] = {
     # `turnover` is derived in `_build_raw_frame` from total_turnover / market_cap.
     "turnover": "total_turnover",
 }
+FUNDAMENTAL_FIELD_CANDIDATES: dict[str, list[str]] = {
+    # Local Tushare names are mapped to candidate RQ factor names.
+    "pe_ttm": ["pe_ratio", "pe_ttm", "pe"],
+    "pb": ["pb_ratio", "pb"],
+    "ps_ttm": ["ps_ratio", "ps_ttm", "ps"],
+    "dv_ttm": ["dividend_yield", "dividend_yield_ttm", "dividend_yield_12m", "dv_ttm"],
+}
 INTERNAL_LOOKBACK_DAYS = 80
-BASE_DATA_FIELDS = set(INTERNAL_FIELD_ALIAS.keys()) | {"market_cap", "industry"}
+BASE_DATA_FIELDS = set(INTERNAL_FIELD_ALIAS.keys()) | {"market_cap", "industry"} | set(FUNDAMENTAL_FIELD_CANDIDATES.keys())
+_RESOLVED_FUNDAMENTAL_FACTOR_CACHE: dict[str, str] = {}
 INTERNAL_FEATURE_FORMULAS: dict[str, str] = {
     "ret_1d": "close.pct_change(1)",
     "ret_5d": "close.pct_change(5)",
@@ -565,6 +573,44 @@ def _get_market_cap(order_book_ids: list[str], start_date: str, end_date: str) -
     raise RuntimeError("Cannot fetch market_cap from rqdatac.get_factor") from last_error
 
 
+def _get_fundamental_field(order_book_ids: list[str], start_date: str, end_date: str, local_name: str) -> pd.DataFrame:
+    candidates = FUNDAMENTAL_FIELD_CANDIDATES.get(str(local_name).strip())
+    if not candidates:
+        raise KeyError(f"Unsupported fundamental field: {local_name}")
+
+    cached_name = _RESOLVED_FUNDAMENTAL_FACTOR_CACHE.get(local_name)
+    attempted: list[str] = []
+    if cached_name:
+        attempted.append(cached_name)
+        try:
+            payload = rq.get_factor(order_book_ids, cached_name, start_date, end_date)
+            frame = _to_frame_date_stock(payload, cached_name)
+            if not frame.empty:
+                return frame.sort_index()
+        except Exception:
+            pass
+
+    last_error: Exception | None = None
+    for factor_name in candidates:
+        if factor_name in attempted:
+            continue
+        try:
+            payload = rq.get_factor(order_book_ids, factor_name, start_date, end_date)
+            frame = _to_frame_date_stock(payload, factor_name)
+            if frame.empty:
+                continue
+            _RESOLVED_FUNDAMENTAL_FACTOR_CACHE[local_name] = factor_name
+            return frame.sort_index()
+        except Exception as exc:  # pragma: no cover
+            last_error = exc
+
+    candidate_text = ", ".join(candidates)
+    raise RuntimeError(
+        f"Cannot fetch {local_name} from rqdatac.get_factor; "
+        f"tried candidates: {candidate_text}"
+    ) from last_error
+
+
 def _get_turnover_field(order_book_ids: list[str], start_date: str, end_date: str) -> pd.DataFrame:
     # Prefer native turnover factor to align with local `turnover_rate` semantics.
     factor_candidates = ["turnover_rate", "free_turnover_rate", "turnover"]
@@ -1000,6 +1046,10 @@ def _build_raw_frame(
         if local_name == "market_cap":
             cap = _get_market_cap(instruments, fetch_start, fetch_end)
             raw_cols[local_name] = cap.stack(dropna=False).rename(local_name)
+            continue
+        if local_name in FUNDAMENTAL_FIELD_CANDIDATES:
+            fundamental = _get_fundamental_field(instruments, fetch_start, fetch_end, local_name)
+            raw_cols[local_name] = fundamental.stack(dropna=False).rename(local_name)
             continue
         if local_name == "turnover":
             turnover = _get_turnover_field(instruments, fetch_start, fetch_end)

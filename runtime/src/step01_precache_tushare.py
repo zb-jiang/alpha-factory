@@ -22,6 +22,7 @@ from common import (
     log_progress_bar,
     log_step_end,
     log_step_start,
+    raw_field_tokens,
 )
 
 
@@ -134,6 +135,20 @@ def run() -> None:
         cached_apis.append(api_name)
 
     _audit_remaining_gaps(provider, instruments, start_ymd, end_ymd)
+
+    daily_basic_fields = [
+        field
+        for field in raw_field_tokens(list(feature_cfg.get("raw_fields", [])))
+        if getattr(provider, "FIELD_SOURCE_MAP", {}).get(field) == "daily_basic"
+    ]
+    if daily_basic_fields:
+        provider.get_features(
+            instruments=instruments,
+            fields=daily_basic_fields,
+            start_date=buffered_start.strftime("%Y-%m-%d"),
+            end_date=buffered_end.strftime("%Y-%m-%d"),
+            freq=str(cfg.get("freq", "day")),
+        )
 
     provider.get_features(
         instruments=instruments,

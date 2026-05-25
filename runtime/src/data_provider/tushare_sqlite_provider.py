@@ -329,7 +329,49 @@ class TushareSQLiteProvider(TushareProvider):
             ranges.append([start, end])
         return ranges
 
-    def _ensure_data_cached(self, api_name: str, instruments: list, start_date: str, end_date: str):
+    def _daily_basic_complete_dates(
+        self,
+        conn: sqlite3.Connection,
+        ts_code: str,
+        start_date: str,
+        end_date: str,
+        required_feature_names: list[str] | None = None,
+    ) -> set[str]:
+        rows = conn.execute(
+            """
+            SELECT trade_date, features
+            FROM stock_fundamental
+            WHERE ts_code=? AND data_type='daily_basic'
+              AND features != '{}' AND placeholder_at IS NULL
+              AND trade_date BETWEEN ? AND ?
+            """,
+            (ts_code, start_date, end_date),
+        ).fetchall()
+        if not rows:
+            return set()
+
+        required_keys = set(required_feature_names or [])
+        complete_dates: set[str] = set()
+        for trade_date, feature_text in rows:
+            if not feature_text:
+                continue
+            try:
+                payload = json.loads(feature_text)
+            except Exception:
+                continue
+            if required_keys and not required_keys.issubset(payload.keys()):
+                continue
+            complete_dates.add(str(trade_date))
+        return complete_dates
+
+    def _ensure_data_cached(
+        self,
+        api_name: str,
+        instruments: list,
+        start_date: str,
+        end_date: str,
+        required_feature_names: list[str] | None = None,
+    ):
         """
         重写父类的 _ensure_data_cached 方法。
         使用 SQLite 查询真实缺失的交易日（排除周末、节假日、停牌、未上市）。
@@ -360,14 +402,20 @@ class TushareSQLiteProvider(TushareProvider):
             # 2. 查询数据库中已经存在的日期（排除占位符）
             if api_name == 'daily':
                 check_sql = f"SELECT trade_date FROM stock_daily_price WHERE ts_code='{ts_code}' AND open IS NOT NULL AND open != -1 AND placeholder_at IS NULL AND trade_date BETWEEN '{start_date}' AND '{end_date}'"
+                existing_dates = {row[0] for row in conn.execute(check_sql).fetchall()}
             elif api_name == 'adj_factor':
                 check_sql = f"SELECT trade_date FROM stock_daily_price WHERE ts_code='{ts_code}' AND adj_factor IS NOT NULL AND adj_factor != -1 AND placeholder_at IS NULL AND trade_date BETWEEN '{start_date}' AND '{end_date}'"
+                existing_dates = {row[0] for row in conn.execute(check_sql).fetchall()}
             elif api_name == 'daily_basic':
-                check_sql = f"SELECT trade_date FROM stock_fundamental WHERE ts_code='{ts_code}' AND data_type='{api_name}' AND features != '{{}}' AND placeholder_at IS NULL AND trade_date BETWEEN '{start_date}' AND '{end_date}'"
+                existing_dates = self._daily_basic_complete_dates(
+                    conn,
+                    ts_code,
+                    start_date,
+                    end_date,
+                    required_feature_names=required_feature_names,
+                )
             else:
                 continue
-                
-            existing_dates = {row[0] for row in conn.execute(check_sql).fetchall()}
             
             # 3. 计算缺失的日期
             missing_dates = sorted(list(valid_dates - existing_dates))
@@ -382,7 +430,13 @@ class TushareSQLiteProvider(TushareProvider):
         print(f"  [SQLite] 从 Tushare 获取缺失的 {api_name} 数据, 涉及 {total} 只股票...")
         fetched_count = 0
         for i, (ts_code, (req_start, req_end)) in enumerate(missing_tasks.items(), 1):
-            df = self._call_pro_api(api_name, ts_code=ts_code, start_date=req_start, end_date=req_end)
+            df = self._fetch_api_frame(
+                api_name,
+                ts_code=ts_code,
+                start_date=req_start,
+                end_date=req_end,
+                required_feature_names=required_feature_names,
+            )
             
             if df is not None and not df.empty:
                 if api_name == 'daily':
@@ -449,7 +503,13 @@ class TushareSQLiteProvider(TushareProvider):
                             (ts_code, d),
                         )
             elif api_name == 'daily_basic':
-                existing = {r[0] for r in conn.execute(f"SELECT trade_date FROM stock_fundamental WHERE ts_code='{ts_code}' AND data_type='{api_name}' AND features != '{{}}' AND placeholder_at IS NULL AND trade_date BETWEEN '{req_start}' AND '{req_end}'").fetchall()}
+                existing = self._daily_basic_complete_dates(
+                    conn,
+                    ts_code,
+                    req_start,
+                    req_end,
+                    required_feature_names=required_feature_names,
+                )
                 cal_sql = f"SELECT cal_date FROM trade_cal WHERE is_open=1 AND cal_date BETWEEN '{req_start}' AND '{req_end}'"
                 valid = {r[0] for r in conn.execute(cal_sql).fetchall()}
                 still_missing = valid - existing

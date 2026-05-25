@@ -41,6 +41,17 @@ class TushareProvider(BaseDataProvider):
         "$money": "amount",
         "$turnover": "turnover_rate",
         "$market_cap": "total_mv",
+        "$pe": "pe",
+        "$pe_ttm": "pe_ttm",
+        "$pb": "pb",
+        "$ps": "ps",
+        "$ps_ttm": "ps_ttm",
+        "$dv_ratio": "dv_ratio",
+        "$dv_ttm": "dv_ttm",
+        "$circ_mv": "circ_mv",
+        "$total_share": "total_share",
+        "$float_share": "float_share",
+        "$free_share": "free_share",
         "$industry": "industry",
         "$factor": "adj_factor",  # 复权因子，需要从 adj_factor 接口获取
     }
@@ -57,6 +68,17 @@ class TushareProvider(BaseDataProvider):
         "$vwap": "derived_price",
         "$turnover": "daily_basic",
         "$market_cap": "daily_basic",
+        "$pe": "daily_basic",
+        "$pe_ttm": "daily_basic",
+        "$pb": "daily_basic",
+        "$ps": "daily_basic",
+        "$ps_ttm": "daily_basic",
+        "$dv_ratio": "daily_basic",
+        "$dv_ttm": "daily_basic",
+        "$circ_mv": "daily_basic",
+        "$total_share": "daily_basic",
+        "$float_share": "daily_basic",
+        "$free_share": "daily_basic",
         "$industry": "stock_basic",
     }
     
@@ -349,7 +371,14 @@ class TushareProvider(BaseDataProvider):
         except Exception:
             return pd.DataFrame()
 
-    def _ensure_data_cached(self, api_name: str, instruments: list, start_date: str, end_date: str):
+    def _ensure_data_cached(
+        self,
+        api_name: str,
+        instruments: list,
+        start_date: str,
+        end_date: str,
+        required_feature_names: list[str] | None = None,
+    ):
         missing_tasks = {}
         overall_start = end_date
         overall_end = start_date
@@ -381,14 +410,13 @@ class TushareProvider(BaseDataProvider):
         fetched_count = 0
         partial_tail_count = 0
         for i, ts_code in enumerate(missing_codes, start=1):
-            if api_name == "daily":
-                df = self._call_pro_api("daily", ts_code=ts_code, start_date=overall_start, end_date=overall_end)
-            elif api_name == "adj_factor":
-                df = self._call_pro_api("adj_factor", ts_code=ts_code, start_date=overall_start, end_date=overall_end)
-            elif api_name == "daily_basic":
-                df = self._call_pro_api("daily_basic", ts_code=ts_code, start_date=overall_start, end_date=overall_end)
-            else:
-                continue
+            df = self._fetch_api_frame(
+                api_name,
+                ts_code=ts_code,
+                start_date=overall_start,
+                end_date=overall_end,
+                required_feature_names=required_feature_names,
+            )
 
             if df is None:
                 continue
@@ -545,6 +573,77 @@ class TushareProvider(BaseDataProvider):
                 print(f"  Tushare 接口触发频率限制，{wait_seconds:.1f} 秒后重试 {method_name}")
                 time.sleep(wait_seconds)
         raise RuntimeError(f"Tushare 接口调用失败: {method_name}")
+
+    def _fetch_daily_basic_frame(
+        self,
+        ts_code: str,
+        start_date: str,
+        end_date: str,
+        required_feature_names: list[str] | None = None,
+    ) -> pd.DataFrame:
+        required_text = ", ".join(required_feature_names or [])
+        transient_markers = [
+            "请指定正确的接口名",
+            "没有接口(daily_basic)访问权限",
+        ]
+        last_error: Exception | None = None
+        max_attempts = max(self._rate_limit_retries + 1, 3)
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return self._call_pro_api(
+                    "daily_basic",
+                    ts_code=ts_code,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+            except Exception as error:
+                last_error = error
+                error_text = str(error)
+                is_transient = any(marker in error_text for marker in transient_markers)
+                if not is_transient or attempt >= max_attempts:
+                    break
+                wait_seconds = max(self._request_interval_seconds, 2.0) * attempt
+                print(
+                    f"  daily_basic 接口返回异常，准备重试 {attempt}/{max_attempts}: {error_text}"
+                )
+                time.sleep(wait_seconds)
+
+        error_text = str(last_error) if last_error is not None else "unknown error"
+        if "没有接口(daily_basic)访问权限" in error_text:
+            raise RuntimeError(
+                "当前 Tushare 环境连续多次返回 daily_basic 无权限，无法稳定获取真实 daily_basic 数据。"
+                "根据 Tushare 官方文档，daily_basic 至少需要 2000 积分。"
+                f"本次请求字段: [{required_text}]。原始报错: {error_text}"
+            ) from last_error
+        if "请指定正确的接口名" in error_text:
+            raise RuntimeError(
+                "当前 Tushare 环境连续多次返回 daily_basic 接口名无效，无法稳定获取真实 daily_basic 数据。"
+                f"本次请求字段: [{required_text}]。原始报错: {error_text}"
+            ) from last_error
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"daily_basic 拉取失败，本次请求字段: [{required_text}]")
+
+    def _fetch_api_frame(
+        self,
+        api_name: str,
+        ts_code: str,
+        start_date: str,
+        end_date: str,
+        required_feature_names: list[str] | None = None,
+    ) -> pd.DataFrame:
+        if api_name == "daily":
+            return self._call_pro_api("daily", ts_code=ts_code, start_date=start_date, end_date=end_date)
+        if api_name == "adj_factor":
+            return self._call_pro_api("adj_factor", ts_code=ts_code, start_date=start_date, end_date=end_date)
+        if api_name == "daily_basic":
+            return self._fetch_daily_basic_frame(
+                ts_code=ts_code,
+                start_date=start_date,
+                end_date=end_date,
+                required_feature_names=required_feature_names,
+            )
+        raise ValueError(f"暂不支持的 API: {api_name}")
     
     def initialize(self) -> None:
         """初始化 Tushare 连接
@@ -1103,7 +1202,13 @@ class TushareProvider(BaseDataProvider):
         if not field_mapping:
             return pd.DataFrame()
             
-        self._ensure_data_cached('daily_basic', instruments, start_date.replace('-', ''), end_date.replace('-', ''))
+        self._ensure_data_cached(
+            'daily_basic',
+            instruments,
+            start_date.replace('-', ''),
+            end_date.replace('-', ''),
+            required_feature_names=list(field_mapping.keys()),
+        )
         
         cached_data_list = []
         for qlib_code in instruments:
@@ -1127,8 +1232,11 @@ class TushareProvider(BaseDataProvider):
             df['instrument'] = qlib_code
             
             df = df.rename(columns=field_mapping)
-            available_fields = ['datetime', 'instrument'] + [f for f in field_mapping.values() if f in df.columns]
-            df = df[available_fields]
+            for target_field in field_mapping.values():
+                if target_field not in df.columns:
+                    df[target_field] = np.nan
+            selected_fields = ['datetime', 'instrument'] + list(field_mapping.values())
+            df = df[selected_fields]
             cached_data_list.append(df)
             
         if not cached_data_list:
