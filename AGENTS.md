@@ -6,6 +6,7 @@
    - tushare在某些日期取不到指数成分股，本地代码是通过回溯的方式获取成分股的，所以会出现某些横截面成分股不同的情况， 但这个需要找到明确的成分股不同的证据
    - ricequant平台不支持turnover字段的获取
    - dv_ttm特征值在ricequant和tushare之间存在已知口径差异：大多数股票可以对上，但少数股票（已发现主要集中在部分科创板股票和个别银行股）存在单位或口径不一致，因此dv_ttm不适合作为严格校验本地与ricequant因子分析链路是否一致的标准字段
+   - netprofit_yoy、or_yoy字段在ricequant和tushare之间存在已知口径差异：本地使用tushare fina_indicator中的netprofit_yoy、or_yoy，同比口径按公告日做as-of对齐；ricequant侧当前只能稳定映射到net_profit_growth_ratio_ttm、operating_revenue_growth_ratio_ttm这类TTM增速字段。两边大方向通常相关，但不是同一口径，因此netprofit_yoy、or_yoy以及依赖它们的组合因子不适合作为严格校验本地与ricequant因子分析链路是否一致的标准字段
    - 已经验证验证了多次，ricequant和tushare的每日OCHLV数据是严格能对上的
 5. 该项目的缓存机制是SQLLite数据库。按照业务逻辑缓存的使用方式是：
    - 先从缓存读取数据

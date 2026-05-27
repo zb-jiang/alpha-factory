@@ -15,6 +15,10 @@ raw_fields:
   - pb  # 市净率，来自 Tushare daily_basic.pb，可用于估值与资产定价约束
   - ps_ttm  # 滚动市销率，来自 Tushare daily_basic.ps_ttm，可用于成长股高估值识别
   - dv_ttm  # 滚动股息率，来自 Tushare daily_basic.dv_ttm，可用于红利风格刻画
+  - eps  # 每股收益，来自 Tushare fina_indicator.eps，按 ann_date 做 as-of 对齐
+  - roe  # 净资产收益率，来自 Tushare fina_indicator.roe，按 ann_date 做 as-of 对齐
+  - netprofit_yoy  # 净利润同比增速，来自 Tushare fina_indicator.netprofit_yoy，按 ann_date 做 as-of 对齐
+  - or_yoy  # 营业收入同比增速，来自 Tushare fina_indicator.or_yoy，按 ann_date 做 as-of 对齐
   - industry  # 行业分类，来自 Tushare stock_basic.industry，可用于行业分组或中性化处理
 
 # 基础特征 (Features): 相当于“切好、腌制好的半成品”，是基于原始数据经过简单计算得出的指标
@@ -92,6 +96,24 @@ base_features:
     expr: ps_ttm
   - name: dv_ttm                  # 滚动股息率，值越高通常代表红利属性越强
     expr: dv_ttm
+
+  # 季频财务基本面：按公告日 ann_date 做 as-of 对齐后展开到交易日，避免未来函数
+  - name: eps                     # 每股收益，适合刻画盈利能力与估值约束
+    expr: eps
+  - name: roe                     # 净资产收益率，适合刻画质量与盈利效率
+    expr: roe
+  - name: netprofit_yoy           # 净利润同比增速，适合刻画业绩成长
+    expr: netprofit_yoy
+  - name: or_yoy                  # 营业收入同比增速，适合刻画收入成长
+    expr: or_yoy
+  - name: earnings_yield          # 盈利收益率，适合把低PE映射成“高收益率”刻画
+    expr: 1 / pe_ttm
+  - name: sales_yield             # 销售收益率，适合把低PS映射成“高销售支撑”刻画
+    expr: 1 / ps_ttm
+  - name: quality_value           # 质量价值结合，ROE高且PB低时更强
+    expr: roe / pb
+  - name: profit_revenue_gap      # 利润增速相对收入增速的优势，衡量利润弹性是否强于收入扩张
+    expr: netprofit_yoy - or_yoy
 
   # 筹码分布特征：衡量筹码成本结构、集中度与获利盘比例
   # 筹码集中度：值越小代表筹码越集中，抛压越小

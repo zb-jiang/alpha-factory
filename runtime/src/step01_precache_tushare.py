@@ -73,20 +73,24 @@ def _audit_remaining_gaps(
     instruments: list[str],
     start_ymd: str,
     end_ymd: str,
+    api_names: tuple[str, ...],
 ) -> None:
     # 先统一同步一次交易日历，避免在每只股票审计时重复回源。
     if hasattr(provider, "_sync_trade_cal"):
         provider._sync_trade_cal(start_ymd, end_ymd)  # type: ignore[attr-defined]
 
-    api_names = ("daily", "adj_factor", "daily_basic")
     summary: list[str] = []
     for api_name in api_names:
         missing_code_count = 0
         missing_range_count = 0
         total = len(instruments)
+        request_start = start_ymd
+        request_end = end_ymd
+        if api_name == "fina_indicator":
+            request_start, request_end = provider._fina_indicator_query_window(start_ymd, end_ymd)  # type: ignore[attr-defined]
         for i, qlib_code in enumerate(instruments, 1):
             ts_code = provider._convert_to_ts_code(qlib_code)  # type: ignore[attr-defined]
-            ranges = provider._get_unfetched_ranges(api_name, ts_code, start_ymd, end_ymd)  # type: ignore[attr-defined]
+            ranges = provider._get_unfetched_ranges(api_name, ts_code, request_start, request_end)  # type: ignore[attr-defined]
             if ranges:
                 missing_code_count += 1
                 missing_range_count += len(ranges)
@@ -128,23 +132,64 @@ def run() -> None:
     print(f"  时间范围(含缓冲): {buffered_start.strftime('%Y-%m-%d')} ~ {buffered_end.strftime('%Y-%m-%d')}")
     print(f"  股票数量: {len(instruments)}")
 
-    cached_apis = []
-    for api_name in ("daily", "adj_factor", "daily_basic"):
-        print(f"  预缓存 {api_name} ...")
-        provider._ensure_data_cached(api_name, instruments, start_ymd, end_ymd)
-        cached_apis.append(api_name)
-
-    _audit_remaining_gaps(provider, instruments, start_ymd, end_ymd)
-
     daily_basic_fields = [
         field
         for field in raw_field_tokens(list(feature_cfg.get("raw_fields", [])))
         if getattr(provider, "FIELD_SOURCE_MAP", {}).get(field) == "daily_basic"
     ]
+    daily_basic_source_fields = [
+        getattr(provider, "FIELD_MAP", {}).get(field, field.lstrip("$"))
+        for field in daily_basic_fields
+    ]
+    fina_indicator_fields = [
+        field
+        for field in raw_field_tokens(list(feature_cfg.get("raw_fields", [])))
+        if getattr(provider, "FIELD_SOURCE_MAP", {}).get(field) == "fina_indicator"
+    ]
+    fina_indicator_source_fields = [
+        getattr(provider, "FIELD_MAP", {}).get(field, field.lstrip("$"))
+        for field in fina_indicator_fields
+    ]
+
+    api_names = ["daily", "adj_factor", "daily_basic"]
+    if fina_indicator_fields:
+        api_names.append("fina_indicator")
+
+    cached_apis = []
+    for api_name in api_names:
+        print(f"  预缓存 {api_name} ...")
+        request_start = start_ymd
+        request_end = end_ymd
+        required_feature_names = None
+        if api_name == "daily_basic":
+            required_feature_names = daily_basic_source_fields or None
+        elif api_name == "fina_indicator":
+            request_start, request_end = provider._fina_indicator_query_window(start_ymd, end_ymd)  # type: ignore[attr-defined]
+            required_feature_names = fina_indicator_source_fields or None
+        provider._ensure_data_cached(
+            api_name,
+            instruments,
+            request_start,
+            request_end,
+            required_feature_names=required_feature_names,
+        )
+        cached_apis.append(api_name)
+
+    _audit_remaining_gaps(provider, instruments, start_ymd, end_ymd, tuple(api_names))
+
     if daily_basic_fields:
         provider.get_features(
             instruments=instruments,
             fields=daily_basic_fields,
+            start_date=buffered_start.strftime("%Y-%m-%d"),
+            end_date=buffered_end.strftime("%Y-%m-%d"),
+            freq=str(cfg.get("freq", "day")),
+        )
+
+    if fina_indicator_fields:
+        provider.get_features(
+            instruments=instruments,
+            fields=fina_indicator_fields,
             start_date=buffered_start.strftime("%Y-%m-%d"),
             end_date=buffered_end.strftime("%Y-%m-%d"),
             freq=str(cfg.get("freq", "day")),

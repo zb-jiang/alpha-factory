@@ -48,6 +48,10 @@ class TushareProvider(BaseDataProvider):
         "$ps_ttm": "ps_ttm",
         "$dv_ratio": "dv_ratio",
         "$dv_ttm": "dv_ttm",
+        "$eps": "eps",
+        "$roe": "roe",
+        "$netprofit_yoy": "netprofit_yoy",
+        "$or_yoy": "or_yoy",
         "$circ_mv": "circ_mv",
         "$total_share": "total_share",
         "$float_share": "float_share",
@@ -75,6 +79,10 @@ class TushareProvider(BaseDataProvider):
         "$ps_ttm": "daily_basic",
         "$dv_ratio": "daily_basic",
         "$dv_ttm": "daily_basic",
+        "$eps": "fina_indicator",
+        "$roe": "fina_indicator",
+        "$netprofit_yoy": "fina_indicator",
+        "$or_yoy": "fina_indicator",
         "$circ_mv": "daily_basic",
         "$total_share": "daily_basic",
         "$float_share": "daily_basic",
@@ -127,6 +135,7 @@ class TushareProvider(BaseDataProvider):
         self._list_date_cache_loaded = False
         self._latest_trade_date_cache: Optional[str] = None
         self._has_open_trade_day_cache: Dict[Tuple[str, str], bool] = {}
+        self._fina_indicator_warned = False
         self._init_cache_meta()
 
 
@@ -638,6 +647,13 @@ class TushareProvider(BaseDataProvider):
             return self._call_pro_api("adj_factor", ts_code=ts_code, start_date=start_date, end_date=end_date)
         if api_name == "daily_basic":
             return self._fetch_daily_basic_frame(
+                ts_code=ts_code,
+                start_date=start_date,
+                end_date=end_date,
+                required_feature_names=required_feature_names,
+            )
+        if api_name == "fina_indicator":
+            return self._fetch_fina_indicator_frame(
                 ts_code=ts_code,
                 start_date=start_date,
                 end_date=end_date,
@@ -1191,6 +1207,72 @@ class TushareProvider(BaseDataProvider):
             mapping[self.FIELD_MAP.get(field, field.lstrip("$"))] = field
         return mapping
 
+    def _fina_indicator_query_window(self, start_date: str, end_date: str) -> tuple[str, str]:
+        start_ts = pd.Timestamp(str(start_date)).normalize() - pd.Timedelta(days=550)
+        end_ts = pd.Timestamp(str(end_date)).normalize()
+        return start_ts.strftime("%Y%m%d"), end_ts.strftime("%Y%m%d")
+
+    def _prepare_fina_indicator_frame(
+        self,
+        df: pd.DataFrame,
+        required_feature_names: list[str] | None = None,
+    ) -> pd.DataFrame:
+        if df is None or df.empty:
+            return pd.DataFrame()
+        frame = df.copy()
+        if "ann_date" not in frame.columns or "end_date" not in frame.columns:
+            return pd.DataFrame()
+        frame["ann_date"] = frame["ann_date"].astype(str)
+        frame["end_date"] = frame["end_date"].astype(str)
+        frame = frame[(frame["ann_date"] != "") & (frame["end_date"] != "")]
+        if frame.empty:
+            return pd.DataFrame()
+        keep_columns = ["ts_code", "ann_date", "end_date"]
+        for feature_name in required_feature_names or []:
+            if feature_name not in frame.columns:
+                frame[feature_name] = np.nan
+            keep_columns.append(feature_name)
+        extra_columns = [
+            column for column in frame.columns
+            if column not in keep_columns
+        ]
+        frame = frame[keep_columns + extra_columns]
+        frame = frame.sort_values(["ann_date", "end_date"]).drop_duplicates(
+            subset=["ann_date", "end_date"], keep="last"
+        )
+        return frame.reset_index(drop=True)
+
+    def _fetch_fina_indicator_frame(
+        self,
+        ts_code: str,
+        start_date: str,
+        end_date: str,
+        required_feature_names: list[str] | None = None,
+    ) -> pd.DataFrame:
+        try:
+            df = self._call_pro_api(
+                "fina_indicator",
+                ts_code=ts_code,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        except Exception as error:
+            error_text = str(error)
+            if (
+                "没有接口(fina_indicator)访问权限" in error_text
+                or "请指定正确的接口名" in error_text
+            ):
+                if not self._fina_indicator_warned:
+                    self._fina_indicator_warned = True
+                    print(
+                        "警告: 当前 Tushare 环境无法稳定访问 fina_indicator，"
+                        "季频财务字段将以 NaN 降级，不阻塞主流程。"
+                    )
+                    print(f"  原始报错: {error_text}")
+                return pd.DataFrame()
+            raise
+        return self._prepare_fina_indicator_frame(df, required_feature_names)
+
     def _get_daily_basic_data(
         self,
         instruments: List[str],
@@ -1235,14 +1317,101 @@ class TushareProvider(BaseDataProvider):
             for target_field in field_mapping.values():
                 if target_field not in df.columns:
                     df[target_field] = np.nan
+                df[target_field] = pd.to_numeric(df[target_field], errors="coerce")
             selected_fields = ['datetime', 'instrument'] + list(field_mapping.values())
             df = df[selected_fields]
+            if df[list(field_mapping.values())].notna().sum().sum() == 0:
+                continue
             cached_data_list.append(df)
             
         if not cached_data_list:
             return pd.DataFrame()
         final_df = pd.concat(cached_data_list, ignore_index=True)
         final_df = final_df.set_index(['instrument', 'datetime']).sort_index()
+        final_df.index = final_df.index.set_names(["instrument", "datetime"])
+        return final_df
+
+    def _expand_report_fields_asof(
+        self,
+        report_frame: pd.DataFrame,
+        trading_dates: pd.Index,
+        qlib_code: str,
+        field_mapping: dict[str, str],
+    ) -> pd.DataFrame:
+        if trading_dates.empty:
+            return pd.DataFrame()
+        template = pd.DataFrame({"datetime": trading_dates}).sort_values("datetime")
+        template["instrument"] = qlib_code
+        output_columns = list(field_mapping.values())
+        if report_frame.empty:
+            for column in output_columns:
+                template[column] = np.nan
+            return template
+
+        reports = report_frame.copy()
+        reports["ann_date"] = pd.to_datetime(reports["ann_date"], errors="coerce")
+        reports["end_date"] = pd.to_datetime(reports["end_date"], errors="coerce")
+        reports = reports.dropna(subset=["ann_date", "end_date"])
+        if reports.empty:
+            for column in output_columns:
+                template[column] = np.nan
+            return template
+
+        reports = reports.sort_values(["ann_date", "end_date"]).drop_duplicates(
+            subset=["ann_date", "end_date"], keep="last"
+        )
+        renamed = reports.rename(columns=field_mapping)
+        merge_columns = ["ann_date", *output_columns]
+        merged = pd.merge_asof(
+            template[["datetime"]].sort_values("datetime"),
+            renamed[merge_columns].sort_values("ann_date"),
+            left_on="datetime",
+            right_on="ann_date",
+            direction="backward",
+        )
+        merged["instrument"] = qlib_code
+        return merged[["datetime", "instrument", *output_columns]]
+
+    def _get_fina_indicator_data(
+        self,
+        instruments: List[str],
+        fields: List[str],
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame:
+        field_mapping = self._build_source_field_mapping(fields, "fina_indicator")
+        if not field_mapping:
+            return pd.DataFrame()
+
+        report_start, report_end = self._fina_indicator_query_window(
+            start_date.replace("-", ""),
+            end_date.replace("-", ""),
+        )
+        self._ensure_data_cached(
+            "fina_indicator",
+            instruments,
+            report_start,
+            report_end,
+            required_feature_names=list(field_mapping.keys()),
+        )
+
+        trading_dates = pd.Index(pd.to_datetime(self.get_trading_dates(start_date, end_date)))
+        if trading_dates.empty:
+            return pd.DataFrame()
+
+        cached_data_list = []
+        for qlib_code in instruments:
+            ts_code = self._convert_to_ts_code(qlib_code)
+            df = self._load_from_ts_parquet("fina_indicator", ts_code, report_start, report_end)
+            expanded = self._expand_report_fields_asof(df, trading_dates, qlib_code, field_mapping)
+            if expanded.empty:
+                continue
+            cached_data_list.append(expanded)
+
+        if not cached_data_list:
+            return pd.DataFrame()
+        final_df = pd.concat(cached_data_list, ignore_index=True)
+        final_df = final_df.set_index(["instrument", "datetime"]).sort_index()
         final_df.index = final_df.index.set_names(["instrument", "datetime"])
         return final_df
 
@@ -1377,6 +1546,10 @@ class TushareProvider(BaseDataProvider):
             field for field in fields
             if self.FIELD_SOURCE_MAP.get(field) == "daily_basic"
         ]
+        fina_indicator_fields = [
+            field for field in fields
+            if self.FIELD_SOURCE_MAP.get(field) == "fina_indicator"
+        ]
         static_fields = [
             field for field in fields
             if self.FIELD_SOURCE_MAP.get(field) == "stock_basic"
@@ -1397,6 +1570,13 @@ class TushareProvider(BaseDataProvider):
             )
             if not daily_basic_data.empty:
                 frames.append(daily_basic_data)
+
+        if fina_indicator_fields:
+            fina_indicator_data = self._get_fina_indicator_data(
+                instruments, fina_indicator_fields, start_date, end_date
+            )
+            if not fina_indicator_data.empty:
+                frames.append(fina_indicator_data)
 
         if static_fields:
             static_data = self._get_static_feature_data(

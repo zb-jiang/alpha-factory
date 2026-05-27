@@ -69,6 +69,39 @@ class TushareSQLiteProvider(TushareProvider):
         except Exception:
             # 通用缓存失败不应影响主流程
             pass
+
+    def _drop_legacy_dollar_columns(self, frame: pd.DataFrame) -> pd.DataFrame:
+        """兼容历史脏缓存：如果同时存在 `foo` 和 `$foo`，保留无 `$` 的真实列。"""
+        if frame is None or frame.empty:
+            return frame
+        drop_columns: list[str] = []
+        for column in frame.columns:
+            if isinstance(column, str) and column.startswith("$") and column[1:] in frame.columns:
+                drop_columns.append(column)
+        if drop_columns:
+            frame = frame.drop(columns=drop_columns)
+        return frame
+
+    def _normalize_trade_date_range(
+        self,
+        ts_code: str,
+        start_date: str,
+        end_date: str,
+    ) -> tuple[str, str] | None:
+        latest_trade_date = self._latest_open_trade_date()
+        normalized_start = str(start_date)
+        normalized_end = str(end_date)
+        if latest_trade_date and normalized_end > latest_trade_date:
+            normalized_end = latest_trade_date
+        list_date = self._get_list_date(ts_code)
+        if list_date and normalized_start < list_date:
+            normalized_start = list_date
+        delist_date = self._get_delist_date(ts_code)
+        if delist_date and normalized_end > delist_date:
+            normalized_end = delist_date
+        if normalized_start > normalized_end:
+            return None
+        return normalized_start, normalized_end
         
     def _init_sqlite_db(self):
         conn = self._get_conn()
@@ -89,10 +122,23 @@ class TushareSQLiteProvider(TushareProvider):
             CREATE INDEX IF NOT EXISTS idx_icrm_resolved_date ON index_component_resolve_map(resolved_trade_date);
             CREATE TABLE IF NOT EXISTS stock_daily_price (ts_code TEXT, trade_date TEXT, open REAL, high REAL, low REAL, close REAL, pre_close REAL, change REAL, pct_chg REAL, vol REAL, amount REAL, adj_factor REAL, placeholder_at TEXT, PRIMARY KEY(ts_code, trade_date)) WITHOUT ROWID;
             CREATE TABLE IF NOT EXISTS stock_fundamental (ts_code TEXT, trade_date TEXT, data_type TEXT, features TEXT, placeholder_at TEXT, PRIMARY KEY(ts_code, trade_date, data_type)) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS stock_fundamental_report (
+                ts_code TEXT,
+                ann_date TEXT,
+                end_date TEXT,
+                data_type TEXT,
+                features TEXT,
+                placeholder_at TEXT,
+                PRIMARY KEY(ts_code, ann_date, end_date, data_type)
+            ) WITHOUT ROWID;
             CREATE TABLE IF NOT EXISTS generic_cache (cache_key TEXT PRIMARY KEY, payload BLOB NOT NULL, updated_at TEXT);
         """)
         conn.commit()
-        for col, table in [("placeholder_at", "stock_daily_price"), ("placeholder_at", "stock_fundamental")]:
+        for col, table in [
+            ("placeholder_at", "stock_daily_price"),
+            ("placeholder_at", "stock_fundamental"),
+            ("placeholder_at", "stock_fundamental_report"),
+        ]:
             try:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
             except Exception:
@@ -106,6 +152,18 @@ class TushareSQLiteProvider(TushareProvider):
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sf_placeholder ON stock_fundamental(placeholder_at)")
         except Exception:
             pass
+        try:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sfr_end_date ON stock_fundamental_report(ts_code, data_type, end_date, ann_date)"
+            )
+        except Exception:
+            pass
+        try:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sfr_placeholder ON stock_fundamental_report(placeholder_at)"
+            )
+        except Exception:
+            pass
         conn.commit()
 
     def _expire_stale_placeholders(self, conn: sqlite3.Connection) -> int:
@@ -114,6 +172,7 @@ class TushareSQLiteProvider(TushareProvider):
         for table, pk_cols in [
             ("stock_daily_price", "ts_code, trade_date"),
             ("stock_fundamental", "ts_code, trade_date, data_type"),
+            ("stock_fundamental_report", "ts_code, ann_date, end_date, data_type"),
         ]:
             cur = conn.execute(
                 f"DELETE FROM {table} WHERE placeholder_at IS NOT NULL AND placeholder_at < date('now', ?)",
@@ -137,6 +196,10 @@ class TushareSQLiteProvider(TushareProvider):
         migrated += cur.rowcount
         cur = conn.execute(
             "UPDATE stock_fundamental SET placeholder_at = date('now', '-99 days') WHERE features = '{}' AND placeholder_at IS NULL"
+        )
+        migrated += cur.rowcount
+        cur = conn.execute(
+            "UPDATE stock_fundamental_report SET placeholder_at = date('now', '-99 days') WHERE features = '{}' AND placeholder_at IS NULL"
         )
         migrated += cur.rowcount
         if migrated > 0:
@@ -255,6 +318,45 @@ class TushareSQLiteProvider(TushareProvider):
         """SQLite 口径缺口审计：返回区间内仍未覆盖的交易日范围。"""
         conn = self._get_conn()
 
+        if api_name == "fina_indicator":
+            # 对 fina_indicator，调用方传入的已经是“报告窗口”而不是交易窗口，
+            # 这里不要再次放大查询范围，避免重复扩窗。
+            report_start, report_end = start_date, end_date
+            expected_dates = set(self._expected_fina_indicator_periods(ts_code, report_start, report_end))
+            covered_dates = self._fina_indicator_covered_periods(
+                conn,
+                ts_code,
+                report_start,
+                report_end,
+                required_feature_names=None,
+                include_placeholders=True,
+            )
+            missing_set = expected_dates - covered_dates
+            if not missing_set:
+                return []
+            ordered_dates = sorted(expected_dates)
+            ranges: list[list[str]] = []
+            range_start = None
+            range_end = None
+            for date in ordered_dates:
+                if date not in missing_set:
+                    if range_start is not None and range_end is not None:
+                        ranges.append([range_start, range_end])
+                        range_start = range_end = None
+                    continue
+                if range_start is None:
+                    range_start = range_end = date
+                else:
+                    range_end = date
+            if range_start is not None and range_end is not None:
+                ranges.append([range_start, range_end])
+            return ranges
+
+        normalized_range = self._normalize_trade_date_range(ts_code, start_date, end_date)
+        if normalized_range is None:
+            return []
+        start_date, end_date = normalized_range
+
         valid_dates = {
             row[0]
             for row in conn.execute(
@@ -263,6 +365,7 @@ class TushareSQLiteProvider(TushareProvider):
                 LEFT JOIN stock_basic s ON s.ts_code = '{ts_code}'
                 WHERE c.is_open=1 AND c.cal_date BETWEEN '{start_date}' AND '{end_date}'
                 AND (s.list_date IS NULL OR c.cal_date >= s.list_date)
+                AND (s.delist_date IS NULL OR s.delist_date='' OR c.cal_date <= s.delist_date)
                 """
             ).fetchall()
         }
@@ -275,7 +378,11 @@ class TushareSQLiteProvider(TushareProvider):
                 for row in conn.execute(
                     f"""
                     SELECT trade_date FROM stock_daily_price
-                    WHERE ts_code='{ts_code}' AND open IS NOT NULL AND open != -1 AND placeholder_at IS NULL
+                    WHERE ts_code='{ts_code}' AND (
+                        (open IS NOT NULL AND open != -1 AND placeholder_at IS NULL)
+                        OR open = -1
+                        OR placeholder_at IS NOT NULL
+                    )
                     AND trade_date BETWEEN '{start_date}' AND '{end_date}'
                     """
                 ).fetchall()
@@ -286,7 +393,11 @@ class TushareSQLiteProvider(TushareProvider):
                 for row in conn.execute(
                     f"""
                     SELECT trade_date FROM stock_daily_price
-                    WHERE ts_code='{ts_code}' AND adj_factor IS NOT NULL AND adj_factor != -1 AND placeholder_at IS NULL
+                    WHERE ts_code='{ts_code}' AND (
+                        (adj_factor IS NOT NULL AND adj_factor != -1 AND placeholder_at IS NULL)
+                        OR adj_factor = -1
+                        OR placeholder_at IS NOT NULL
+                    )
                     AND trade_date BETWEEN '{start_date}' AND '{end_date}'
                     """
                 ).fetchall()
@@ -298,7 +409,10 @@ class TushareSQLiteProvider(TushareProvider):
                     f"""
                     SELECT trade_date FROM stock_fundamental
                     WHERE ts_code='{ts_code}' AND data_type='{api_name}'
-                    AND features != '{{}}' AND placeholder_at IS NULL
+                    AND (
+                        (features != '{{}}' AND placeholder_at IS NULL)
+                        OR placeholder_at IS NOT NULL
+                    )
                     AND trade_date BETWEEN '{start_date}' AND '{end_date}'
                     """
                 ).fetchall()
@@ -328,6 +442,68 @@ class TushareSQLiteProvider(TushareProvider):
         if start is not None and end is not None:
             ranges.append([start, end])
         return ranges
+
+    def _expected_fina_indicator_periods(
+        self,
+        ts_code: str,
+        report_start: str,
+        report_end: str,
+    ) -> list[str]:
+        list_date = self._get_list_date(ts_code)
+        start_ts = pd.Timestamp(str(report_start)).normalize()
+        end_ts = pd.Timestamp(str(report_end)).normalize()
+        if list_date:
+            start_ts = max(start_ts, pd.Timestamp(str(list_date)).normalize())
+        quarter_periods = pd.period_range(start=start_ts, end=end_ts, freq="Q")
+        expected: list[str] = []
+        for period in quarter_periods:
+            quarter_end = period.end_time.normalize()
+            if quarter_end < start_ts or quarter_end > end_ts:
+                continue
+            expected.append(quarter_end.strftime("%Y%m%d"))
+        return sorted(set(expected))
+
+    def _fina_indicator_covered_periods(
+        self,
+        conn: sqlite3.Connection,
+        ts_code: str,
+        report_start: str,
+        report_end: str,
+        required_feature_names: list[str] | None = None,
+        include_placeholders: bool = False,
+    ) -> set[str]:
+        rows = conn.execute(
+            """
+            SELECT end_date, ann_date, features, placeholder_at
+            FROM stock_fundamental_report
+            WHERE ts_code=? AND data_type='fina_indicator'
+              AND end_date BETWEEN ? AND ?
+            """,
+            (ts_code, report_start, report_end),
+        ).fetchall()
+        if not rows:
+            return set()
+
+        required_keys = set(required_feature_names or [])
+        covered: set[str] = set()
+        placeholders: set[str] = set()
+        for end_date, ann_date, feature_text, placeholder_at in rows:
+            end_date_text = str(end_date or "")
+            if not end_date_text:
+                continue
+            if placeholder_at is not None:
+                placeholders.add(end_date_text)
+                continue
+            if not str(ann_date or "").strip() or not feature_text:
+                continue
+            try:
+                payload = json.loads(feature_text)
+            except Exception:
+                continue
+            if required_keys and not required_keys.issubset(payload.keys()):
+                continue
+            covered.add(end_date_text)
+        return covered | placeholders if include_placeholders else covered
 
     def _daily_basic_complete_dates(
         self,
@@ -389,29 +565,67 @@ class TushareSQLiteProvider(TushareProvider):
         missing_tasks = {}
         for qlib_code in instruments:
             ts_code = self._convert_to_ts_code(qlib_code)
+            if api_name == 'fina_indicator':
+                # 对 fina_indicator，调用方统一传入报告窗口，避免在 SQLite 层重复扩窗。
+                report_start, report_end = start_date, end_date
+                existing_dates = self._fina_indicator_covered_periods(
+                    conn,
+                    ts_code,
+                    report_start,
+                    report_end,
+                    required_feature_names=required_feature_names,
+                    include_placeholders=True,
+                )
+                expected_dates = set(self._expected_fina_indicator_periods(ts_code, report_start, report_end))
+                missing_dates = sorted(list(expected_dates - existing_dates))
+                if missing_dates:
+                    missing_tasks[ts_code] = (missing_dates[0], report_end)
+                continue
+
+            normalized_range = self._normalize_trade_date_range(ts_code, start_date, end_date)
+            if normalized_range is None:
+                continue
+            normalized_start, normalized_end = normalized_range
             
             # 1. 查询该股票在请求区间内真正应该有的交易日（开市且在上市期间）
             cal_sql = f"""
                 SELECT c.cal_date FROM trade_cal c 
                 LEFT JOIN stock_basic s ON s.ts_code = '{ts_code}'
-                WHERE c.is_open=1 AND c.cal_date BETWEEN '{start_date}' AND '{end_date}'
+                WHERE c.is_open=1 AND c.cal_date BETWEEN '{normalized_start}' AND '{normalized_end}'
                 AND (s.list_date IS NULL OR c.cal_date >= s.list_date)
+                AND (s.delist_date IS NULL OR s.delist_date='' OR c.cal_date <= s.delist_date)
             """
             valid_dates = {row[0] for row in conn.execute(cal_sql).fetchall()}
             
             # 2. 查询数据库中已经存在的日期（排除占位符）
             if api_name == 'daily':
-                check_sql = f"SELECT trade_date FROM stock_daily_price WHERE ts_code='{ts_code}' AND open IS NOT NULL AND open != -1 AND placeholder_at IS NULL AND trade_date BETWEEN '{start_date}' AND '{end_date}'"
+                check_sql = f"""
+                    SELECT trade_date FROM stock_daily_price
+                    WHERE ts_code='{ts_code}' AND (
+                        (open IS NOT NULL AND open != -1 AND placeholder_at IS NULL)
+                        OR open = -1
+                        OR placeholder_at IS NOT NULL
+                    )
+                    AND trade_date BETWEEN '{normalized_start}' AND '{normalized_end}'
+                """
                 existing_dates = {row[0] for row in conn.execute(check_sql).fetchall()}
             elif api_name == 'adj_factor':
-                check_sql = f"SELECT trade_date FROM stock_daily_price WHERE ts_code='{ts_code}' AND adj_factor IS NOT NULL AND adj_factor != -1 AND placeholder_at IS NULL AND trade_date BETWEEN '{start_date}' AND '{end_date}'"
+                check_sql = f"""
+                    SELECT trade_date FROM stock_daily_price
+                    WHERE ts_code='{ts_code}' AND (
+                        (adj_factor IS NOT NULL AND adj_factor != -1 AND placeholder_at IS NULL)
+                        OR adj_factor = -1
+                        OR placeholder_at IS NOT NULL
+                    )
+                    AND trade_date BETWEEN '{normalized_start}' AND '{normalized_end}'
+                """
                 existing_dates = {row[0] for row in conn.execute(check_sql).fetchall()}
             elif api_name == 'daily_basic':
                 existing_dates = self._daily_basic_complete_dates(
                     conn,
                     ts_code,
-                    start_date,
-                    end_date,
+                    normalized_start,
+                    normalized_end,
                     required_feature_names=required_feature_names,
                 )
             else:
@@ -465,6 +679,19 @@ class TushareSQLiteProvider(TushareProvider):
                             ON CONFLICT(ts_code, trade_date, data_type) DO UPDATE SET
                             features=excluded.features, placeholder_at=NULL
                         ''', (row['ts_code'], row['trade_date'], api_name, json.dumps(features)))
+                elif api_name == 'fina_indicator':
+                    for _, row in df.iterrows():
+                        features = row.drop(['ts_code', 'ann_date', 'end_date']).to_dict()
+                        features = {k: (v if pd.notna(v) else None) for k, v in features.items()}
+                        conn.execute(
+                            '''
+                            INSERT INTO stock_fundamental_report (ts_code, ann_date, end_date, data_type, features, placeholder_at)
+                            VALUES (?, ?, ?, ?, ?, NULL)
+                            ON CONFLICT(ts_code, ann_date, end_date, data_type) DO UPDATE SET
+                                features=excluded.features, placeholder_at=NULL
+                            ''',
+                            (row['ts_code'], row['ann_date'], row['end_date'], api_name, json.dumps(features))
+                        )
                 conn.commit()
             
             # 对 Tushare 未返回数据的交易日插入占位符，防止同一次运行中反复拉取。
@@ -524,6 +751,28 @@ class TushareSQLiteProvider(TushareProvider):
                         """,
                         (ts_code, d, api_name),
                     )
+            elif api_name == 'fina_indicator':
+                existing = self._fina_indicator_covered_periods(
+                    conn,
+                    ts_code,
+                    req_start,
+                    req_end,
+                    required_feature_names=required_feature_names,
+                    include_placeholders=False,
+                )
+                expected = set(self._expected_fina_indicator_periods(ts_code, req_start, req_end))
+                still_missing = expected - existing
+                for report_end_date in still_missing:
+                    conn.execute(
+                        """
+                        INSERT INTO stock_fundamental_report (ts_code, ann_date, end_date, data_type, features, placeholder_at)
+                        VALUES (?, '', ?, ?, '{}', date('now'))
+                        ON CONFLICT(ts_code, ann_date, end_date, data_type) DO UPDATE SET
+                            features=CASE WHEN placeholder_at IS NULL THEN features ELSE '{}' END,
+                            placeholder_at=CASE WHEN placeholder_at IS NULL THEN NULL ELSE date('now') END
+                        """,
+                        (ts_code, report_end_date, api_name),
+                    )
             conn.commit()
             
             fetched_count += 1
@@ -545,7 +794,27 @@ class TushareSQLiteProvider(TushareProvider):
             if not raw.empty:
                 # 解析 JSON 字段
                 features_df = pd.json_normalize(raw['features'].apply(json.loads))
+                features_df = self._drop_legacy_dollar_columns(features_df)
                 df = pd.concat([raw[['trade_date']], features_df], axis=1)
+                df['ts_code'] = ts_code
+            else:
+                df = pd.DataFrame()
+        elif api_name == 'fina_indicator':
+            raw = pd.read_sql(
+                f"""
+                SELECT ann_date, end_date, features
+                FROM stock_fundamental_report
+                WHERE ts_code='{ts_code}' AND data_type='{api_name}'
+                  AND end_date BETWEEN '{start_date}' AND '{end_date}'
+                  AND features != '{{}}' AND placeholder_at IS NULL AND ann_date != ''
+                ORDER BY ann_date, end_date
+                """,
+                conn,
+            )
+            if not raw.empty:
+                features_df = pd.json_normalize(raw['features'].apply(json.loads))
+                features_df = self._drop_legacy_dollar_columns(features_df)
+                df = pd.concat([raw[['ann_date', 'end_date']], features_df], axis=1)
                 df['ts_code'] = ts_code
             else:
                 df = pd.DataFrame()

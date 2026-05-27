@@ -35,6 +35,25 @@ FUNDAMENTAL_FIELD_CANDIDATES: dict[str, list[str]] = {
     "pb": ["pb_ratio", "pb"],
     "ps_ttm": ["ps_ratio", "ps_ttm", "ps"],
     "dv_ttm": ["dividend_yield", "dividend_yield_ttm", "dividend_yield_12m", "dv_ttm"],
+    # Stage B seasonal financial fields. Candidate order is pinned according
+    # to actual Ricequant probe results from the target account.
+    "eps": ["earnings_per_share", "basic_earnings_per_share", "eps"],
+    "roe": ["return_on_equity", "return_on_equity_diluted", "roe"],
+    "netprofit_yoy": [
+        "net_profit_growth_ratio_ttm",
+        "net_profit_growth_ratio",
+        "net_profit_growth",
+        "inc_net_profit_year_on_year",
+        "netprofit_yoy",
+    ],
+    "or_yoy": [
+        "operating_revenue_growth_ratio_ttm",
+        "operating_revenue_growth_ratio",
+        "revenue_growth_ratio",
+        "revenue_growth",
+        "inc_revenue_year_on_year",
+        "or_yoy",
+    ],
 }
 INTERNAL_LOOKBACK_DAYS = 80
 BASE_DATA_FIELDS = set(INTERNAL_FIELD_ALIAS.keys()) | {"market_cap", "industry"} | set(FUNDAMENTAL_FIELD_CANDIDATES.keys())

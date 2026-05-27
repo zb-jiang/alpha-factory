@@ -65,8 +65,8 @@ if ENABLE_GET_PRICE_VWAP_FALLBACK:
 # 1) Analysis config (aligned with local analysis_rule.yaml style)
 # -----------------------------
 CONFIG = {
-    "start_date": "2026-01-01",
-    "end_date": "2026-05-15",
+    "start_date": "2020-04-01",
+    "end_date": "2021-03-31",
     "stock_pool": {
         "type": "index_components",  # index_components | all_market | custom
         "index_code": "SH000300",
@@ -107,7 +107,14 @@ CONFIG = {
 # -----------------------------
 # Add/remove factors here. Each item is (factor_name, factor_formula).
 FACTORS = [
-    ("pe_gap_momentum_v1", "pe_ttm * gap_open_ret"),
+    ("eps_rank_v1", "rank(eps)"),
+    ("roe_rank_v1", "rank(roe)"),
+    ("netprofit_yoy_rank_v1", "rank(netprofit_yoy)"),
+    ("or_yoy_rank_v1", "rank(or_yoy)"),
+    ("eps_roe_combo_v1", "rank(eps) * rank(roe)"),
+    ("quality_growth_combo_v1", "rank(roe) * rank(netprofit_yoy)"),
+    ("profit_vs_revenue_gap_v1", "rank(netprofit_yoy - or_yoy)"),
+    ("fundamental_quad_blend_v1", "(rank(eps) + rank(roe) + rank(netprofit_yoy) + rank(or_yoy)) / 4"),
 ]
 
 # -----------------------------

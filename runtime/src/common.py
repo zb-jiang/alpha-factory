@@ -1031,7 +1031,13 @@ def build_dynamic_universe_mask(
     cfg = config or env_config()
     if not _dynamic_index_pool_enabled(cfg):
         return pd.Series(True, index=index, dtype=bool)
-    observation_dates = analysis_observation_dates(index.get_level_values("datetime"), cfg)
+    # Callers already pass observation-level indexes here (e.g. label period
+    # returns or observation-frame factors). Recomputing observation dates from
+    # this sparse index can incorrectly drop the first anchor date.
+    observation_dates = [
+        pd.Timestamp(item).normalize()
+        for item in pd.Index(pd.to_datetime(index.get_level_values("datetime"))).unique().sort_values()
+    ]
     if not observation_dates:
         return pd.Series(False, index=index, dtype=bool)
     component_map = _dynamic_index_components_by_observation_date(cfg, observation_dates)
