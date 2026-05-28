@@ -10,7 +10,7 @@ Step 00: 清理临时输出文件
 - train_windows/ 目录下的窗口归档文件
 - backtest/ 目录下的回测结果文件
 - llm/ 目录下的大模型输出文件
-- _runtime/active_context.json 运行态上下文文件
+- _runtime/ 目录下的所有运行态上下文文件
 
 保留内容:
 - config/ 目录下的配置文件（由用户维护）
@@ -32,12 +32,21 @@ def get_project_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def clean_outputs(dry_run: bool = False) -> dict[str, int]:
+def clean_outputs(
+    dry_run: bool = False,
+    preserve_train_windows: bool = False,
+    preserve_health: bool = False,
+    preserve_backtest_feedback: bool = False,
+) -> dict[str, int]:
     """
     清理 outputs 目录中的临时文件
     
     Args:
         dry_run: 如果为 True，只打印将要删除的内容，不实际删除
+        preserve_train_windows: 如果为 True，则不清理 train_windows 目录（用于多轮迭代间歇）
+        preserve_health: 如果为 True，则保留 health 目录下的文件（用于避免在同一窗口的迭代中重复计算特征状态）
+        preserve_backtest_feedback: 如果为 True，则保留上一轮迭代的关键反馈文件，
+            供下一轮 Step04/05 读取（如 top3_factors.json、skipped_factors.json）
         
     Returns:
         统计信息字典，包含删除的文件和目录数量
@@ -58,12 +67,8 @@ def clean_outputs(dry_run: bool = False) -> dict[str, int]:
     
     # 定义要清理的目录和文件模式
     items_to_clean = [
-        # 健康检查目录
-        ("health/*", "files"),
         # 迭代目录
         ("iter_*", "directories"),
-        # 训练窗口归档
-        ("train_windows", "directories"),
         # 回测结果
         ("backtest/*", "files"),
         # LLM 输出
@@ -71,8 +76,14 @@ def clean_outputs(dry_run: bool = False) -> dict[str, int]:
         # 多 Agent 模式下分析师中间产物
         ("llm/agent_outputs", "directories"),
         # 当前运行态上下文
-        ("_runtime/active_context.json", "files"),
+        ("_runtime/*", "files"),
     ]
+    
+    if not preserve_health:
+        items_to_clean.insert(0, ("health/*", "files"))
+        
+    if not preserve_train_windows:
+        items_to_clean.append(("train_windows", "directories"))
     
     print(f"{'[预览模式] ' if dry_run else ''}开始清理 outputs 目录...")
     print(f"目标目录: {outputs_dir.resolve()}")
@@ -99,6 +110,12 @@ def clean_outputs(dry_run: bool = False) -> dict[str, int]:
             if parent_dir.exists():
                 for item in parent_dir.glob(file_pattern):
                     if item.is_file():
+                        if (
+                            preserve_backtest_feedback
+                            and parent_dir == outputs_dir / "backtest"
+                            and item.name in {"top3_factors.json", "skipped_factors.json"}
+                        ):
+                            continue
                         if dry_run:
                             print(f"[将删除文件] {item.relative_to(project_root)}")
                             stats["files"] += 1

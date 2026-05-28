@@ -18,10 +18,32 @@ import yaml
 _BANNER_WIDTH = 60
 
 
+def _current_banner_scope() -> str:
+    if not RUNTIME_CONTEXT_PATH.exists():
+        return "全局"
+    try:
+        context = read_json(RUNTIME_CONTEXT_PATH)
+    except Exception:
+        return "全局"
+    workflow_state = dict(context.get("workflow_state", {}))
+    window_id = str(workflow_state.get("window_id", "")).strip()
+    stage = str(workflow_state.get("stage", "")).strip()
+    iteration = workflow_state.get("iteration")
+    if not window_id:
+        return "全局"
+    parts = [window_id]
+    if stage:
+        parts.append(stage)
+    if iteration is not None and str(iteration).strip() != "":
+        parts.append(f"iteration_{iteration}")
+    return " - ".join(parts)
+
+
 def log_step_start(step_id: str, description: str = "") -> None:
     label = f"Step {step_id}"
     if description:
         label = f"Step {step_id}: {description}"
+    label = f"{label} ({_current_banner_scope()})"
     print("", flush=True)
     print("=" * _BANNER_WIDTH, flush=True)
     print(f">> {label}", flush=True)
@@ -32,6 +54,7 @@ def log_step_end(step_id: str, summary: str = "", details: list[str] | None = No
     label = f"Step {step_id}"
     if summary:
         label = f"Step {step_id} {summary}"
+    label = f"{label} ({_current_banner_scope()})"
     print("-" * _BANNER_WIDTH, flush=True)
     print(f"<< {label}", flush=True)
     if details:
@@ -110,7 +133,6 @@ CONFIG_OWNERSHIP: dict[str, set[str]] = {
         "llm_base_url",
         "llm_api_key",
         "llm_temperature",
-        "iteration_count",
         "llm_candidate_count",
         "summary_top_k",
         "unstable_top_k",
@@ -125,6 +147,7 @@ CONFIG_OWNERSHIP: dict[str, set[str]] = {
     },
     "analysis_rule": {
         "run_mode",
+        "iteration_count",
         "train_start_date",
         "train_end_date",
         "test_start_date",
@@ -733,10 +756,10 @@ def _base_feature_expr_warmup(expr: str, known_feature_warmups: dict[str, int]) 
             if not node.args:
                 direct_windows += 1
             elif _is_number_constant(node.args[0]):
-                direct_windows += int(node.args[0].value)
+                direct_windows += int(_number_constant_value(node.args[0]))
         elif method_name in {"rolling", "shift"}:
             if node.args and _is_number_constant(node.args[0]):
-                direct_windows += int(node.args[0].value)
+                direct_windows += int(_number_constant_value(node.args[0]))
     return direct_windows + dependency_warmup
 
 
@@ -766,7 +789,7 @@ def estimate_formula_warmup(formula: str) -> int:
             continue
         for arg_index in WINDOW_OPERATOR_ARG_INDEXES.get(node.func.id, []):
             if len(node.args) > arg_index and _is_number_constant(node.args[arg_index]):
-                total_windows += int(node.args[arg_index].value)
+                total_windows += int(_number_constant_value(node.args[arg_index]))
     return total_windows
 
 
@@ -799,8 +822,11 @@ def build_training_windows(config: dict[str, Any] | None = None) -> list[dict[st
             raise ValueError("static_split.discovery_end_date 不能晚于 train_end_date")
         if validation_start < train_start:
             raise ValueError("static_split.validation_start_date 不能早于 train_start_date")
+            
+        # 如果 validation_end 超出了总时间，自动截断到 train_end
         if validation_end > train_end:
-            raise ValueError("static_split.validation_end_date 不能晚于 train_end_date")
+            validation_end = train_end
+            
         if not (discovery_start <= discovery_end < validation_start <= validation_end):
             raise ValueError("static_split 要求 discovery 与 validation 时间区间顺序不重叠")
         return [
@@ -826,10 +852,17 @@ def build_training_windows(config: dict[str, Any] | None = None) -> list[dict[st
         index = 1
         while True:
             discovery_end = cursor + pd.DateOffset(months=discovery_months) - pd.Timedelta(days=1)
+            # 1. 如果连 discovery 都超出了总时间，完全没有空间，直接结束
+            if discovery_end >= train_end:
+                break
+                
             validation_start = discovery_end + pd.Timedelta(days=1)
             validation_end = validation_start + pd.DateOffset(months=validation_months) - pd.Timedelta(days=1)
+            
+            # 2. 如果 validation 阶段超出了总时间，自动截断到 train_end
             if validation_end > train_end:
-                break
+                validation_end = train_end
+                
             windows.append(
                 {
                     "window_id": f"window_{index:02d}",
@@ -842,8 +875,14 @@ def build_training_windows(config: dict[str, Any] | None = None) -> list[dict[st
             )
             if max_windows > 0 and len(windows) >= max_windows:
                 break
+                
+            # 下一次滚动的起点
             cursor = cursor + pd.DateOffset(months=step_months)
             index += 1
+            
+            # 3. 提前预判下一次滚动：如果光游标就已经超过或太接近 train_end，直接结束
+            if cursor >= train_end:
+                break
         if not windows:
             raise ValueError("walk_forward 未生成任何窗口，请检查 train 区间与月份配置")
         return windows
@@ -1647,8 +1686,27 @@ def generation_constraints(feature_cfg: dict[str, Any] | None = None) -> dict[st
     return dict(fp_cfg.get("generation_constraints", {}))
 
 
+def _number_constant_value(node: ast.AST) -> int | float:
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+        return node.value
+    if (
+        isinstance(node, ast.UnaryOp)
+        and isinstance(node.op, (ast.UAdd, ast.USub))
+        and isinstance(node.operand, ast.Constant)
+        and isinstance(node.operand.value, (int, float))
+        and not isinstance(node.operand.value, bool)
+    ):
+        value = node.operand.value
+        return value if isinstance(node.op, ast.UAdd) else -value
+    raise TypeError("node 不是数字常量")
+
+
 def _is_number_constant(node: ast.AST) -> bool:
-    return isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool)
+    try:
+        _number_constant_value(node)
+        return True
+    except TypeError:
+        return False
 
 
 def _formula_call_depth(node: ast.AST) -> int:
@@ -1673,7 +1731,7 @@ def _collect_formula_metadata(
             operator_counts[node.func.id] += 1
             for arg_index in WINDOW_OPERATOR_ARG_INDEXES.get(node.func.id, []):
                 if len(node.args) > arg_index and _is_number_constant(node.args[arg_index]):
-                    windows_used.append(int(node.args[arg_index].value))
+                    windows_used.append(int(_number_constant_value(node.args[arg_index])))
 
     return {
         "feature_names": sorted(feature_counts.keys()),
@@ -1710,6 +1768,56 @@ def _find_forbidden_operator_chains(
     return found
 
 
+OPERATOR_ARITY: dict[str, int] = {
+    "abs": 1,
+    "log": 1,
+    "sqrt": 1,
+    "sign": 1,
+    "rank": 1,
+    "zscore": 1,
+    "minmax": 1,
+    "rolling_mean": 2,
+    "rolling_std": 2,
+    "rolling_sum": 2,
+    "rolling_max": 2,
+    "rolling_min": 2,
+    "delay": 2,
+    "delta": 2,
+    "pct_change": 2,
+    "ema": 2,
+    "ts_rank": 2,
+    "ts_zscore": 2,
+    "rolling_corr": 3,
+    "clip": 3,
+    "winsorize": 3,
+}
+
+
+SERIES_FIRST_OPERATORS: set[str] = {
+    "abs",
+    "log",
+    "sqrt",
+    "sign",
+    "rank",
+    "zscore",
+    "minmax",
+    "rolling_mean",
+    "rolling_std",
+    "rolling_sum",
+    "rolling_max",
+    "rolling_min",
+    "delay",
+    "delta",
+    "pct_change",
+    "ema",
+    "ts_rank",
+    "ts_zscore",
+    "rolling_corr",
+    "clip",
+    "winsorize",
+}
+
+
 def validate_formula(
     formula: str,
     allowed_features: set[str],
@@ -1742,13 +1850,27 @@ def validate_formula(
                 return False, "只允许调用白名单函数"
             if node.func.id not in allowed_operators:
                 return False, f"使用了未授权算子: {node.func.id}"
+            if node.keywords:
+                return False, f"{node.func.id} 不允许使用关键字参数"
+            expected_arity = OPERATOR_ARITY.get(node.func.id)
+            if expected_arity is not None and len(node.args) != expected_arity:
+                return False, f"{node.func.id} 需要 {expected_arity} 个参数，当前传入 {len(node.args)} 个"
+            if node.func.id in SERIES_FIRST_OPERATORS:
+                if not node.args:
+                    return False, f"{node.func.id} 缺少序列参数"
+                first_arg = node.args[0]
+                if _is_number_constant(first_arg):
+                    return False, f"{node.func.id} 的第 1 个参数必须是特征/表达式序列，不能是数字常量"
             for arg_index in WINDOW_OPERATOR_ARG_INDEXES.get(node.func.id, []):
                 if len(node.args) <= arg_index:
                     return False, f"{node.func.id} 缺少窗口参数"
                 window_node = node.args[arg_index]
-                if not _is_number_constant(window_node) or not float(window_node.value).is_integer():
+                if not _is_number_constant(window_node):
                     return False, f"{node.func.id} 的窗口参数必须是整数常量"
-                window_value = int(window_node.value)
+                window_value_raw = _number_constant_value(window_node)
+                if not float(window_value_raw).is_integer():
+                    return False, f"{node.func.id} 的窗口参数必须是整数常量"
+                window_value = int(window_value_raw)
                 if window_value <= 0:
                     return False, f"{node.func.id} 的窗口参数必须大于 0"
                 if allowed_windows and window_value not in allowed_windows:
@@ -2127,7 +2249,9 @@ def _cross_section_corr(
     label: pd.Series,
     method: str = "pearson",
 ) -> float:
-    frame = pd.concat([score.rename("score"), label.rename("label")], axis=1).dropna()
+    import numpy as np
+    frame = pd.concat([score.rename("score"), label.rename("label")], axis=1)
+    frame = frame.replace([np.inf, -np.inf], np.nan).dropna()
     if len(frame) < 2:
         return float("nan")
     x = frame["score"].astype(float)
@@ -2137,7 +2261,12 @@ def _cross_section_corr(
         y = y.rank(method="average")
     if x.nunique(dropna=True) < 2 or y.nunique(dropna=True) < 2:
         return float("nan")
-    return float(x.corr(y))
+    
+    import warnings
+    with np.errstate(invalid='ignore'):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            return float(x.corr(y))
 
 
 def analysis_observation_dates(

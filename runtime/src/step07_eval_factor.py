@@ -67,15 +67,18 @@ def run() -> None:
     formulas = [str(item.get("formula", "")) for item in validated if item.get("formula")]
     warmup_days = estimate_required_warmup(feature_cfg, formulas)
     forward_days = estimate_label_forward_days(config)
+    print("  准备评估环境: 加载原始行情与特征所需字段...", flush=True)
     raw_frame = load_raw_data(
         config,
         list(feature_cfg.get("raw_fields", [])),
         warmup_trading_days=warmup_days,
         forward_trading_days=forward_days,
     )
+    print("  原始数据加载完成，开始构建特征面板...", flush=True)
     feature_frame = build_feature_frame(raw_frame, config, feature_cfg)
     metric_rows: list[dict[str, object]] = []
     factor_input = feature_frame[[item["name"] for item in feature_cfg.get("base_features", [])]]
+    print("  特征面板构建完成，开始构建收益标签...", flush=True)
     label_series = build_label_series(raw_frame, config)
     active_analysis_profile = analysis_profile(config)
     active_label_mode = label_signature(config)
@@ -83,6 +86,7 @@ def run() -> None:
     factor_writer = FactorValueParquetWriter(OUTPUT_DIR / "backtest" / "factor_values.parquet")
     wrote_factor_values = False
     total = len(validated)
+    print(f"  公共准备完成，开始逐因子评估: {total} 个候选因子", flush=True)
     try:
         for i, item in enumerate(validated, start=1):
             factor_name = str(item["factor_name"])

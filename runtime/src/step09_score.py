@@ -34,11 +34,11 @@ def run() -> None:
     
     # 调整权重：提高收益率的权重，降低单纯IC稳定性的权重
     merged["total_score"] = (
-        0.20 * merged["ic_stability_score"]
-        + 0.45 * merged["annual_return_score"]
-        - 0.15 * merged["drawdown_penalty"]
-        - 0.10 * merged["turnover_penalty"]
-        - 0.10 * merged["instability_penalty"]
+        0.35 * merged["ic_stability_score"]
+        + 0.50 * merged["annual_return_score"]
+        - 0.05 * merged["drawdown_penalty"]
+        - 0.05 * merged["turnover_penalty"]
+        - 0.05 * merged["instability_penalty"]
     )
     
     # 对负收益进行严厉惩罚，避免负收益因子被选为Top

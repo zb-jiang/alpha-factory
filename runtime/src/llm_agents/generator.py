@@ -102,8 +102,12 @@ def _parse_factors(raw: dict[str, Any]) -> dict[str, Any]:
             continue
         missing = _REQUIRED_FACTOR_FIELDS - set(item.keys())
         if missing:
-            print(f"生成器产出的因子缺少字段 {missing}: {item.get('factor_name', 'unknown')}")
-            continue
+            # 容错：如果只是缺少 expected_failure_regime，我们给它补上空字符串而不是直接丢弃
+            if missing == {"expected_failure_regime"}:
+                item["expected_failure_regime"] = ""
+            else:
+                print(f"生成器产出的因子缺少字段 {missing}: {item.get('factor_name', 'unknown')}")
+                continue
         if item.get("direction") not in ("higher_better", "lower_better"):
             print(f"生成器产出的因子方向无效: {item.get('factor_name', 'unknown')}")
             continue

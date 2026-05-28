@@ -1,0 +1,22 @@
+# 核心依赖 (Core Dependencies)
+tushare
+pandas
+numpy
+pyarrow
+openai
+pydantic
+PyYAML
+httpx
+
+# 数据分析与可视化 (Data Analysis & Visualization)
+scipy
+scikit-learn
+matplotlib
+jupyterlab
+
+# 环境变量 (Environment Variables)
+python-dotenv
+
+# 因子分析与回测复盘 (Factor Analysis & Backtesting)
+alphalens-reloaded
+streamlit

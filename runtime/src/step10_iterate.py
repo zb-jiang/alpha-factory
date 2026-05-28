@@ -6,6 +6,7 @@ import pandas as pd
 
 from common import (
     OUTPUT_DIR,
+    analysis_rule_config,
     archive_iteration_outputs,
     archive_outputs_bundle,
     build_training_windows,
@@ -65,15 +66,8 @@ def _metric_value(row: dict, *keys: str) -> float:
     return 0.0
 
 
-def _prepare_discovery_window(window: dict[str, str]) -> None:
-    set_runtime_context(_stage_context(window, "discovery", 1))
-    run_step02()
-    run_step03()
-
-
 def _run_discovery_iteration(iteration: int, total_iterations: int, window: dict[str, str], scope: str) -> None:
-    log_phase(f"{window['window_id']} | discovery | 迭代 {iteration}/{total_iterations}")
-    set_runtime_context(_stage_context(window, "discovery", iteration))
+    log_phase(f"{window['window_id']} - discovery - iteration_{iteration}/{total_iterations}")
     run_step04()
     run_step05()
     run_step06()
@@ -130,7 +124,7 @@ def _collect_discovery_passed_factors(scope: str) -> list[dict]:
 
 
 def _run_validation(window: dict[str, str], candidates: list[dict]) -> list[dict]:
-    log_phase(f"{window['window_id']} | validation")
+    log_phase(f"{window['window_id']} - validation")
     set_runtime_context(_stage_context(window, "validation"))
     write_json(
         OUTPUT_DIR / "llm" / "factors_validated.json",
@@ -251,7 +245,8 @@ def run() -> None:
     ensure_runtime_dirs()
     clear_runtime_context()
     config = env_config()
-    if config.get("run_mode") != "train":
+    analysis_config = analysis_rule_config()
+    if analysis_config.get("run_mode") != "train":
         print("================================================================")
         print("警告: 当前 analysis_rule.yaml 中的 run_mode 不是 'train'！")
         print("请先将 analysis_rule.yaml 中的 run_mode 修改为 'train'，然后再运行此脚本。")
@@ -262,8 +257,8 @@ def run() -> None:
 
     run_step00()
     run_step01()
-    windows = build_training_windows(config)
-    iterations = int(config.get("iteration_count", 3))
+    windows = build_training_windows(analysis_config)
+    iterations = int(analysis_config.get("iteration_count", 3))
     write_json(OUTPUT_DIR / "backtest" / "training_windows.json", {"windows": windows})
     print(f"  训练窗口: {len(windows)} 个, 每窗口迭代: {iterations} 次")
 
@@ -271,13 +266,34 @@ def run() -> None:
     try:
         for window in windows:
             log_phase(
-                f"窗口 {window['window_id']} | "
-                f"{window['discovery_start_date']} ~ {window['discovery_end_date']}"
+                f"{window['window_id']} - discovery window "
+                f"({window['discovery_start_date']} ~ {window['discovery_end_date']})"
             )
+            # 在新的训练窗口开始前，做一次全面的环境清理（因为上个窗口的验证阶段会产生新数据）
             clean_outputs(dry_run=False)
             discovery_scope = f"train_windows/{window['window_id']}/discovery"
-            _prepare_discovery_window(window)
+            
+            # 在一个窗口的 discovery 阶段开始时，准备好一次性的上下文和基础数据。
+            # Step02/03 属于窗口级动作，不属于某一轮 iteration。
+            set_runtime_context(_stage_context(window, "discovery"))
+            run_step02()
+            run_step03()
+            
             for iteration in range(1, iterations + 1):
+                # 每次迭代前，只清理会被本轮重建的临时文件。
+                # 保留 health 目录（窗口级一次性产物）以及上一轮回测反馈文件，
+                # 这样 Step04/05 仍能读取 previous_round_top_factors / skipped_factors。
+                clean_outputs(
+                    dry_run=False,
+                    preserve_train_windows=True,
+                    preserve_health=True,
+                    preserve_backtest_feedback=True,
+                )
+                
+                # 更新当前迭代轮数的上下文
+                set_runtime_context(_stage_context(window, "discovery", iteration))
+                
+                # 开始执行核心迭代流程（04~09）
                 _run_discovery_iteration(iteration, iterations, window, discovery_scope)
             candidates = _collect_discovery_passed_factors(discovery_scope)
             if not candidates:
