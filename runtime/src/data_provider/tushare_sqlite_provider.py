@@ -20,12 +20,50 @@ class TushareSQLiteProvider(TushareProvider):
         self.db_path = self.cache_dir / "tushare_cache.db"
         self._conn = None
         self.placeholder_expire_days = int(self.config.get('tushare', {}).get('placeholder_expire_days', 3))
+        self.sqlite_timeout_seconds = max(float(self.ts_config.get("sqlite_timeout_seconds", 30.0) or 30.0), 0.0)
+        self.sqlite_busy_timeout_ms = max(int(self.ts_config.get("sqlite_busy_timeout_ms", 30000) or 30000), 0)
         self._init_sqlite_db()
+
+    def update_config(self, config: Dict[str, Any]) -> None:
+        super().update_config(config)
+        self.ts_config = self.config.get("tushare", {})
+        self.placeholder_expire_days = int(self.config.get('tushare', {}).get('placeholder_expire_days', 3))
+        self.sqlite_timeout_seconds = max(float(self.ts_config.get("sqlite_timeout_seconds", 30.0) or 30.0), 0.0)
+        self.sqlite_busy_timeout_ms = max(int(self.ts_config.get("sqlite_busy_timeout_ms", 30000) or 30000), 0)
+        if self._conn is not None:
+            self._configure_conn(self._conn)
         
+    def _configure_conn(self, conn: sqlite3.Connection) -> sqlite3.Connection:
+        """统一配置 SQLite 连接，降低短时写锁导致的 `database is locked` 概率。"""
+        conn.execute(f"PRAGMA busy_timeout = {self.sqlite_busy_timeout_ms}")
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except Exception:
+            pass
+        try:
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except Exception:
+            pass
+        return conn
+
     def _get_conn(self):
         if self._conn is None:
-            self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self._conn = sqlite3.connect(
+                self.db_path,
+                check_same_thread=False,
+                timeout=self.sqlite_timeout_seconds,
+            )
+            self._conn = self._configure_conn(self._conn)
         return self._conn
+
+    def close(self) -> None:
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            finally:
+                self._conn = None
 
     def _load_from_cache(self, cache_key: str) -> Optional[pd.DataFrame]:
         """从 SQLite 通用缓存读取 DataFrame（替代父类 parquet 通用缓存）。"""
@@ -131,6 +169,13 @@ class TushareSQLiteProvider(TushareProvider):
                 placeholder_at TEXT,
                 PRIMARY KEY(ts_code, ann_date, end_date, data_type)
             ) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS market_daily_indicator (
+                trade_date TEXT,
+                data_type TEXT,
+                features TEXT,
+                placeholder_at TEXT,
+                PRIMARY KEY(trade_date, data_type)
+            ) WITHOUT ROWID;
             CREATE TABLE IF NOT EXISTS generic_cache (cache_key TEXT PRIMARY KEY, payload BLOB NOT NULL, updated_at TEXT);
         """)
         conn.commit()
@@ -138,6 +183,7 @@ class TushareSQLiteProvider(TushareProvider):
             ("placeholder_at", "stock_daily_price"),
             ("placeholder_at", "stock_fundamental"),
             ("placeholder_at", "stock_fundamental_report"),
+            ("placeholder_at", "market_daily_indicator"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
@@ -164,6 +210,12 @@ class TushareSQLiteProvider(TushareProvider):
             )
         except Exception:
             pass
+        try:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_mdi_placeholder ON market_daily_indicator(data_type, placeholder_at)"
+            )
+        except Exception:
+            pass
         conn.commit()
 
     def _expire_stale_placeholders(self, conn: sqlite3.Connection) -> int:
@@ -173,6 +225,7 @@ class TushareSQLiteProvider(TushareProvider):
             ("stock_daily_price", "ts_code, trade_date"),
             ("stock_fundamental", "ts_code, trade_date, data_type"),
             ("stock_fundamental_report", "ts_code, ann_date, end_date, data_type"),
+            ("market_daily_indicator", "trade_date, data_type"),
         ]:
             cur = conn.execute(
                 f"DELETE FROM {table} WHERE placeholder_at IS NOT NULL AND placeholder_at < date('now', ?)",
@@ -200,6 +253,10 @@ class TushareSQLiteProvider(TushareProvider):
         migrated += cur.rowcount
         cur = conn.execute(
             "UPDATE stock_fundamental_report SET placeholder_at = date('now', '-99 days') WHERE features = '{}' AND placeholder_at IS NULL"
+        )
+        migrated += cur.rowcount
+        cur = conn.execute(
+            "UPDATE market_daily_indicator SET placeholder_at = date('now', '-99 days') WHERE features = '{}' AND placeholder_at IS NULL"
         )
         migrated += cur.rowcount
         if migrated > 0:
@@ -539,6 +596,158 @@ class TushareSQLiteProvider(TushareProvider):
                 continue
             complete_dates.add(str(trade_date))
         return complete_dates
+
+    def _normalize_market_date_range(
+        self,
+        start_date: str,
+        end_date: str,
+    ) -> tuple[str, str] | None:
+        latest_trade_date = self._latest_open_trade_date()
+        normalized_start = str(start_date)
+        normalized_end = str(end_date)
+        if latest_trade_date and normalized_end > latest_trade_date:
+            normalized_end = latest_trade_date
+        if normalized_start > normalized_end:
+            return None
+        return normalized_start, normalized_end
+
+    def _market_indicator_complete_dates(
+        self,
+        conn: sqlite3.Connection,
+        data_type: str,
+        start_date: str,
+        end_date: str,
+        include_placeholders: bool = True,
+    ) -> set[str]:
+        rows = conn.execute(
+            """
+            SELECT trade_date, features, placeholder_at
+            FROM market_daily_indicator
+            WHERE data_type=? AND trade_date BETWEEN ? AND ?
+            """,
+            (data_type, start_date, end_date),
+        ).fetchall()
+        if not rows:
+            return set()
+        complete_dates: set[str] = set()
+        for trade_date, feature_text, placeholder_at in rows:
+            trade_date_text = str(trade_date or "")
+            if not trade_date_text:
+                continue
+            if placeholder_at is not None:
+                if include_placeholders:
+                    complete_dates.add(trade_date_text)
+                continue
+            if feature_text and str(feature_text).strip() and feature_text != "{}":
+                complete_dates.add(trade_date_text)
+        return complete_dates
+
+    def _load_market_indicator_from_sqlite(
+        self,
+        data_type: str,
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame:
+        conn = self._get_conn()
+        raw = pd.read_sql_query(
+            """
+            SELECT trade_date, features
+            FROM market_daily_indicator
+            WHERE data_type=? AND trade_date BETWEEN ? AND ?
+              AND features != '{}' AND placeholder_at IS NULL
+            ORDER BY trade_date
+            """,
+            conn,
+            params=(data_type, start_date, end_date),
+        )
+        if raw.empty:
+            return pd.DataFrame()
+        features_df = pd.json_normalize(raw["features"].apply(json.loads))
+        frame = pd.concat([raw[["trade_date"]], features_df], axis=1)
+        frame["trade_date"] = frame["trade_date"].astype(str)
+        return frame
+
+    def _ensure_market_indicator_cached(
+        self,
+        data_type: str,
+        start_date: str,
+        end_date: str,
+    ) -> None:
+        normalized_range = self._normalize_market_date_range(start_date, end_date)
+        if normalized_range is None:
+            return
+        normalized_start, normalized_end = normalized_range
+        self._sync_trade_cal(normalized_start, normalized_end)
+        conn = self._get_conn()
+        self._migrate_legacy_placeholders(conn)
+        self._expire_stale_placeholders(conn)
+
+        valid_dates = {
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT cal_date
+                FROM trade_cal
+                WHERE exchange='SSE' AND is_open=1 AND cal_date BETWEEN ? AND ?
+                """,
+                (normalized_start, normalized_end),
+            ).fetchall()
+        }
+        if not valid_dates:
+            return
+        existing_dates = self._market_indicator_complete_dates(
+            conn,
+            data_type,
+            normalized_start,
+            normalized_end,
+            include_placeholders=True,
+        )
+        missing_dates = sorted(valid_dates - existing_dates)
+        if not missing_dates:
+            return
+
+        req_start, req_end = missing_dates[0], missing_dates[-1]
+        print(
+            f"  [SQLite] 从 Tushare 获取缺失的 {data_type} 市场级数据: {req_start} -> {req_end}",
+            flush=True,
+        )
+        df = self._fetch_market_indicator_frame(data_type, req_start, req_end)
+        if df is not None and not df.empty:
+            df = self._normalize_market_indicator_frame(data_type, df)
+            for _, row in df.iterrows():
+                features = row.drop(labels=["trade_date"]).to_dict()
+                features = {k: (v if pd.notna(v) else None) for k, v in features.items()}
+                conn.execute(
+                    """
+                    INSERT INTO market_daily_indicator (trade_date, data_type, features, placeholder_at)
+                    VALUES (?, ?, ?, NULL)
+                    ON CONFLICT(trade_date, data_type) DO UPDATE SET
+                        features=excluded.features,
+                        placeholder_at=NULL
+                    """,
+                    (str(row["trade_date"]), data_type, json.dumps(features)),
+                )
+            conn.commit()
+
+        existing_after_fetch = self._market_indicator_complete_dates(
+            conn,
+            data_type,
+            req_start,
+            req_end,
+            include_placeholders=False,
+        )
+        for trade_date in sorted(set(missing_dates) - existing_after_fetch):
+            conn.execute(
+                """
+                INSERT INTO market_daily_indicator (trade_date, data_type, features, placeholder_at)
+                VALUES (?, ?, '{}', date('now'))
+                ON CONFLICT(trade_date, data_type) DO UPDATE SET
+                    features=CASE WHEN placeholder_at IS NULL THEN features ELSE '{}' END,
+                    placeholder_at=CASE WHEN placeholder_at IS NULL THEN NULL ELSE date('now') END
+                """,
+                (trade_date, data_type),
+            )
+        conn.commit()
 
     def _ensure_data_cached(
         self,
@@ -1026,3 +1235,51 @@ class TushareSQLiteProvider(TushareProvider):
                 _cache_snapshot(latest_open, fetched_codes)
             return fetched_codes
         return []
+
+    def get_market_daily_indicators(
+        self,
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame:
+        self.initialize()
+        start_text = str(start_date).replace("-", "")
+        end_text = str(end_date).replace("-", "")
+        normalized_range = self._normalize_market_date_range(start_text, end_text)
+        if normalized_range is None:
+            return pd.DataFrame()
+        normalized_start, normalized_end = normalized_range
+
+        for data_type in ("moneyflow_hsgt", "margin"):
+            self._ensure_market_indicator_cached(data_type, normalized_start, normalized_end)
+
+        northbound = self._load_market_indicator_from_sqlite(
+            "moneyflow_hsgt", normalized_start, normalized_end
+        )
+        margin = self._load_market_indicator_from_sqlite(
+            "margin", normalized_start, normalized_end
+        )
+
+        trading_dates = self.get_trading_dates(
+            f"{normalized_start[:4]}-{normalized_start[4:6]}-{normalized_start[6:]}",
+            f"{normalized_end[:4]}-{normalized_end[4:6]}-{normalized_end[6:]}",
+        )
+        if not trading_dates:
+            return pd.DataFrame()
+
+        frames: list[pd.DataFrame] = []
+        for frame in (northbound, margin):
+            if frame is None or frame.empty:
+                continue
+            item = frame.copy()
+            item["trade_date"] = pd.to_datetime(item["trade_date"], errors="coerce")
+            item = item.dropna(subset=["trade_date"]).rename(columns={"trade_date": "datetime"})
+            for column in item.columns:
+                if column == "datetime":
+                    continue
+                item[column] = pd.to_numeric(item[column], errors="coerce")
+            frames.append(item.set_index("datetime").sort_index())
+
+        merged = pd.DataFrame(index=pd.Index(pd.to_datetime(trading_dates), name="datetime"))
+        for frame in frames:
+            merged = merged.join(frame, how="left")
+        return merged.sort_index()

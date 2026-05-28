@@ -453,6 +453,12 @@ def set_runtime_context(payload: dict[str, Any]) -> None:
 def clear_runtime_context() -> None:
     if RUNTIME_CONTEXT_PATH.exists():
         RUNTIME_CONTEXT_PATH.unlink()
+    try:
+        from data_provider import ProviderFactory
+
+        ProviderFactory.reset_active_provider()
+    except Exception:
+        pass
 
 
 def _flatten_config_keys(payload: dict[str, Any], prefix: str = "") -> set[str]:

@@ -20,6 +20,16 @@ ANALYST_AGENT_IDS = [
     "fundamental_value_growth",
 ]
 
+ANALYST_DISPLAY_NAMES = {
+    "trend_momentum": "分析师-趋势动量",
+    "reversal_mean_reversion": "分析师-反转均值回复",
+    "volatility_risk": "分析师-波动风险",
+    "volume_price": "分析师-量价关系",
+    "microstructure": "分析师-微观结构",
+    "chip_distribution": "分析师-筹码分布",
+    "fundamental_value_growth": "分析师-基本面价值成长",
+}
+
 # ── System Prompts ──────────────────────────────────────────────────────────
 
 _TREND_MOMENTUM_SYSTEM = """你是趋势动量分析专家。你精通 A 股市场的价格趋势分析、动量策略和趋势跟踪。
@@ -170,6 +180,7 @@ _FUNDAMENTAL_VALUE_GROWTH_SYSTEM = """你是基本面风格与价值成长轮动
 - 其中 pe_ttm / pb 越低通常越偏价值，dv_ttm 越高通常越偏红利，ps_ttm 越高通常越偏高成长预期
 - eps、roe、netprofit_yoy、or_yoy 可以用于判断真实盈利能力与财务成长，但它们只能按公告日之后生效，你在解释时要默认这些特征已经过 as-of 对齐，严禁把公告前不可见的信息当作已知
 - 生成建议时可以结合 market_cap、turnover、ret_20d 等特征做风格过滤或风险约束，但主逻辑应围绕价值/成长风格展开
+- 如果 market_context 中出现 northbound、leverage、capital_structure 等资金面标签，你需要把它们用于判断价值/红利/成长风格当前是更偏进攻还是更偏防守，并指出外资与杠杆资金是否一致
 
 分析时重点关注以下特征：pe_ttm, pb, ps_ttm, dv_ttm, eps, roe, netprofit_yoy, or_yoy, market_cap, turnover, ret_20d, ret_60d, realized_vol_20d
 
@@ -288,6 +299,7 @@ def run_analyst_team(env_cfg: dict[str, Any], context: dict[str, Any]) -> list[d
             temperature=float(cfg.get("temperature", 0.2)),
             timeout_seconds=float(cfg.get("timeout_seconds", 60.0)),
             max_retries=int(cfg.get("max_retries", 2)),
+            request_name=ANALYST_DISPLAY_NAMES.get(agent_id, f"分析师-{agent_id}"),
         )
         return run_analyst(agent_id, agent_config, context)
 

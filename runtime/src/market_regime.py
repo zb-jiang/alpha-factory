@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 
@@ -73,6 +74,60 @@ def _classify_breadth(value: float | None, risk_on: float, risk_off: float) -> s
     return "分化"
 
 
+def _classify_capital_flow(value: float | None, high: float, low: float) -> str:
+    if value is None:
+        return "未知"
+    if value >= high:
+        return "偏流入"
+    if value <= low:
+        return "偏流出"
+    return "中性"
+
+
+def _classify_leverage(flow_rank: float | None, balance_rank: float | None, high: float, low: float) -> str:
+    samples = [value for value in [flow_rank, balance_rank] if value is not None]
+    if not samples:
+        return "未知"
+    composite = float(sum(samples) / len(samples))
+    if composite >= high:
+        return "升温"
+    if composite <= low:
+        return "降温"
+    return "平稳"
+
+
+def _classify_capital_structure(northbound_label: str, leverage_label: str) -> str:
+    north_in = northbound_label == "偏流入"
+    north_out = northbound_label == "偏流出"
+    leverage_hot = leverage_label == "升温"
+    leverage_cold = leverage_label == "降温"
+    if north_in and leverage_hot:
+        return "同向进攻"
+    if north_out and leverage_cold:
+        return "同向防守"
+    if north_out and leverage_hot:
+        return "外资谨慎/杠杆激进"
+    if north_in and leverage_cold:
+        return "外资积极/杠杆收缩"
+    if northbound_label == "未知" or leverage_label == "未知":
+        return "未知"
+    return "中性"
+
+
+def _classify_alignment(value: float | None) -> str:
+    if value is None:
+        return "未知"
+    if value > 0.2:
+        return "同向"
+    if value < -0.2:
+        return "背离"
+    return "中性"
+
+
+def _rolling_min_periods(window: int, fallback: int) -> int:
+    return max(1, min(window, fallback, max(3, window // 2)))
+
+
 def _build_mapping_explain(
     trend_value: float | None,
     vol_rank_value: float | None,
@@ -80,6 +135,10 @@ def _build_mapping_explain(
     dispersion_rank_value: float | None,
     breadth_value: float | None,
     style_value: float | None,
+    northbound_rank_value: float | None,
+    margin_flow_rank_value: float | None,
+    margin_balance_rank_value: float | None,
+    capital_structure_label: str,
     labels: dict[str, str],
     thresholds: dict[str, Any],
 ) -> dict[str, Any]:
@@ -89,6 +148,10 @@ def _build_mapping_explain(
     rank_low = _cfg_float(thresholds, "rank_low", 0.33)
     breadth_on = _cfg_float(thresholds, "breadth_risk_on", 0.62)
     breadth_off = _cfg_float(thresholds, "breadth_risk_off", 0.38)
+    north_in_high = _cfg_float(thresholds, "northbound_inflow_high", rank_high)
+    north_out_low = _cfg_float(thresholds, "northbound_outflow_low", rank_low)
+    leverage_hot = _cfg_float(thresholds, "leverage_hot_high", rank_high)
+    leverage_cold = _cfg_float(thresholds, "leverage_cold_low", rank_low)
     return {
         "trend": {
             "value": trend_value,
@@ -120,6 +183,24 @@ def _build_mapping_explain(
             "rule": ">0 大盘占优, <0 小盘占优",
             "label": labels.get("style", "未知"),
         },
+        "northbound": {
+            "value": northbound_rank_value,
+            "rule": f">={north_in_high} 偏流入, <={north_out_low} 偏流出, 其余中性",
+            "label": labels.get("northbound", "未知"),
+        },
+        "leverage": {
+            "value": {
+                "flow_rank": margin_flow_rank_value,
+                "balance_rank": margin_balance_rank_value,
+            },
+            "rule": f"融资净流/融资余额综合分位 >={leverage_hot} 升温, <={leverage_cold} 降温, 其余平稳",
+            "label": labels.get("leverage", "未知"),
+        },
+        "capital_structure": {
+            "value": capital_structure_label,
+            "rule": "结合北向资金方向与杠杆情绪共同判定资金结构",
+            "label": labels.get("capital_structure", "未知"),
+        },
     }
 
 
@@ -127,6 +208,7 @@ def compute_daily_market(
     raw_frame: pd.DataFrame,
     fields: dict[str, str],
     windows: dict[str, Any],
+    external_market_data: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     close_col = str(fields.get("close", "close"))
     turnover_col = str(fields.get("turnover", "turnover"))
@@ -140,6 +222,9 @@ def compute_daily_market(
     min_size_sample = _cfg_int(windows, "min_size_style_sample", 20)
     min_roll = _cfg_int(windows, "min_rolling_periods", max(10, trend_days // 2))
     min_rank = _cfg_int(windows, "min_rank_periods", max(20, rank_days // 5))
+    northbound_days = _cfg_int(windows, "northbound_days", 5)
+    margin_days = _cfg_int(windows, "margin_days", 5)
+    flow_rank_days = _cfg_int(windows, "flow_rank_lookback_days", rank_days)
 
     frame = raw_frame.sort_index().copy()
     frame["ret_1d"] = frame[close_col].groupby(level="instrument").pct_change(fill_method=None)
@@ -165,7 +250,10 @@ def compute_daily_market(
             return float("nan")
         return float(large.mean() - small.mean())
 
-    daily_market["size_style_spread"] = frame.groupby("datetime", group_keys=False).apply(_size_style_return)
+    daily_market["size_style_spread"] = (
+        frame.groupby("datetime", group_keys=False)[[market_cap_col, "ret_1d"]]
+        .apply(_size_style_return)
+    )
     daily_market["trend_20d"] = daily_market["market_return"].rolling(trend_days, min_periods=min_roll).sum()
     daily_market["volatility_20d"] = daily_market["market_return"].rolling(vol_days, min_periods=min_roll).std()
     daily_market["dispersion_20d"] = daily_market["cross_dispersion"].rolling(disp_days, min_periods=min_roll).mean()
@@ -173,6 +261,75 @@ def compute_daily_market(
     daily_market["amount_rank_250d"] = _rolling_last_rank_percentile(daily_market["market_amount"], rank_days, min_rank)
     daily_market["vol_rank_250d"] = _rolling_last_rank_percentile(daily_market["volatility_20d"], rank_days, min_rank)
     daily_market["dispersion_rank_250d"] = _rolling_last_rank_percentile(daily_market["dispersion_20d"], rank_days, min_rank)
+
+    market_columns = [
+        "ggt_ss",
+        "ggt_sz",
+        "hgt",
+        "sgt",
+        "north_money",
+        "south_money",
+        "rzye",
+        "rzmre",
+        "rzche",
+        "rqye",
+        "rqmcl",
+        "rzrqye",
+        "rqyl",
+    ]
+    if external_market_data is not None and not external_market_data.empty:
+        external = external_market_data.copy()
+        external.index = pd.to_datetime(external.index)
+        for column in market_columns:
+            if column not in external.columns:
+                external[column] = np.nan
+            external[column] = pd.to_numeric(external[column], errors="coerce")
+        daily_market = daily_market.join(external[market_columns], how="left")
+    else:
+        for column in market_columns:
+            daily_market[column] = np.nan
+
+    north_min_periods = _rolling_min_periods(northbound_days, min_roll)
+    margin_min_periods = _rolling_min_periods(margin_days, min_roll)
+    flow_min_rank = max(1, min(flow_rank_days, max(min_rank, flow_rank_days // 5)))
+    daily_market["northbound_flow_window"] = daily_market["north_money"].rolling(
+        northbound_days,
+        min_periods=north_min_periods,
+    ).sum()
+    daily_market["northbound_flow_rank"] = _rolling_last_rank_percentile(
+        daily_market["northbound_flow_window"],
+        flow_rank_days,
+        flow_min_rank,
+    )
+    daily_market["northbound_inflow_ratio"] = (
+        (daily_market["north_money"] > 0)
+        .astype(float)
+        .rolling(northbound_days, min_periods=north_min_periods)
+        .mean()
+    )
+    trend_sign = np.sign(daily_market["trend_20d"])
+    north_sign = np.sign(daily_market["northbound_flow_window"])
+    daily_market["northbound_trend_alignment"] = north_sign * trend_sign
+
+    daily_market["margin_net_flow"] = daily_market["rzmre"] - daily_market["rzche"]
+    daily_market["margin_flow_window"] = daily_market["margin_net_flow"].rolling(
+        margin_days,
+        min_periods=margin_min_periods,
+    ).sum()
+    daily_market["margin_flow_rank"] = _rolling_last_rank_percentile(
+        daily_market["margin_flow_window"],
+        flow_rank_days,
+        flow_min_rank,
+    )
+    daily_market["margin_balance_rank"] = _rolling_last_rank_percentile(
+        daily_market["rzye"],
+        flow_rank_days,
+        flow_min_rank,
+    )
+    daily_market["short_balance_change"] = daily_market["rqye"].pct_change(
+        periods=margin_days,
+        fill_method=None,
+    )
     return daily_market.sort_index()
 
 
@@ -189,6 +346,10 @@ def build_window_context(
     rank_low = _cfg_float(thresholds, "rank_low", 0.33)
     breadth_on = _cfg_float(thresholds, "breadth_risk_on", 0.62)
     breadth_off = _cfg_float(thresholds, "breadth_risk_off", 0.38)
+    north_in_high = _cfg_float(thresholds, "northbound_inflow_high", rank_high)
+    north_out_low = _cfg_float(thresholds, "northbound_outflow_low", rank_low)
+    leverage_hot = _cfg_float(thresholds, "leverage_hot_high", rank_high)
+    leverage_cold = _cfg_float(thresholds, "leverage_cold_low", rank_low)
 
     trend_mean = _safe_float(window_frame["trend_20d"].mean())
     vol_rank_mean = _safe_float(window_frame["vol_rank_250d"].mean())
@@ -196,6 +357,12 @@ def build_window_context(
     dispersion_rank_mean = _safe_float(window_frame["dispersion_rank_250d"].mean())
     breadth_mean = _safe_float(window_frame["breadth_up_ratio"].mean())
     style_mean = _safe_float(window_frame["size_style_spread"].mean())
+    northbound_rank_mean = _safe_float(window_frame["northbound_flow_rank"].mean())
+    northbound_inflow_ratio_mean = _safe_float(window_frame["northbound_inflow_ratio"].mean())
+    northbound_alignment_mean = _safe_float(window_frame["northbound_trend_alignment"].mean())
+    margin_flow_rank_mean = _safe_float(window_frame["margin_flow_rank"].mean())
+    margin_balance_rank_mean = _safe_float(window_frame["margin_balance_rank"].mean())
+    short_balance_change_mean = _safe_float(window_frame["short_balance_change"].mean())
 
     style_label = "未知" if style_mean is None else ("大盘占优" if style_mean > 0 else "小盘占优")
     labels = {
@@ -205,14 +372,21 @@ def build_window_context(
         "dispersion": _classify_rank_level(dispersion_rank_mean, rank_high, rank_low),
         "breadth": _classify_breadth(breadth_mean, breadth_on, breadth_off),
         "style": style_label,
+        "northbound": _classify_capital_flow(northbound_rank_mean, north_in_high, north_out_low),
+        "leverage": _classify_leverage(margin_flow_rank_mean, margin_balance_rank_mean, leverage_hot, leverage_cold),
     }
+    labels["capital_structure"] = _classify_capital_structure(labels["northbound"], labels["leverage"])
+    north_alignment_label = _classify_alignment(northbound_alignment_mean)
     summary_text = (
         f"当前市场状态：趋势{labels['trend']}（20日累计收益均值 {_fmt_pct(trend_mean)}），"
         f"波动{labels['volatility']}（分位 {_fmt_num(vol_rank_mean)}），"
         f"成交活跃度{labels['liquidity']}（分位 {_fmt_num(amount_rank_mean)}），"
         f"个股分化{labels['dispersion']}（分位 {_fmt_num(dispersion_rank_mean)}），"
         f"市场广度{labels['breadth']}（上涨占比均值 {_fmt_pct(breadth_mean)}），"
-        f"风格偏{labels['style']}（大小盘收益差均值 {_fmt_pct(style_mean, 3)}）。"
+        f"风格偏{labels['style']}（大小盘收益差均值 {_fmt_pct(style_mean, 3)}），"
+        f"北向资金{labels['northbound']}（强度分位 {_fmt_num(northbound_rank_mean)}，净流入日占比 {_fmt_pct(northbound_inflow_ratio_mean)}，与趋势{north_alignment_label}），"
+        f"两融情绪{labels['leverage']}（融资净流分位 {_fmt_num(margin_flow_rank_mean)}，融资余额分位 {_fmt_num(margin_balance_rank_mean)}，融券余额变化 {_fmt_pct(short_balance_change_mean)}），"
+        f"资金结构{labels['capital_structure']}。"
     )
     return {
         "summary_text": summary_text,
@@ -224,6 +398,9 @@ def build_window_context(
             "dispersion": f"{labels['dispersion']}（依据 dispersion_rank_250d_mean 的历史分位映射）",
             "breadth": f"{labels['breadth']}（依据 breadth_up_ratio_mean 与广度阈值映射）",
             "style": f"{labels['style']}（依据 size_style_spread_mean 正负映射）",
+            "northbound": f"{labels['northbound']}（依据 northbound_flow_rank_mean 的历史分位映射）",
+            "leverage": f"{labels['leverage']}（综合融资净流与融资余额分位映射）",
+            "capital_structure": f"{labels['capital_structure']}（结合北向资金方向与杠杆情绪共同判断）",
         },
         "mapping_explain": _build_mapping_explain(
             trend_mean,
@@ -232,6 +409,10 @@ def build_window_context(
             dispersion_rank_mean,
             breadth_mean,
             style_mean,
+            northbound_rank_mean,
+            margin_flow_rank_mean,
+            margin_balance_rank_mean,
+            labels["capital_structure"],
             labels,
             thresholds,
         ),
@@ -243,6 +424,12 @@ def build_window_context(
             "dispersion_rank_250d_mean": dispersion_rank_mean,
             "breadth_up_ratio_mean": breadth_mean,
             "size_style_spread_mean": style_mean,
+            "northbound_flow_rank_mean": northbound_rank_mean,
+            "northbound_inflow_ratio_mean": northbound_inflow_ratio_mean,
+            "northbound_trend_alignment_mean": northbound_alignment_mean,
+            "margin_flow_rank_mean": margin_flow_rank_mean,
+            "margin_balance_rank_mean": margin_balance_rank_mean,
+            "short_balance_change_mean": short_balance_change_mean,
         },
     }
 

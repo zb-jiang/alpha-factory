@@ -48,6 +48,7 @@ class TestBuildChiefMessages:
         assert len(messages) == 2
         assert messages[0]["role"] == "system"
         assert "首席量化分析师" in messages[0]["content"]
+        assert "northbound" in messages[0]["content"]
         assert messages[1]["role"] == "user"
         assert "trend_momentum" in messages[1]["content"]
         assert "10" in messages[1]["content"]

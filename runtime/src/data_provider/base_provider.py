@@ -18,6 +18,20 @@ class BaseDataProvider(ABC):
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self._initialized = False
+
+    def update_config(self, config: Dict[str, Any]) -> None:
+        """更新运行时配置。
+
+        默认实现只覆盖 `self.config`，具体 provider 可按需同步内部派生参数。
+        """
+        self.config = config
+
+    def close(self) -> None:
+        """释放资源。
+
+        默认实现为空，具体 provider 可按需关闭数据库连接、网络连接等。
+        """
+        return
     
     @abstractmethod
     def initialize(self) -> None:
@@ -100,6 +114,18 @@ class BaseDataProvider(ABC):
             DataFrame，格式与 Qlib D.features() 一致
         """
         pass
+
+    def get_market_daily_indicators(
+        self,
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame:
+        """获取市场级日度指标。
+
+        典型用途是北向资金、融资融券等“按交易日只有一条或少量聚合记录”的
+        市场状态序列。默认实现为不支持，具体数据源可按需覆盖。
+        """
+        raise NotImplementedError("当前数据提供者未实现市场级日度指标接口")
     
     def is_initialized(self) -> bool:
         """检查是否已初始化"""

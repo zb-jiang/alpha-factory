@@ -20,6 +20,22 @@ from common import (
     read_json,
 )
 
+JQ_VALUATION_FIELD_MAP: dict[str, tuple[str, list[str]]] = {
+    "turnover": ("valuation.turnover_ratio", ["turnover_ratio", "turnover"]),
+    "market_cap": ("valuation.market_cap", ["market_cap", "total_market_cap", "total_mv"]),
+    "pe_ttm": ("valuation.pe_ratio", ["pe_ratio", "pe_ttm", "pe"]),
+    "pb": ("valuation.pb_ratio", ["pb_ratio", "pb"]),
+    "ps_ttm": ("valuation.ps_ratio", ["ps_ratio", "ps_ttm", "ps"]),
+    "dv_ttm": ("valuation.dividend_ratio", ["dividend_ratio", "dividend_yield", "dv_ttm"]),
+}
+
+JQ_REPORT_FIELD_MAP: dict[str, tuple[str, list[str]]] = {
+    "eps": ("indicator.eps", ["eps", "earnings_per_share"]),
+    "roe": ("indicator.roe", ["roe", "return_on_equity"]),
+    "netprofit_yoy": ("indicator.inc_net_profit_year_on_year", ["inc_net_profit_year_on_year", "netprofit_yoy"]),
+    "or_yoy": ("indicator.inc_revenue_year_on_year", ["inc_revenue_year_on_year", "or_yoy"]),
+}
+
 
 def _find_factor(factor_name: str) -> dict[str, Any] | None:
     for filename in ["top3_factors.json", "factors_validated.json", "cross_window_top3_factors.json"]:
@@ -291,6 +307,125 @@ def _translate_expr_to_single_stock(expr: str) -> str:
     return expr
 
 
+def _detect_joinquant_field_requirements(sorted_feature_names: list[str]) -> tuple[list[str], list[str]]:
+    used_names = set(sorted_feature_names)
+    valuation_fields = [name for name in JQ_VALUATION_FIELD_MAP if name in used_names]
+    report_fields = [name for name in JQ_REPORT_FIELD_MAP if name in used_names]
+    return valuation_fields, report_fields
+
+
+def _generate_joinquant_fundamental_helper_code() -> str:
+    return textwrap.dedent("""\
+def _normalize_fundamental_continuous(df):
+    if df is None or len(df) == 0:
+        return pd.DataFrame()
+    frame = df.copy()
+    if isinstance(frame.columns, pd.MultiIndex):
+        frame.columns = [c[0] if isinstance(c, tuple) else c for c in frame.columns]
+    if 'day' in frame.columns:
+        frame = frame.rename(columns={'day': 'date'})
+    elif 'datetime' in frame.columns:
+        frame = frame.rename(columns={'datetime': 'date'})
+    elif 'date' not in frame.columns:
+        frame = frame.reset_index()
+        if 'index' in frame.columns:
+            frame = frame.rename(columns={'index': 'date'})
+    if 'date' not in frame.columns:
+        return pd.DataFrame()
+    frame['date'] = pd.to_datetime(frame['date']).dt.strftime('%Y-%m-%d')
+    return frame
+
+
+def _pick_existing_column(frame, candidates):
+    if frame is None or frame.empty:
+        return None
+    for name in candidates:
+        if name in frame.columns:
+            return name
+    lower_map = {str(col).lower(): col for col in frame.columns}
+    for name in candidates:
+        matched = lower_map.get(str(name).lower())
+        if matched is not None:
+            return matched
+    return None
+
+
+def _assign_fundamental_series(hist, funda_df, field_aliases):
+    hist_dates = pd.Series(pd.to_datetime(hist.index).strftime('%Y-%m-%d'), index=hist.index)
+    for local_name, aliases in field_aliases.items():
+        hist[local_name] = np.nan
+        if funda_df is None or funda_df.empty:
+            continue
+        column_name = _pick_existing_column(funda_df, aliases)
+        if column_name is None:
+            continue
+        mapped = funda_df[['date', column_name]].copy()
+        mapped = mapped.dropna(subset=['date'])
+        mapped[column_name] = pd.to_numeric(mapped[column_name], errors='coerce')
+        mapped = mapped.drop_duplicates(subset=['date'], keep='last')
+        value_map = mapped.set_index('date')[column_name].to_dict()
+        hist[local_name] = hist_dates.map(lambda d: value_map.get(d, np.nan))
+""")
+
+
+def _generate_joinquant_fundamental_fetch_code(
+    valuation_fields: list[str],
+    report_fields: list[str],
+    indent: str = "            ",
+) -> tuple[str, list[str], str]:
+    all_fields = list(dict.fromkeys([*valuation_fields, *report_fields]))
+    if not all_fields:
+        return "", [], ""
+
+    lines: list[str] = []
+    lines.append(f"{indent}# Fetch valuation/fundamental data from JoinQuant and align by historical date")
+    for field_name in all_fields:
+        lines.append(f"{indent}hist['{field_name}'] = np.nan")
+
+    if valuation_fields:
+        valuation_query_fields = ", ".join(JQ_VALUATION_FIELD_MAP[name][0] for name in valuation_fields)
+        valuation_aliases = {
+            name: JQ_VALUATION_FIELD_MAP[name][1]
+            for name in valuation_fields
+        }
+        lines.extend(
+            [
+                f"{indent}try:",
+                f"{indent}    valuation_q = query({valuation_query_fields}).filter(valuation.code == code)",
+                f"{indent}    valuation_df = get_fundamentals_continuously(",
+                f"{indent}        valuation_q, end_date=context.current_dt, count=HISTORY_WINDOW, panel=False",
+                f"{indent}    )",
+                f"{indent}    valuation_df = _normalize_fundamental_continuous(valuation_df)",
+                f"{indent}    _assign_fundamental_series(hist, valuation_df, {repr(valuation_aliases)})",
+                f"{indent}except Exception as e:",
+                f"{indent}    log.info('code=%s, valuation fetch failed: %s' % (code, str(e)))",
+            ]
+        )
+
+    if report_fields:
+        report_query_fields = ", ".join(JQ_REPORT_FIELD_MAP[name][0] for name in report_fields)
+        report_aliases = {
+            name: JQ_REPORT_FIELD_MAP[name][1]
+            for name in report_fields
+        }
+        lines.extend(
+            [
+                f"{indent}try:",
+                f"{indent}    indicator_q = query({report_query_fields}).filter(indicator.code == code)",
+                f"{indent}    indicator_df = get_fundamentals_continuously(",
+                f"{indent}        indicator_q, end_date=context.current_dt, count=HISTORY_WINDOW, panel=False",
+                f"{indent}    )",
+                f"{indent}    indicator_df = _normalize_fundamental_continuous(indicator_df)",
+                f"{indent}    _assign_fundamental_series(hist, indicator_df, {repr(report_aliases)})",
+                f"{indent}except Exception as e:",
+                f"{indent}    log.info('code=%s, indicator fetch failed: %s' % (code, str(e)))",
+            ]
+        )
+
+    variable_lines = [f"{indent}{field_name} = hist['{field_name}']" for field_name in all_fields]
+    return "\n".join(lines), all_fields, "\n".join(variable_lines)
+
+
 def _generate_feature_compute_block(
     required_features: dict[str, str],
     sorted_names: list[str],
@@ -321,7 +456,8 @@ def _generate_strategy_code(
     allowed_raw: set[str],
     has_chip: bool,
     chip_windows: list[int],
-    has_turnover: bool = False,
+    valuation_fields: list[str],
+    report_fields: list[str],
 ) -> str:
     factor_name = str(factor["factor_name"])
     formula = str(factor["formula"])
@@ -409,9 +545,14 @@ def _generate_strategy_code(
 
     chip_code = _generate_chip_code(chip_windows) if has_chip else ""
     operator_code = _generate_operator_defs()
+    fundamental_helper_code = _generate_joinquant_fundamental_helper_code() if (valuation_fields or report_fields) else ""
 
     feature_compute_lines = _generate_feature_compute_block(
         required_features, sorted_feature_names, allowed_raw, has_chip, chip_windows
+    )
+    fundamental_fetch_code, fundamental_series_fields, fundamental_series_assign = _generate_joinquant_fundamental_fetch_code(
+        valuation_fields,
+        report_fields,
     )
 
     chip_compute_in_loop = ""
@@ -537,30 +678,6 @@ def _generate_strategy_code(
 
     retry_schedule = "    run_daily(retry_limit_down_sells, time='09:30')" if limit_down_action == "delay_sell" else ""
 
-    if has_turnover:
-        turnover_prefetch = ""
-        turnover_assign = """            # Fetch historical turnover ratio from JoinQuant
-            hist['turnover'] = 0.0
-            try:
-                q = query(valuation.turnover_ratio).filter(valuation.code == code)
-                turnover_df = get_fundamentals_continuously(q, end_date=context.current_dt, count=HISTORY_WINDOW, panel=False)
-                if turnover_df is not None and not turnover_df.empty:
-                    if 'day' in turnover_df.columns:
-                        turnover_df = turnover_df.set_index('day')
-                    if isinstance(turnover_df.columns, pd.MultiIndex):
-                        turnover_df.columns = [c[0] if isinstance(c, tuple) else c for c in turnover_df.columns]
-                    col_name = [c for c in turnover_df.columns if c != 'code' and 'turnover' in c.lower()]
-                    col_name = col_name[0] if col_name else turnover_df.columns[0]
-                    turnover_df.index = pd.to_datetime(turnover_df.index).strftime('%Y-%m-%d')
-                    turnover_map = turnover_df[col_name].to_dict()
-                    hist['turnover'] = hist.index.map(lambda d: turnover_map.get(str(d)[:10], 0.0) if pd.notna(turnover_map.get(str(d)[:10])) else 0.0)
-                    log.info('code=%s, turnover nonzero=%d, sample=%s' % (code, int((hist['turnover'] != 0).sum()), str(hist['turnover'].tail(3).tolist())))
-            except Exception as e:
-                log.info('code=%s, turnover fetch failed: %s' % (code, str(e)))"""
-    else:
-        turnover_prefetch = ""
-        turnover_assign = "            hist['turnover'] = 0.0"
-
     rebalance_schedule = ""
     if rebalance == "weekly":
         if rebalance_anchor == "first_trading_day_of_week":
@@ -627,6 +744,7 @@ RSI_BUY_MAX = {rsi_buy_max}
 
 {chip_code}
 {operator_code}
+{fundamental_helper_code}
 
 FACTOR_FORMULA = '{formula}'
 
@@ -648,7 +766,6 @@ def compute_factor_scores(context):
 
     scores = {{}}
     log.info('compute_factor_scores: stocks count=%d' % len(stocks))
-{turnover_prefetch}
     for code in stocks:
         try:
             hist = get_price(code, end_date=context.current_dt, frequency='daily',
@@ -660,7 +777,7 @@ def compute_factor_scores(context):
             hist = hist.sort_index()
             hist['amount'] = hist['money']
             hist['vwap'] = hist['money'] / hist['volume'].replace(0, np.nan)
-{turnover_assign}
+{fundamental_fetch_code}
 
             close = hist['close']
             open_ = hist['open']
@@ -669,7 +786,7 @@ def compute_factor_scores(context):
             volume = hist['volume']
             amount = hist['amount']
             vwap = hist['vwap']
-            turnover = hist['turnover']
+{fundamental_series_assign}
 
 {feature_compute_lines}
 {chip_compute_in_loop}
@@ -1299,11 +1416,12 @@ def run() -> None:
 
     has_chip = _has_chip_features(required_features)
     chip_windows = _detect_chip_windows(required_features) if has_chip else []
-    has_turnover = any("turnover" in name for name in sorted_feature_names) or any("turnover" in expr for expr in required_features.values())
+    valuation_fields, report_fields = _detect_joinquant_field_requirements(sorted_feature_names)
 
     print(f"  required features: {sorted_feature_names}")
     print(f"  has chip features: {has_chip}")
-    print(f"  has turnover features: {has_turnover}")
+    print(f"  JoinQuant valuation fields: {valuation_fields}")
+    print(f"  JoinQuant report fields: {report_fields}")
     if has_chip:
         print(f"  chip windows: {chip_windows}")
 
@@ -1319,7 +1437,8 @@ def run() -> None:
         allowed_raw=allowed_raw,
         has_chip=has_chip,
         chip_windows=chip_windows,
-        has_turnover=has_turnover,
+        valuation_fields=valuation_fields,
+        report_fields=report_fields,
     )
 
     output_dir = RUNTIME_ROOT / "joinquant"

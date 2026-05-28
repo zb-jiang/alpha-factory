@@ -6,6 +6,7 @@ from common import (
     OUTPUT_DIR,
     env_config,
     feature_pool_config,
+    get_data_provider,
     load_raw_data,
     log_step_end,
     log_step_start,
@@ -42,9 +43,28 @@ def run() -> None:
     context_cfg["train_end_date"] = str(train_end.date())
 
     rank_days = _cfg_int(windows, "rank_lookback_days", 250)
-    warmup_days = _cfg_int(windows, "warmup_trading_days", rank_days + 10)
+    flow_rank_days = _cfg_int(windows, "flow_rank_lookback_days", rank_days)
+    northbound_days = _cfg_int(windows, "northbound_days", 5)
+    margin_days = _cfg_int(windows, "margin_days", 5)
+    warmup_days = _cfg_int(
+        windows,
+        "warmup_trading_days",
+        max(rank_days, flow_rank_days, northbound_days, margin_days) + 10,
+    )
     raw_frame = load_raw_data(context_cfg, raw_fields=raw_fields, warmup_trading_days=warmup_days)
-    daily_market = compute_daily_market(raw_frame, fields=fields, windows=windows)
+    provider = get_data_provider(context_cfg)
+    provider.initialize()
+    raw_dates = raw_frame.index.get_level_values("datetime")
+    market_indicator_frame = provider.get_market_daily_indicators(
+        start_date=str(pd.Timestamp(raw_dates.min()).date()),
+        end_date=str(pd.Timestamp(raw_dates.max()).date()),
+    ) if not raw_frame.empty else pd.DataFrame()
+    daily_market = compute_daily_market(
+        raw_frame,
+        fields=fields,
+        windows=windows,
+        external_market_data=market_indicator_frame,
+    )
     train_window = daily_market.loc[(daily_market.index >= train_start) & (daily_market.index <= train_end)]
 
     market_context = {
@@ -52,6 +72,7 @@ def run() -> None:
             "train_start_date": str(train_start.date()),
             "train_end_date": str(train_end.date()),
             "config_source": "runtime/config/market_context.yaml",
+            "funding_sources": ["moneyflow_hsgt", "margin"],
         },
         "train_context": build_train_context(train_window, thresholds),
     }

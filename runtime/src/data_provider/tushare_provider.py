@@ -136,6 +136,7 @@ class TushareProvider(BaseDataProvider):
         self._latest_trade_date_cache: Optional[str] = None
         self._has_open_trade_day_cache: Dict[Tuple[str, str], bool] = {}
         self._fina_indicator_warned = False
+        self._market_indicator_warned: dict[str, bool] = {}
         self._init_cache_meta()
 
 
@@ -660,6 +661,85 @@ class TushareProvider(BaseDataProvider):
                 required_feature_names=required_feature_names,
             )
         raise ValueError(f"暂不支持的 API: {api_name}")
+
+    def _normalize_market_indicator_frame(self, api_name: str, df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return pd.DataFrame()
+        frame = df.copy()
+        if "trade_date" not in frame.columns:
+            return pd.DataFrame()
+        frame["trade_date"] = frame["trade_date"].astype(str)
+        frame = frame[frame["trade_date"] != ""]
+        if frame.empty:
+            return pd.DataFrame()
+
+        if api_name == "moneyflow_hsgt":
+            numeric_columns = ["ggt_ss", "ggt_sz", "hgt", "sgt", "north_money", "south_money"]
+            for column in numeric_columns:
+                if column not in frame.columns:
+                    frame[column] = np.nan
+                frame[column] = pd.to_numeric(frame[column], errors="coerce")
+            frame = (
+                frame.groupby("trade_date", as_index=False)[numeric_columns]
+                .sum(min_count=1)
+                .sort_values("trade_date")
+            )
+            return frame
+
+        if api_name == "margin":
+            numeric_columns = ["rzye", "rzmre", "rzche", "rqye", "rqmcl", "rzrqye", "rqyl"]
+            for column in numeric_columns:
+                if column not in frame.columns:
+                    frame[column] = np.nan
+                frame[column] = pd.to_numeric(frame[column], errors="coerce")
+            aggregated = (
+                frame.groupby("trade_date", as_index=False)[numeric_columns]
+                .sum(min_count=1)
+                .sort_values("trade_date")
+            )
+            return aggregated
+
+        return frame.sort_values("trade_date").reset_index(drop=True)
+
+    def _fetch_market_indicator_frame(
+        self,
+        api_name: str,
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame:
+        try:
+            if api_name == "moneyflow_hsgt":
+                df = self._call_pro_api(
+                    "moneyflow_hsgt",
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                return self._normalize_market_indicator_frame(api_name, df)
+            if api_name == "margin":
+                df = self._call_pro_api(
+                    "margin",
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                return self._normalize_market_indicator_frame(api_name, df)
+        except Exception as error:
+            error_text = str(error)
+            permission_like = (
+                f"没有接口({api_name})访问权限" in error_text
+                or "请指定正确的接口名" in error_text
+            )
+            if permission_like and not self._market_indicator_warned.get(api_name, False):
+                self._market_indicator_warned[api_name] = True
+                print(
+                    f"警告: 当前 Tushare 环境无法稳定访问 {api_name}，"
+                    "市场资金状态将以 NaN 降级，不阻塞主流程。"
+                )
+                print(f"  原始报错: {error_text}")
+                return pd.DataFrame()
+            if permission_like:
+                return pd.DataFrame()
+            raise
+        raise ValueError(f"暂不支持的市场级 API: {api_name}")
     
     def initialize(self) -> None:
         """初始化 Tushare 连接
@@ -1620,6 +1700,38 @@ class TushareProvider(BaseDataProvider):
         except Exception as e:
             print(f"获取交易日列表失败: {e}")
             return []
+
+    def get_market_daily_indicators(
+        self,
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame:
+        self.initialize()
+        start_text = str(start_date).replace("-", "")
+        end_text = str(end_date).replace("-", "")
+        northbound = self._fetch_market_indicator_frame("moneyflow_hsgt", start_text, end_text)
+        margin = self._fetch_market_indicator_frame("margin", start_text, end_text)
+        frames: list[pd.DataFrame] = []
+        for frame in (northbound, margin):
+            if frame is None or frame.empty:
+                continue
+            item = frame.copy()
+            item["trade_date"] = pd.to_datetime(item["trade_date"], errors="coerce")
+            item = item.dropna(subset=["trade_date"]).rename(columns={"trade_date": "datetime"})
+            frames.append(item.set_index("datetime").sort_index())
+        if not frames:
+            trading_dates = self.get_trading_dates(start_date, end_date)
+            if not trading_dates:
+                return pd.DataFrame()
+            empty_index = pd.Index(pd.to_datetime(trading_dates), name="datetime")
+            return pd.DataFrame(index=empty_index)
+        merged = frames[0]
+        for frame in frames[1:]:
+            merged = merged.join(frame, how="outer")
+        trading_dates = self.get_trading_dates(start_date, end_date)
+        if trading_dates:
+            merged = merged.reindex(pd.Index(pd.to_datetime(trading_dates), name="datetime"))
+        return merged.sort_index()
     
     def get_all_industries(self) -> pd.DataFrame:
         """获取所有行业列表

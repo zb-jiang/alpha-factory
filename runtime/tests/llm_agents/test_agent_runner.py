@@ -54,10 +54,12 @@ class TestAgentConfig:
             temperature=0.5,
             timeout_seconds=120.0,
             max_retries=3,
+            request_name="测试分析师",
         )
         assert config.temperature == 0.5
         assert config.timeout_seconds == 120.0
         assert config.max_retries == 3
+        assert config.request_name == "测试分析师"
 
 
 class TestCallLlmAgent:
@@ -112,6 +114,29 @@ class TestCallLlmAgent:
         assert call_kwargs["messages"] == messages
         assert call_kwargs["temperature"] == 0.3
         assert call_kwargs["timeout"] == 10.0
+
+    @patch("llm_agents.agent_runner.OpenAI")
+    def test_logs_request_name(self, mock_openai_cls, capsys):
+        """验证日志中包含调用者名称，便于区分不同分析师。"""
+        mock_client = MagicMock()
+        mock_choice = MagicMock()
+        mock_choice.message.content = json.dumps({"result": "hello"})
+        mock_choice.finish_reason = "stop"
+        mock_response = MagicMock()
+        mock_response.choices = [mock_choice]
+        mock_response.model_dump.return_value = {"id": "test", "choices": [{"finish_reason": "stop"}]}
+        mock_client.chat.completions.create.return_value = mock_response
+        mock_openai_cls.return_value = mock_client
+
+        config = self._make_config()
+        config.request_name = "分析师-趋势动量"
+        messages = self._make_messages()
+        result = call_llm_agent(config, messages)
+
+        assert result == {"result": "hello"}
+        output = capsys.readouterr().out
+        assert "分析师-趋势动量" in output
+        assert "请求成功" in output
 
     @patch("llm_agents.agent_runner.OpenAI")
     def test_retry_on_exception(self, mock_openai_cls):

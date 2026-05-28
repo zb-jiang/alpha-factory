@@ -28,6 +28,10 @@ from llm_agents import (
 )
 
 
+def _log(message: str) -> None:
+    print(message, flush=True)
+
+
 def build_messages(candidate_count_override: int | None = None) -> list[dict[str, str]]:
     config = env_config()
     feature_cfg = feature_pool_config()
@@ -116,8 +120,8 @@ def build_messages(candidate_count_override: int | None = None) -> list[dict[str
 - unstable_features：历史表现不稳定的特征。使用时需极其谨慎，或者配以强力的信号过滤。
 - previous_round_top_factors（若有）：上一轮迭代中回测表现最好的因子。你可以参考它们的成功逻辑，或者寻找与它们截然不同的正交逻辑以丰富策略库。
 - previous_round_skipped_factors（若有）：上一轮由于预测能力弱（IC低）、稳定性差（ICIR低）或方向胜率不足而被自动淘汰的因子。请务必分析它们的失败原因（如逻辑过度拟合、使用了无意义的高波动特征等），并确保本轮不要生成类似或雷同的因子。
-- train_context.summary_text：当前市场状态自然语言摘要，可用于确定本轮主攻逻辑（趋势/反转、进攻/防守、风格偏向）。
-- train_context.labels：6个离散当前市场环境标签，含义分别是 trend=方向状态（上行/震荡/下行）、volatility=波动水平（高/中/低）、liquidity=成交活跃度（高/中/低）、dispersion=个股分化强弱（高/中/低）、breadth=上涨覆盖面（普涨/分化/普跌）、style=大小盘风格（大盘占优/小盘占优）；用于给每个因子匹配“适用环境”与“失效环境”。
+- train_context.summary_text：当前市场状态自然语言摘要，可用于确定本轮主攻逻辑（趋势/反转、进攻/防守、风格偏向、资金态度）。
+- train_context.labels：核心标签至少包括 trend=方向状态（上行/震荡/下行）、volatility=波动水平（高/中/低）、liquidity=成交活跃度（高/中/低）、dispersion=个股分化强弱（高/中/低）、breadth=上涨覆盖面（普涨/分化/普跌）、style=大小盘风格（大盘占优/小盘占优）；若系统已接入资金面，还会包含 northbound=北向资金方向（偏流入/中性/偏流出）、leverage=两融情绪（升温/平稳/降温）、capital_structure=资金结构（同向进攻/同向防守/外资谨慎/杠杆激进等），用于给每个因子匹配“适用环境”与“失效环境”。
 - 优先生成“短公式、少特征、少层级、少重复加工”的因子。宁可简单清晰，也不要为了复杂而复杂。
 - 如果两个特征高度相似，不要用多个近似算子反复包装同一信号；优先通过差值、比值、分母惩罚等方式提取增量信息。
 
@@ -212,16 +216,16 @@ def run_multi_agent(env_cfg: dict | None = None) -> None:
     context = _build_multi_agent_context()
 
     # ── 阶段 1: 分析师团队（并行）──
-    print("  [多Agent] 阶段1: 启动分析师团队...")
+    _log("  [多Agent] 阶段1: 启动分析师团队...")
     analyst_outputs = run_analyst_team(env_cfg, context)
     _write_agent_outputs(analyst_outputs)
-    print(f"  [多Agent] 分析师团队完成: {len(analyst_outputs)} 位分析师贡献了建议")
+    _log(f"  [多Agent] 分析师团队完成: {len(analyst_outputs)} 位分析师贡献了建议")
 
     if not analyst_outputs:
         raise RuntimeError("多 Agent 模式: 没有分析师成功执行，无法继续")
 
     # ── 阶段 2: 首席分析师（串行）──
-    print("  [多Agent] 阶段2: 启动首席分析师整合...")
+    _log("  [多Agent] 阶段2: 启动首席分析师整合...")
     chief_cfg = env_cfg.get("llm_agents", {}).get("chief_analyst", {})
     if not chief_cfg.get("model"):
         raise RuntimeError("多 Agent 模式: 未配置 chief_analyst")
@@ -232,13 +236,14 @@ def run_multi_agent(env_cfg: dict | None = None) -> None:
         temperature=float(chief_cfg.get("temperature", 0.1)),
         timeout_seconds=float(chief_cfg.get("timeout_seconds", 90.0)),
         max_retries=int(chief_cfg.get("max_retries", 2)),
+        request_name="首席分析师",
     )
     design_direction = run_chief_analyst(chief_agent_config, analyst_outputs, context)
     write_json(OUTPUT_DIR / "llm" / "design_direction.json", design_direction)
-    print(f"  [多Agent] 首席分析师完成: 主攻方向 = {design_direction.get('primary_focus', 'N/A')}")
+    _log(f"  [多Agent] 首席分析师完成: 主攻方向 = {design_direction.get('primary_focus', 'N/A')}")
 
     # ── 阶段 3: 因子生成器（串行）──
-    print("  [多Agent] 阶段3: 启动因子生成器...")
+    _log("  [多Agent] 阶段3: 启动因子生成器...")
     gen_cfg = env_cfg.get("llm_agents", {}).get("generator", {})
     if not gen_cfg.get("model"):
         raise RuntimeError("多 Agent 模式: 未配置 generator")
@@ -249,13 +254,14 @@ def run_multi_agent(env_cfg: dict | None = None) -> None:
         temperature=float(gen_cfg.get("temperature", 0.2)),
         timeout_seconds=float(gen_cfg.get("timeout_seconds", 90.0)),
         max_retries=int(gen_cfg.get("max_retries", 2)),
+        request_name="因子生成器",
     )
     raw_response_draft = run_generator(gen_agent_config, design_direction, context)
     write_json(OUTPUT_DIR / "llm" / "raw_response_draft.json", raw_response_draft)
-    print(f"  [多Agent] 生成器完成: 产出 {len(raw_response_draft.get('factors', []))} 个候选因子")
+    _log(f"  [多Agent] 生成器完成: 产出 {len(raw_response_draft.get('factors', []))} 个候选因子")
 
     # ── 阶段 4: 因子评审员（串行）──
-    print("  [多Agent] 阶段4: 启动因子评审员...")
+    _log("  [多Agent] 阶段4: 启动因子评审员...")
     rev_cfg = env_cfg.get("llm_agents", {}).get("reviewer", {})
     if not rev_cfg.get("model"):
         raise RuntimeError("多 Agent 模式: 未配置 reviewer")
@@ -266,6 +272,7 @@ def run_multi_agent(env_cfg: dict | None = None) -> None:
         temperature=float(rev_cfg.get("temperature", 0.1)),
         timeout_seconds=float(rev_cfg.get("timeout_seconds", 60.0)),
         max_retries=int(rev_cfg.get("max_retries", 2)),
+        request_name="因子评审员",
     )
     # 评审员上下文需要包含 design_direction 用于逻辑一致性检查
     review_context = dict(context)
@@ -287,7 +294,7 @@ def run_multi_agent(env_cfg: dict | None = None) -> None:
     write_json(OUTPUT_DIR / "llm" / "raw_response.json", final_payload)
     write_json(OUTPUT_DIR / "llm" / "review_report.json", {"review_results": passed + rejected})
     write_json(OUTPUT_DIR / "llm" / "review_rejected.json", {"factors": rejected})
-    print(f"  [多Agent] 评审完成: {len(final_factors)} 通过, {len(rejected)} 拒绝")
+    _log(f"  [多Agent] 评审完成: {len(final_factors)} 通过, {len(rejected)} 拒绝")
     log_step_end("05", "LLM 因子生成完成", details=[f"候选因子: {len(final_factors)} 通过, {len(rejected)} 拒绝"])
 
 
@@ -300,8 +307,8 @@ def run() -> None:
             run_multi_agent(config)
             return
         except Exception as exc:
-            print(f"多 Agent 模式执行失败，回退到单 Prompt 模式: {exc}")
-            # 继续执行下方的单 Prompt 逻辑
+            _log(f"多 Agent 模式执行失败，已停止，不再回退到单 Prompt 模式: {exc}")
+            raise
 
     workflow_state = dict(config.get("workflow_state", {}))
     stage = str(workflow_state.get("stage", "discovery"))
@@ -344,11 +351,16 @@ def run() -> None:
     client = OpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
     messages = build_messages(candidate_count)
     
-    print(f"  正在调用大模型 ({model})，请稍候...")
+    _log(f"  正在调用大模型 ({model})，请稍候...")
     response = None
     content = ""
     last_error: Exception | None = None
     for attempt in range(llm_max_retries + 1):
+        _log(
+            f"  大模型请求开始: model={model} "
+            f"({attempt + 1}/{llm_max_retries + 1}, timeout={llm_request_timeout_seconds}s)"
+        )
+        started_at = time.monotonic()
         try:
             response = client.chat.completions.create(
                 model=model,
@@ -360,9 +372,12 @@ def run() -> None:
             parsed = parse_json_text(content)
             if not isinstance(parsed, dict) or not isinstance(parsed.get("factors"), list):
                 raise ValueError("LLM 返回内容不是包含 factors 列表的 JSON 对象")
+            elapsed = time.monotonic() - started_at
+            _log(f"  大模型请求成功: model={model}, 耗时 {elapsed:.1f}s")
             break
         except Exception as error:
             last_error = error
+            elapsed = time.monotonic() - started_at
             finish_reason = ""
             if response is not None:
                 finish_reason = str(response.choices[0].finish_reason or "")
@@ -388,19 +403,22 @@ def run() -> None:
                 if next_count < candidate_count:
                     candidate_count = next_count
                     messages = build_messages(candidate_count)
-                    print(
+                    _log(
                         f"检测到大模型输出疑似截断，候选因子数调整为 {candidate_count}，"
                         "并继续重试..."
                     )
             if attempt >= llm_max_retries:
-                print(f"大模型调用在第 {attempt + 1} 次尝试后失败，停止重试。")
+                _log(
+                    f"大模型调用在第 {attempt + 1} 次尝试后失败，"
+                    f"本次尝试耗时 {elapsed:.1f}s，停止重试。"
+                )
                 raise RuntimeError(
                     f"大模型调用失败: model={model}, timeout={llm_request_timeout_seconds}s, "
                     f"retries={llm_max_retries}, error={error}"
                 ) from error
             wait_seconds = llm_retry_wait_seconds * (attempt + 1)
-            print(
-                f"大模型调用异常(第 {attempt + 1}/{llm_max_retries + 1} 次): {error}，"
+            _log(
+                f"大模型调用异常(第 {attempt + 1}/{llm_max_retries + 1} 次, 耗时 {elapsed:.1f}s): {error}，"
                 f"{wait_seconds:.1f} 秒后重试..."
             )
             time.sleep(wait_seconds)

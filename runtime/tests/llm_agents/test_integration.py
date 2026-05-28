@@ -108,6 +108,46 @@ class TestSinglePromptFallback:
                 step05_call_llm.OUTPUT_DIR = orig_output_dir
                 step05_call_llm.env_config = orig_env_config
 
+    @patch("step05_call_llm.run_multi_agent")
+    @patch("step05_call_llm.OpenAI")
+    def test_multi_agent_failure_does_not_fallback_to_single_prompt(self, mock_openai, mock_multi):
+        """验证 enable_multi_agent=true 且多Agent失败时，直接报错而不是回退单Prompt。"""
+        import step05_call_llm
+
+        mock_multi.side_effect = RuntimeError("chief timeout")
+        test_config = {
+            "enable_multi_agent": True,
+            "llm_model": "gpt-4o",
+            "llm_base_url": "https://api.openai.com/v1",
+            "llm_api_key": "sk-test",
+            "llm_candidate_count": 10,
+            "llm_request_timeout_seconds": 120,
+            "llm_max_retries": 2,
+            "llm_retry_wait_seconds": 3,
+            "llm_min_candidate_count": 3,
+            "workflow_state": {"stage": "discovery"},
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            (output_dir / "health").mkdir(parents=True)
+            (output_dir / "llm").mkdir(parents=True)
+            (output_dir / "health" / "llm_summary.json").write_text(
+                json.dumps({}), encoding="utf-8"
+            )
+
+            orig_output_dir = step05_call_llm.OUTPUT_DIR
+            orig_env_config = step05_call_llm.env_config
+            step05_call_llm.OUTPUT_DIR = output_dir
+            step05_call_llm.env_config = lambda: test_config
+            try:
+                with pytest.raises(RuntimeError, match="chief timeout"):
+                    step05_call_llm.run()
+                mock_openai.assert_not_called()
+            finally:
+                step05_call_llm.OUTPUT_DIR = orig_output_dir
+                step05_call_llm.env_config = orig_env_config
+
 
 class TestAgentOutputDirectoryStructure:
     """验证中间产物目录结构正确。"""

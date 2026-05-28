@@ -12,11 +12,20 @@ import json
 import os
 import re
 import time
+import threading
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 from openai import OpenAI
+
+
+_LOG_LOCK = threading.Lock()
+
+
+def _log(message: str) -> None:
+    with _LOG_LOCK:
+        print(message, flush=True)
 
 
 @dataclass
@@ -29,6 +38,7 @@ class AgentConfig:
     temperature: float = 0.2
     timeout_seconds: float = 60.0
     max_retries: int = 2
+    request_name: str = ""
 
 
 def _create_http_client() -> httpx.Client:
@@ -72,9 +82,15 @@ def call_llm_agent(config: AgentConfig, messages: list[dict[str, str]]) -> dict[
     """
     http_client = _create_http_client()
     client = OpenAI(api_key=config.api_key, base_url=config.base_url, http_client=http_client)
+    caller_name = str(config.request_name or config.model)
 
     last_error: Exception | None = None
     for attempt in range(config.max_retries + 1):
+        _log(
+            f"    [LLM Agent] {caller_name} | model={config.model} | 发起请求 "
+            f"({attempt + 1}/{config.max_retries + 1}, timeout={config.timeout_seconds}s)"
+        )
+        started_at = time.monotonic()
         try:
             response = client.chat.completions.create(
                 model=config.model,
@@ -84,15 +100,24 @@ def call_llm_agent(config: AgentConfig, messages: list[dict[str, str]]) -> dict[
             )
             content = response.choices[0].message.content or ""
             parsed = _parse_json_from_text(content)
+            elapsed = time.monotonic() - started_at
+            _log(
+                f"    [LLM Agent] {caller_name} | model={config.model} | 请求成功，耗时 {elapsed:.1f}s"
+            )
             return parsed
         except Exception as error:
             last_error = error
+            elapsed = time.monotonic() - started_at
             if attempt >= config.max_retries:
                 raise RuntimeError(
                     f"LLM Agent 调用失败: model={config.model}, "
                     f"timeout={config.timeout_seconds}s, retries={config.max_retries}, error={error}"
                 ) from error
             wait_seconds = 3.0 * (attempt + 1)
+            _log(
+                f"    [LLM Agent] {caller_name} | model={config.model} | 第 {attempt + 1} 次失败，"
+                f"耗时 {elapsed:.1f}s，{wait_seconds:.1f}s 后重试: {error}"
+            )
             time.sleep(wait_seconds)
 
     # 理论上不会执行到这里，但保留以防万一

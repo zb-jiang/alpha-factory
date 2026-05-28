@@ -18,14 +18,15 @@ from llm_agents.agent_runner import AgentConfig
 class TestAnalystAgentIds:
     """测试分析师 ID 列表。"""
 
-    def test_contains_all_six(self):
+    def test_contains_all_seven(self):
         assert "trend_momentum" in ANALYST_AGENT_IDS
         assert "reversal_mean_reversion" in ANALYST_AGENT_IDS
         assert "volatility_risk" in ANALYST_AGENT_IDS
         assert "volume_price" in ANALYST_AGENT_IDS
         assert "microstructure" in ANALYST_AGENT_IDS
         assert "chip_distribution" in ANALYST_AGENT_IDS
-        assert len(ANALYST_AGENT_IDS) == 6
+        assert "fundamental_value_growth" in ANALYST_AGENT_IDS
+        assert len(ANALYST_AGENT_IDS) == 7
 
 
 class TestBuildAnalystMessages:
@@ -57,6 +58,12 @@ class TestBuildAnalystMessages:
         prompts = [_build_analyst_messages(i, context)[0]["content"] for i in ids]
         assert prompts[0] != prompts[1]
         assert prompts[1] != prompts[2]
+
+    def test_fundamental_agent_prompt_mentions_funding_context(self):
+        context = self._make_context()
+        messages = _build_analyst_messages("fundamental_value_growth", context)
+        assert "northbound" in messages[0]["content"]
+        assert "capital_structure" in messages[0]["content"]
 
 
 class TestParseAnalystOutput:

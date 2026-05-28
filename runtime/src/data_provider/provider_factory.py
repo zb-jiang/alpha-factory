@@ -3,6 +3,7 @@
 根据配置创建对应的数据提供者实例
 """
 
+from pathlib import Path
 from typing import Dict, Any, Type, List
 
 from .base_provider import BaseDataProvider
@@ -26,6 +27,15 @@ class ProviderFactory:
     _providers: Dict[str, Type[BaseDataProvider]] = {
         "tushare": TushareSQLiteProvider,
     }
+    _active_provider: BaseDataProvider | None = None
+    _active_signature: tuple[str, str] | None = None
+
+    @classmethod
+    def _provider_signature(cls, config: Dict[str, Any]) -> tuple[str, str]:
+        source = str(config.get("data_source", "tushare")).strip().lower()
+        ts_cfg = config.get("tushare", {}) or {}
+        cache_dir = str(Path(ts_cfg.get("data_cache_dir", "./data/tushare_cache")).resolve())
+        return source, cache_dir
     
     @classmethod
     def create_provider(cls, config: Dict[str, Any]) -> BaseDataProvider:
@@ -45,9 +55,33 @@ class ProviderFactory:
         if source not in cls._providers:
             available = ", ".join(cls._providers.keys())
             raise ValueError(f"当前仅支持 tushare，收到: '{source}'。可选的数据源: {available}")
-        
+
+        signature = cls._provider_signature(config)
+        if cls._active_provider is not None and cls._active_signature == signature:
+            cls._active_provider.update_config(config)
+            return cls._active_provider
+
+        if cls._active_provider is not None:
+            try:
+                cls._active_provider.close()
+            finally:
+                cls._active_provider = None
+                cls._active_signature = None
+
         provider_class = cls._providers[source]
-        return provider_class(config)
+        provider = provider_class(config)
+        cls._active_provider = provider
+        cls._active_signature = signature
+        return provider
+
+    @classmethod
+    def reset_active_provider(cls) -> None:
+        if cls._active_provider is not None:
+            try:
+                cls._active_provider.close()
+            finally:
+                cls._active_provider = None
+                cls._active_signature = None
     
     @classmethod
     def register_provider(cls, name: str, provider_class: Type[BaseDataProvider]) -> None:

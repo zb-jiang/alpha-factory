@@ -36,11 +36,12 @@ class TestBuildGeneratorMessages:
 
         assert len(messages) == 2
         assert messages[0]["role"] == "system"
-        assert "因子公式生成器" in messages[0]["content"]
+        assert "Alpha因子" in messages[0]["content"]
         assert messages[1]["role"] == "user"
         assert "反转+波动率调整" in messages[1]["content"]
         assert "ret_5d" in messages[1]["content"]
         assert "ret_60d" in messages[1]["content"]  # avoid_features
+        assert "capital_structure" in messages[0]["content"]
 
 
 class TestParseFactors:

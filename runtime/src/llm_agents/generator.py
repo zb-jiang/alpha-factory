@@ -23,6 +23,7 @@ _GENERATOR_SYSTEM = """你是一个顶级的量化交易策略研究员和金融
 8. 如果设计方向涉及 pe_ttm、pb、ps_ttm、dv_ttm、eps、roe、netprofit_yoy、or_yoy，请正确解释它们的金融含义：pe_ttm/pb 更偏价值，dv_ttm 更偏红利，ps_ttm 更偏高成长预期定价，roe 更偏质量，netprofit_yoy/or_yoy 更偏财务成长
 9. 当前系统已接入按 ann_date 做 as-of 对齐的季频财务数据，因此可以使用 eps、roe、netprofit_yoy、or_yoy 来表达真实的盈利能力和成长逻辑；但 pe_ttm、pb、ps_ttm、dv_ttm 仍应优先解释为估值/红利/风格偏好，而不是直接等同于财务成长
 10. 当使用基本面风格特征时，可以生成“价值修复”“红利防守”“质量成长”“收入/利润同比改善”这类与当前数据含义一致的逻辑，但必须避免未来函数叙事，确保理由与已接入字段一致
+11. 如果市场环境中出现 northbound、leverage、capital_structure 等资金面标签，请把它们用于决定因子更偏进攻、防守、拥挤修复还是风险收缩；尤其当“外资谨慎/杠杆激进”或“外资积极/杠杆收缩”出现时，要在 risk 和 expected_failure_regime 中明确体现资金分歧风险
 
 方向只能是 higher_better（因子值越大越看多）或 lower_better（因子值越小越看多）。
 
