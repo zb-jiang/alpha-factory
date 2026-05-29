@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from common import OUTPUT_DIR, log_step_end, log_step_start, write_json, write_table
+from common import OUTPUT_DIR, log_step_end, log_step_start, score_config, write_json, write_table
 
 
 def normalize(series: pd.Series) -> pd.Series:
@@ -31,19 +31,26 @@ def run() -> None:
     merged["drawdown_penalty"] = normalize(merged["max_drawdown"].abs())
     merged["turnover_penalty"] = normalize(merged["turnover"])
     merged["instability_penalty"] = normalize(1 - merged["positive_ic_ratio"])
-    
-    # 调整权重：提高收益率的权重，降低单纯IC稳定性的权重
+
+    scfg = score_config()
+    weights = scfg.get("weights", {})
+    w_ic = float(weights.get("ic_stability", 0.35))
+    w_ret = float(weights.get("annual_return", 0.50))
+    w_dd = float(weights.get("drawdown", 0.05))
+    w_to = float(weights.get("turnover", 0.05))
+    w_inst = float(weights.get("instability", 0.05))
+    neg_penalty = float(scfg.get("negative_return_penalty", 0.5))
+
     merged["total_score"] = (
-        0.35 * merged["ic_stability_score"]
-        + 0.50 * merged["annual_return_score"]
-        - 0.05 * merged["drawdown_penalty"]
-        - 0.05 * merged["turnover_penalty"]
-        - 0.05 * merged["instability_penalty"]
+        w_ic * merged["ic_stability_score"]
+        + w_ret * merged["annual_return_score"]
+        - w_dd * merged["drawdown_penalty"]
+        - w_to * merged["turnover_penalty"]
+        - w_inst * merged["instability_penalty"]
     )
-    
-    # 对负收益进行严厉惩罚，避免负收益因子被选为Top
+
     negative_return_mask = merged["annualized_return"] < 0
-    merged.loc[negative_return_mask, "total_score"] -= 0.5
+    merged.loc[negative_return_mask, "total_score"] -= neg_penalty
     
     merged = merged.sort_values("total_score", ascending=False)
     write_table(OUTPUT_DIR / "backtest" / "final_score.csv", merged)

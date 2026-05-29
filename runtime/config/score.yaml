@@ -1,0 +1,31 @@
+# ==============================================================================
+# 因子评分权重配置（score.yaml）
+# ------------------------------------------------------------------------------
+# step09_score.py 使用此配置计算因子的 total_score。
+# 所有 weight 之和应为 1.0（正权重加总 - 负权重加总 = 1.0），
+# 但系统不做硬性校验，你可以根据实际需求自由调整。
+#
+# 计算公式：
+#   total_score = w_ic_stability   × ic_stability_score
+#              + w_annual_return  × annual_return_score
+#              - w_drawdown       × drawdown_penalty
+#              - w_turnover       × turnover_penalty
+#              - w_instability    × instability_penalty
+#
+# 各分项说明：
+#   ic_stability_score   : Rank IC IR 的归一化值，衡量因子预测能力的稳定性
+#   annual_return_score  : 年化收益率的归一化值，衡量因子实际盈利能力
+#   drawdown_penalty     : 最大回撤绝对值的归一化值，惩罚高风险因子
+#   turnover_penalty     : 换手率的归一化值，惩罚过度交易
+#   instability_penalty  : (1 - positive_ic_ratio) 的归一化值，惩罚IC方向不稳定
+# ==============================================================================
+
+weights:
+  ic_stability: 0.35
+  annual_return: 0.50
+  drawdown: 0.05
+  turnover: 0.05
+  instability: 0.05
+
+# 负收益惩罚：当年化收益率 < 0 时，total_score 额外减去此值
+negative_return_penalty: 0.5

@@ -93,6 +93,7 @@ OUTPUT_DIR = RUNTIME_ROOT / "outputs"
 SRC_DIR = RUNTIME_ROOT / "src"
 MARKET_CONTEXT_CONFIG_PATH = CONFIG_DIR / "market_context.yaml"
 SELECTOR_CONFIG_PATH = CONFIG_DIR / "selector.yaml"
+SCORE_CONFIG_PATH = CONFIG_DIR / "score.yaml"
 RUNTIME_CONTEXT_PATH = OUTPUT_DIR / "_runtime" / "active_context.json"
 OUTPUT_ARTIFACTS = [
     Path("health") / "feature_stats.csv",
@@ -848,6 +849,12 @@ def selector_config() -> dict[str, Any]:
     if not SELECTOR_CONFIG_PATH.exists():
         return {}
     return load_yaml_file(SELECTOR_CONFIG_PATH)
+
+
+def score_config() -> dict[str, Any]:
+    if not SCORE_CONFIG_PATH.exists():
+        return {}
+    return load_yaml_file(SCORE_CONFIG_PATH)
 
 
 def backtest_rule_config() -> dict[str, Any]:
