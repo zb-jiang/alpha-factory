@@ -12,6 +12,7 @@ from common import (
     analysis_rule_config,
     annualized_return,
     backtest_rule_config,
+    build_ohlcv_map,
     compute_drawdown,
     env_config,
     feature_pool_config,
@@ -29,16 +30,29 @@ from engine.soft_topk import SoftTopKStrategy
 from engine.topk_dropout import TopKDropoutStrategy
 
 
-def _setup_backtest_logging(factor_name: str) -> None:
-    log_path = OUTPUT_DIR / "backtest" / f"{factor_name}_backtest.log"
+def _setup_backtest_logging(factor_name: str, execution_cfg: dict[str, Any]) -> bool:
     logger = logging.getLogger("backtest_engine")
-    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    logger.disabled = False
     for handler in logger.handlers[:]:
         logger.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:
+            pass
+
+    enable_detailed_log = bool(execution_cfg.get("enable_detailed_backtest_log", False))
+    if not enable_detailed_log:
+        logger.setLevel(logging.WARNING)
+        return False
+
+    log_path = OUTPUT_DIR / "backtest" / f"{factor_name}_backtest.log"
+    logger.setLevel(logging.INFO)
     fh = logging.FileHandler(str(log_path), mode="w", encoding="utf-8")
     fh.setLevel(logging.INFO)
     fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s  - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
     logger.addHandler(fh)
+    return True
 
 
 @dataclass
@@ -83,22 +97,6 @@ def _extract_score_series(
     series = pd.to_numeric(factor_frame[score_column], errors="coerce")
     sign = -1.0 if float(score_sign) < 0 else 1.0
     return (series * sign).rename("factor_score")
-
-
-def _build_ohlcv_by_instrument(raw_frame: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    required = ["open", "high", "low", "close", "volume"]
-    missing = [item for item in required if item not in raw_frame.columns]
-    if missing:
-        raise KeyError(f"原始行情缺少必要列: {missing}")
-
-    result: dict[str, pd.DataFrame] = {}
-    for instrument, group in raw_frame.groupby(level="instrument", sort=False):
-        frame = group.droplevel("instrument")[required].copy().sort_index()
-        frame = frame[~frame.index.duplicated(keep="first")]
-        frame[["close", "open", "high", "low"]] = frame[["close", "open", "high", "low"]].ffill()
-        frame["volume"] = pd.to_numeric(frame["volume"], errors="coerce").fillna(0.0)
-        result[str(instrument)] = frame
-    return result
 
 
 def _build_data_bundle_for_factor(
@@ -149,7 +147,7 @@ def build_data_bundle(config: dict[str, Any] | None = None) -> BacktestDataBundl
         stock_ema_p = int(mt_cfg.get("stock_ema_period", 60))
         warmup = max(ema_p, rsi_p + 1, stock_ema_p) + 10
     raw_frame = load_raw_data(cfg, raw_fields, warmup_trading_days=warmup)
-    ohlcv_map = _build_ohlcv_by_instrument(raw_frame)
+    ohlcv_map = build_ohlcv_map(raw_frame, cfg)
     factor_values = _load_factor_values()
     factor_name = _select_factor_name(factor_values, cfg)
     return _build_data_bundle_for_factor(factor_name, factor_values, ohlcv_map)
@@ -245,7 +243,7 @@ def run_backtest_batch_export() -> None:
         stock_ema_p = int(mt_cfg.get("stock_ema_period", 60))
         warmup = max(ema_p, rsi_p + 1, stock_ema_p) + 10
     raw_frame = load_raw_data(cfg, raw_fields, warmup_trading_days=warmup)
-    ohlcv_map = _build_ohlcv_by_instrument(raw_frame)
+    ohlcv_map = build_ohlcv_map(raw_frame, cfg)
     factor_values = _load_factor_values()
     factor_names = [str(item) for item in factor_values.index.get_level_values("factor_name").unique()]
     if not factor_names:
@@ -323,8 +321,11 @@ def run_backtest_batch_export() -> None:
                 market_timing=market_timing,
             )
 
-            print(f"  回测: {factor_name} ({strategy.__class__.__name__})")
-            _setup_backtest_logging(factor_name)
+            detailed_log_enabled = _setup_backtest_logging(factor_name, execution_cfg)
+            if detailed_log_enabled:
+                print(f"  回测: {factor_name} ({strategy.__class__.__name__}, 详细日志=开启)")
+            else:
+                print(f"  回测: {factor_name} ({strategy.__class__.__name__})")
             results = engine.run(rebalance_dates)
 
             metrics = results["metrics"]

@@ -118,6 +118,11 @@ Execution:
   # 例如 0.02 表示预留2%的资金作为缓冲
   cash_buffer_ratio: 0.02
 
+  # 是否输出逐因子详细回测日志到 outputs/backtest/<factor_name>_backtest.log
+  # - false：默认关闭，仅保留终端摘要日志，减少文件 IO 开销，加快批量回测
+  # - true：开启详细交易/调仓/择时日志，适合排查单个因子的交易细节
+  enable_detailed_backtest_log: false
+
   # 停牌处理：跳过，不做交易，不延续到后续交易日
   suspend_action: skip
 

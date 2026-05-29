@@ -11,6 +11,7 @@ from common import (
     archive_outputs_bundle,
     build_training_windows,
     clear_runtime_context,
+    clear_window_runtime_cache,
     ensure_runtime_dirs,
     env_config,
     log_phase,
@@ -272,6 +273,7 @@ def run() -> None:
             # 在新的训练窗口开始前，做一次全面的环境清理（因为上个窗口的验证阶段会产生新数据）
             clean_outputs(dry_run=False)
             discovery_scope = f"train_windows/{window['window_id']}/discovery"
+            clear_window_runtime_cache()
             
             # 在一个窗口的 discovery 阶段开始时，准备好一次性的上下文和基础数据。
             # Step02/03 属于窗口级动作，不属于某一轮 iteration。
@@ -307,6 +309,7 @@ def run() -> None:
                         "skipped_reason": "discovery 阶段无任何因子通过预筛",
                     },
                 )
+                clear_window_runtime_cache()
                 continue
             validation_result = _run_validation(window, candidates)
             validation_rows.extend(validation_result)
@@ -322,6 +325,7 @@ def run() -> None:
                 f"  {window['window_id']} validation ok, "
                 f"candidates={len(candidates)}, passed={len(validation_result)}"
             )
+            clear_window_runtime_cache()
     finally:
         clear_runtime_context()
     _write_cross_window_outputs(validation_rows, windows)

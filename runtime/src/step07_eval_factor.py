@@ -8,7 +8,6 @@ from common import (
     OUTPUT_DIR,
     analysis_profile,
     apply_factor_preprocess,
-    build_label_series,
     build_feature_frame,
     estimate_label_forward_days,
     estimate_required_warmup,
@@ -16,6 +15,7 @@ from common import (
     evaluate_formula,
     factor_metrics_from_series,
     feature_pool_config,
+    label_name,
     label_signature,
     load_raw_data,
     log_step_end,
@@ -77,9 +77,10 @@ def run() -> None:
     print("  原始数据加载完成，开始构建特征面板...", flush=True)
     feature_frame = build_feature_frame(raw_frame, config, feature_cfg)
     metric_rows: list[dict[str, object]] = []
-    factor_input = feature_frame[[item["name"] for item in feature_cfg.get("base_features", [])]]
     print("  特征面板构建完成，开始构建收益标签...", flush=True)
-    label_series = build_label_series(raw_frame, config)
+    label_column = label_name(config)
+    label_series = feature_frame[label_column]
+    factor_input = feature_frame[[item["name"] for item in feature_cfg.get("base_features", [])]]
     active_analysis_profile = analysis_profile(config)
     active_label_mode = label_signature(config)
     active_preprocess = preprocess_signature(config)

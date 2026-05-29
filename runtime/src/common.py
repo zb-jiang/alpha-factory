@@ -118,6 +118,147 @@ DYNAMIC_INDEX_COMPONENT_CACHE: dict[
     tuple[str, tuple[str, ...], bool, bool, int],
     dict[pd.Timestamp, set[str]],
 ] = {}
+WINDOW_RUNTIME_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def _window_cache_scope_id(config: dict[str, Any] | None = None) -> str | None:
+    cfg = config or env_config()
+    workflow_state = dict(cfg.get("workflow_state", {}))
+    window_id = str(workflow_state.get("window_id", "")).strip()
+    if not window_id:
+        return None
+    run_mode = str(cfg.get("run_mode", "train")).strip().lower()
+    start_time, end_time = active_run_window(cfg)
+    return f"{window_id}|{run_mode}|{_date_text(start_time)}|{_date_text(end_time)}"
+
+
+def _window_cache_bucket(config: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    scope_id = _window_cache_scope_id(config)
+    if scope_id is None:
+        return None
+    return WINDOW_RUNTIME_CACHE.setdefault(
+        scope_id,
+        {
+            "raw_frames": [],
+            "feature_frames": {},
+            "label_series": {},
+            "ohlcv_maps": {},
+            "daily_market": {},
+        },
+    )
+
+
+def clear_window_runtime_cache(config: dict[str, Any] | None = None) -> None:
+    scope_id = _window_cache_scope_id(config)
+    if scope_id is None:
+        WINDOW_RUNTIME_CACHE.clear()
+        return
+    WINDOW_RUNTIME_CACHE.pop(scope_id, None)
+
+
+def _config_cache_signature(config: dict[str, Any]) -> str:
+    relevant = {
+        "run_mode": config.get("run_mode"),
+        "train_start_date": config.get("train_start_date"),
+        "train_end_date": config.get("train_end_date"),
+        "test_start_date": config.get("test_start_date"),
+        "test_end_date": config.get("test_end_date"),
+        "freq": config.get("freq"),
+        "max_instruments": config.get("max_instruments"),
+        "price_adjust_reference_date": config.get("price_adjust_reference_date"),
+        "stock_pool": config.get("stock_pool"),
+        "label": config.get("label"),
+        "rebalance": config.get("rebalance"),
+        "rebalance_interval": config.get("rebalance_interval"),
+        "disable_dynamic_membership": config.get("disable_dynamic_membership"),
+        "workflow_state": config.get("workflow_state"),
+    }
+    return json.dumps(relevant, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _frame_cache_signature(frame: pd.DataFrame) -> str:
+    if frame.empty:
+        return json.dumps(
+            {"columns": list(frame.columns), "rows": 0, "index_names": list(frame.index.names)},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    datetime_index = pd.Index(pd.to_datetime(frame.index.get_level_values("datetime")))
+    payload = {
+        "columns": list(frame.columns),
+        "rows": int(len(frame)),
+        "index_names": list(frame.index.names),
+        "start": _date_text(pd.Timestamp(datetime_index.min()).normalize()),
+        "end": _date_text(pd.Timestamp(datetime_index.max()).normalize()),
+        "instrument_count": int(frame.index.get_level_values("instrument").nunique()),
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _raw_cache_scope_signature(config: dict[str, Any]) -> str:
+    relevant = {
+        "run_mode": config.get("run_mode"),
+        "freq": config.get("freq"),
+        "max_instruments": config.get("max_instruments"),
+        "stock_pool": config.get("stock_pool"),
+        "disable_dynamic_membership": config.get("disable_dynamic_membership"),
+        "workflow_state": config.get("workflow_state"),
+    }
+    return json.dumps(relevant, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _slice_cached_raw_frame(
+    frame: pd.DataFrame,
+    fields: list[str],
+    start_time: pd.Timestamp,
+    end_time: pd.Timestamp,
+) -> pd.DataFrame:
+    datetime_index = pd.Index(pd.to_datetime(frame.index.get_level_values("datetime")))
+    mask = (datetime_index >= start_time) & (datetime_index <= end_time)
+    return frame.loc[mask, fields].sort_index()
+
+
+def _get_cached_raw_frame(
+    config: dict[str, Any],
+    fields: list[str],
+    start_time: pd.Timestamp,
+    end_time: pd.Timestamp,
+) -> pd.DataFrame | None:
+    bucket = _window_cache_bucket(config)
+    if bucket is None:
+        return None
+    requested_fields = set(fields)
+    scope_signature = _raw_cache_scope_signature(config)
+    for entry in bucket["raw_frames"]:
+        if entry["scope_signature"] != scope_signature:
+            continue
+        if not set(entry["fields"]).issuperset(requested_fields):
+            continue
+        if entry["start"] > start_time or entry["end"] < end_time:
+            continue
+        return _slice_cached_raw_frame(entry["frame"], fields, start_time, end_time)
+    return None
+
+
+def _store_cached_raw_frame(
+    config: dict[str, Any],
+    fields: list[str],
+    start_time: pd.Timestamp,
+    end_time: pd.Timestamp,
+    frame: pd.DataFrame,
+) -> None:
+    bucket = _window_cache_bucket(config)
+    if bucket is None:
+        return
+    bucket["raw_frames"].append(
+        {
+            "scope_signature": _raw_cache_scope_signature(config),
+            "fields": tuple(fields),
+            "start": start_time,
+            "end": end_time,
+            "frame": frame,
+        }
+    )
 
 CONFIG_OWNERSHIP: dict[str, set[str]] = {
     "env": {
@@ -250,6 +391,7 @@ class ExecutionRule(BaseModel):
     stamp_duty: float = Field(0.001, ge=0.0)
     slippage: float = Field(0.0005, ge=0.0)
     cash_buffer_ratio: float = Field(0.02, ge=0.0, le=1.0)
+    enable_detailed_backtest_log: bool = False
     suspend_action: Literal["skip", "queue"] = "skip"
     limit_up_action: Literal["skip_buy", "queue_buy", "allow_buy"] = "skip_buy"
     limit_down_action: Literal["delay_sell", "skip_sell", "force_sell"] = "delay_sell"
@@ -313,6 +455,7 @@ def _legacy_backtest_rule_to_factory(backtest_cfg: dict[str, Any]) -> dict[str, 
             "buy_cost": float(backtest_cfg.get("buy_cost", 0.0015) or 0.0015),
             "sell_cost": float(backtest_cfg.get("sell_cost", 0.0025) or 0.0025),
             "slippage": float(backtest_cfg.get("slippage", 0.0005) or 0.0005),
+            "enable_detailed_backtest_log": bool(backtest_cfg.get("enable_detailed_backtest_log", False)),
             "suspend_action": str(backtest_cfg.get("suspend_action", "skip") or "skip"),
             "limit_up_action": str(backtest_cfg.get("limit_up_action", "skip_buy") or "skip_buy"),
             "limit_down_action": str(backtest_cfg.get("limit_down_action", "delay_sell") or "delay_sell"),
@@ -476,6 +619,7 @@ def set_runtime_context(payload: dict[str, Any]) -> None:
 def clear_runtime_context() -> None:
     if RUNTIME_CONTEXT_PATH.exists():
         RUNTIME_CONTEXT_PATH.unlink()
+    WINDOW_RUNTIME_CACHE.clear()
     try:
         from data_provider import ProviderFactory
 
@@ -1158,7 +1302,7 @@ def load_raw_data(
 ) -> pd.DataFrame:
     cfg = dict(config or env_config())
     fp_cfg = feature_pool_config()
-    fields = raw_fields or list(fp_cfg.get("raw_fields", []))
+    fields = list(dict.fromkeys(raw_fields or list(fp_cfg.get("raw_fields", []))))
     
     start_timestamp, end_timestamp = active_run_window(cfg)
     if warmup_trading_days > 0:
@@ -1171,6 +1315,17 @@ def load_raw_data(
     end_time = _date_text(end_timestamp)
     if str(cfg.get("price_adjust_reference_date", "auto") or "auto").strip().lower() == "auto":
         cfg["price_adjust_reference_date"] = end_time
+
+    cached_frame = _get_cached_raw_frame(cfg, fields, start_timestamp, end_timestamp)
+    if cached_frame is not None:
+        if _dynamic_index_pool_enabled(cfg):
+            observation_dates = _observation_dates_from_run_window(cfg)
+            component_map = _dynamic_index_components_by_observation_date(cfg, observation_dates)
+            instruments = len({code for codes in component_map.values() for code in codes})
+        else:
+            instruments = int(cached_frame.index.get_level_values("instrument").nunique()) if not cached_frame.empty else 0
+        log_data_loading(start_time, end_time, instruments, len(cached_frame))
+        return cached_frame
     
     if _dynamic_index_pool_enabled(cfg):
         observation_dates = _observation_dates_from_run_window(cfg)
@@ -1203,6 +1358,7 @@ def load_raw_data(
         if frame.index.name is None or frame.index.name == "":
             frame.index.name = "datetime"
     
+    _store_cached_raw_frame(cfg, fields, start_timestamp, end_timestamp, frame)
     return frame
 
 
@@ -1422,6 +1578,28 @@ def _compute_group_features(group: pd.DataFrame, base_features: list[dict[str, s
     return result
 
 
+def _feature_cache_key(
+    raw_frame: pd.DataFrame,
+    config: dict[str, Any],
+    feature_cfg: dict[str, Any],
+) -> str:
+    payload = {
+        "config": _config_cache_signature(config),
+        "raw_frame": _frame_cache_signature(raw_frame),
+        "base_features": feature_cfg.get("base_features", []),
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _label_cache_key(raw_frame: pd.DataFrame, config: dict[str, Any]) -> str:
+    payload = {
+        "config": _config_cache_signature(config),
+        "raw_frame": _frame_cache_signature(raw_frame),
+        "label_name": label_name(config),
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+
 def build_feature_frame(
     raw_frame: pd.DataFrame,
     config: dict[str, Any] | None = None,
@@ -1429,6 +1607,12 @@ def build_feature_frame(
 ) -> pd.DataFrame:
     cfg = config or env_config()
     fp_cfg = feature_cfg or feature_pool_config()
+    bucket = _window_cache_bucket(cfg)
+    cache_key = _feature_cache_key(raw_frame, cfg, fp_cfg)
+    if bucket is not None:
+        cached = bucket["feature_frames"].get(cache_key)
+        if cached is not None:
+            return cached
     base_features = list(fp_cfg.get("base_features", []))
     frames = []
     for _, group in raw_frame.groupby(level="instrument", sort=False):
@@ -1436,7 +1620,10 @@ def build_feature_frame(
     feature_frame = pd.concat(frames).sort_index()
     label = build_label_series(raw_frame, cfg)
     feature_frame[label.name] = label
-    return clip_to_active_window(feature_frame, cfg)
+    feature_frame = clip_to_active_window(feature_frame, cfg)
+    if bucket is not None:
+        bucket["feature_frames"][cache_key] = feature_frame
+    return feature_frame
 
 
 def build_label_series(
@@ -1444,6 +1631,12 @@ def build_label_series(
     config: dict[str, Any] | None = None,
 ) -> pd.Series:
     cfg = config or env_config()
+    bucket = _window_cache_bucket(cfg)
+    cache_key = _label_cache_key(raw_frame, cfg)
+    if bucket is not None:
+        cached = bucket["label_series"].get(cache_key)
+        if cached is not None:
+            return cached
     label_cfg = label_config(cfg)
     return_type = str(label_cfg.get("return_type", "period_return")).strip().lower()
     price_field = str(label_cfg.get("price_field", "close")).strip()
@@ -1468,7 +1661,10 @@ def build_label_series(
         period_return = period_return.loc[dynamic_mask]
     label = pd.Series(index=prices.index, dtype=float, name=label_name(cfg))
     label.loc[period_return.index] = period_return
-    return label.rename(label_name(cfg))
+    label = label.rename(label_name(cfg))
+    if bucket is not None:
+        bucket["label_series"][cache_key] = label
+    return label
 
 
 def build_analysis_label_series(
@@ -1476,6 +1672,36 @@ def build_analysis_label_series(
     config: dict[str, Any] | None = None,
 ) -> pd.Series:
     return build_label_series(raw_frame, config)
+
+
+def build_ohlcv_map(
+    raw_frame: pd.DataFrame,
+    config: dict[str, Any] | None = None,
+) -> dict[str, pd.DataFrame]:
+    cfg = config or env_config()
+    bucket = _window_cache_bucket(cfg)
+    cache_key = _frame_cache_signature(raw_frame)
+    if bucket is not None:
+        cached = bucket["ohlcv_maps"].get(cache_key)
+        if cached is not None:
+            return cached
+
+    required = ["open", "high", "low", "close", "volume"]
+    missing = [item for item in required if item not in raw_frame.columns]
+    if missing:
+        raise KeyError(f"原始行情缺少必要列: {missing}")
+
+    result: dict[str, pd.DataFrame] = {}
+    for instrument, group in raw_frame.groupby(level="instrument", sort=False):
+        frame = group.droplevel("instrument")[required].copy().sort_index()
+        frame = frame[~frame.index.duplicated(keep="first")]
+        frame[["close", "open", "high", "low"]] = frame[["close", "open", "high", "low"]].ffill()
+        frame["volume"] = pd.to_numeric(frame["volume"], errors="coerce").fillna(0.0)
+        result[str(instrument)] = frame
+
+    if bucket is not None:
+        bucket["ohlcv_maps"][cache_key] = result
+    return result
 
 
 def yearly_stability(series: pd.Series, label: pd.Series) -> float:
