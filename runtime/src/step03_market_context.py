@@ -5,7 +5,6 @@ import pandas as pd
 from common import (
     OUTPUT_DIR,
     env_config,
-    feature_pool_config,
     get_data_provider,
     load_raw_data,
     log_step_end,
@@ -31,11 +30,17 @@ def run() -> None:
 
     train_start = pd.Timestamp(str(config.get("train_start_date"))).normalize()
     train_end = pd.Timestamp(str(config.get("train_end_date"))).normalize()
-    feature_cfg = feature_pool_config()
-    raw_fields = list(feature_cfg.get("raw_fields", []))
-    for required in [fields.get("close", "close"), fields.get("turnover", "turnover"), fields.get("amount", "amount"), fields.get("market_cap", "market_cap")]:
-        if required not in raw_fields:
-            raw_fields.append(str(required))
+    # Step03 只依赖市场环境计算所需的最小字段集合，避免为了环境分析加载整套特征底层字段。
+    raw_fields: list[str] = []
+    for required in [
+        fields.get("close", "close"),
+        fields.get("turnover", "turnover"),
+        fields.get("amount", "amount"),
+        fields.get("market_cap", "market_cap"),
+    ]:
+        field_name = str(required or "").strip()
+        if field_name and field_name not in raw_fields:
+            raw_fields.append(field_name)
 
     context_cfg = dict(config)
     context_cfg["run_mode"] = "train"

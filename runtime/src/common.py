@@ -824,7 +824,18 @@ def analysis_profile(config: dict[str, Any] | None = None) -> str:
 
 
 def feature_pool_config() -> dict[str, Any]:
-    return load_yaml_file(CONFIG_DIR / "feature_pool.yaml")
+    config = load_yaml_file(CONFIG_DIR / "feature_pool.yaml")
+    enable_chip_features = bool(config.get("enable_chip_features", True))
+    config["enable_chip_features"] = enable_chip_features
+    if not enable_chip_features:
+        filtered_features: list[dict[str, Any]] = []
+        for item in config.get("base_features", []):
+            expr = str(item.get("expr", ""))
+            if expr.startswith("chip."):
+                continue
+            filtered_features.append(item)
+        config["base_features"] = filtered_features
+    return config
 
 
 def market_context_config() -> dict[str, Any]:

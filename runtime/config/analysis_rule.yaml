@@ -25,7 +25,7 @@ test_end_date: 2026-05-15
 #   - static_split: 固定 discovery / validation 两段切分
 #   - walk_forward: 采用滚动 walk-forward，多窗口重复 discovery / validation
 training_workflow:
-  mode: static_split
+  mode: walk_forward
   static_split:
     # discovery_start_date / discovery_end_date:
     # - 含义：海选阶段（discovery）的起止日期。该阶段会跑 step03~step09 产出候选因子。
@@ -42,15 +42,15 @@ training_workflow:
     # discovery_window_months:
     # - 含义：每个滚动窗口里 discovery 阶段长度（月）。
     # - 设置建议：常用 18~36；市场切换较快用 18~24，追求稳健可用 24~36。
-    discovery_window_months: 24
+    discovery_window_months: 5
     # validation_window_months:
     # - 含义：每个滚动窗口里 validation 阶段长度（月）。
     # - 设置建议：常用 3~12；建议不大于 discovery_window_months。
-    validation_window_months: 6
+    validation_window_months: 1
     # step_months:
     # - 含义：窗口向前滚动的步长（月）。
     # - 设置建议：常用等于 validation_window_months（不重叠）或其一半（允许重叠，提高样本数）。
-    step_months: 6
+    step_months: 3
     # max_windows:
     # - 含义：最多生成的滚动窗口数量；0 表示不设上限（直到 train_end_date）。
     # - 设置建议：本地联调用 2~3，正式评估用 4~8（按算力与耗时平衡）。

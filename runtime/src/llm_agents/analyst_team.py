@@ -8,6 +8,8 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
+from common import feature_pool_config
+
 from .agent_runner import AgentConfig, call_llm_agent
 
 ANALYST_AGENT_IDS = [
@@ -278,10 +280,13 @@ def run_analyst_team(env_cfg: dict[str, Any], context: dict[str, Any]) -> list[d
     """
     agents_config = env_cfg.get("llm_agents", {})
     results: list[dict[str, Any]] = []
+    chip_enabled = bool(feature_pool_config().get("enable_chip_features", True))
 
     # 找出有配置的分析师
     configured_agents: list[tuple[str, dict[str, Any]]] = []
     for agent_id in ANALYST_AGENT_IDS:
+        if agent_id == "chip_distribution" and not chip_enabled:
+            continue
         cfg = agents_config.get(agent_id)
         if cfg and cfg.get("model") and cfg.get("base_url") and cfg.get("api_key"):
             configured_agents.append((agent_id, cfg))

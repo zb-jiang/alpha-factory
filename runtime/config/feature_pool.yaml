@@ -187,3 +187,6 @@ generation_constraints:
     - [ema, rolling_mean]          # 禁止 EMA 后再做均值，避免重复平滑
     - [ema, ema]                   # 禁止 EMA 套 EMA，避免同类平滑反复叠加
     - [rolling_mean, rolling_mean] # 禁止均值套均值，避免同类平滑反复叠加
+
+# 特征族总开关：关闭后会从基础特征池中移除 chip.* 特征，并自动禁用 chip_distribution 分析师
+enable_chip_features: false
