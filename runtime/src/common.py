@@ -156,6 +156,21 @@ def clear_window_runtime_cache(config: dict[str, Any] | None = None) -> None:
     WINDOW_RUNTIME_CACHE.pop(scope_id, None)
 
 
+def _workflow_state_for_cache(config: dict[str, Any]) -> dict[str, Any]:
+    workflow_state = dict(config.get("workflow_state", {}))
+    if not workflow_state:
+        return {}
+    normalized: dict[str, Any] = {}
+    for key in ("window_id", "stage"):
+        value = workflow_state.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            normalized[key] = text
+    return normalized
+
+
 def _config_cache_signature(config: dict[str, Any]) -> str:
     relevant = {
         "run_mode": config.get("run_mode"),
@@ -171,7 +186,7 @@ def _config_cache_signature(config: dict[str, Any]) -> str:
         "rebalance": config.get("rebalance"),
         "rebalance_interval": config.get("rebalance_interval"),
         "disable_dynamic_membership": config.get("disable_dynamic_membership"),
-        "workflow_state": config.get("workflow_state"),
+        "workflow_state": _workflow_state_for_cache(config),
     }
     return json.dumps(relevant, ensure_ascii=False, sort_keys=True, default=str)
 
@@ -202,7 +217,7 @@ def _raw_cache_scope_signature(config: dict[str, Any]) -> str:
         "max_instruments": config.get("max_instruments"),
         "stock_pool": config.get("stock_pool"),
         "disable_dynamic_membership": config.get("disable_dynamic_membership"),
-        "workflow_state": config.get("workflow_state"),
+        "workflow_state": _workflow_state_for_cache(config),
     }
     return json.dumps(relevant, ensure_ascii=False, sort_keys=True, default=str)
 
@@ -1598,6 +1613,24 @@ def _label_cache_key(raw_frame: pd.DataFrame, config: dict[str, Any]) -> str:
         "label_name": label_name(config),
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def inspect_feature_frame_cache(
+    raw_frame: pd.DataFrame,
+    config: dict[str, Any] | None = None,
+    feature_cfg: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
+    cfg = config or env_config()
+    fp_cfg = feature_cfg or feature_pool_config()
+    bucket = _window_cache_bucket(cfg)
+    if bucket is None:
+        return False, "无窗口级缓存上下文"
+    cache_key = _feature_cache_key(raw_frame, cfg, fp_cfg)
+    if cache_key in bucket["feature_frames"]:
+        return True, "命中同窗口同阶段缓存"
+    if not bucket["feature_frames"]:
+        return False, "当前窗口/阶段首次构建"
+    return False, "当前 raw_frame 范围或配置签名与已缓存结果不同"
 
 
 def build_feature_frame(

@@ -15,6 +15,7 @@ from common import (
     evaluate_formula,
     factor_metrics_from_series,
     feature_pool_config,
+    inspect_feature_frame_cache,
     label_name,
     label_signature,
     load_raw_data,
@@ -75,6 +76,11 @@ def run() -> None:
         forward_trading_days=forward_days,
     )
     print("  原始数据加载完成，开始构建特征面板...", flush=True)
+    feature_cache_hit, feature_cache_reason = inspect_feature_frame_cache(raw_frame, config, feature_cfg)
+    if feature_cache_hit:
+        print(f"  特征面板缓存命中: {feature_cache_reason}", flush=True)
+    else:
+        print(f"  特征面板缓存未命中: {feature_cache_reason}", flush=True)
     feature_frame = build_feature_frame(raw_frame, config, feature_cfg)
     metric_rows: list[dict[str, object]] = []
     print("  特征面板构建完成，开始构建收益标签...", flush=True)
