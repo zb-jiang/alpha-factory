@@ -125,7 +125,10 @@ def _collect_discovery_passed_factors(scope: str) -> list[dict]:
 
 
 def _run_validation(window: dict[str, str], candidates: list[dict]) -> list[dict]:
-    log_phase(f"{window['window_id']} - validation")
+    log_phase(
+        f"{window['window_id']} - validation "
+        f"({window['validation_start_date']} ~ {window['validation_end_date']})"
+    )
     set_runtime_context(_stage_context(window, "validation"))
     write_json(
         OUTPUT_DIR / "llm" / "factors_validated.json",
@@ -270,8 +273,12 @@ def run() -> None:
                 f"{window['window_id']} - discovery window "
                 f"({window['discovery_start_date']} ~ {window['discovery_end_date']})"
             )
-            # 在新的训练窗口开始前，做一次全面的环境清理（因为上个窗口的验证阶段会产生新数据）
-            clean_outputs(dry_run=False)
+            # 在新的训练窗口开始前，做一次环境清理（因为上个窗口的验证阶段会产生新数据）
+            # 保留 train_windows 目录，因为前序窗口的归档数据需要保留到跨窗口汇总阶段
+            clean_outputs(
+                dry_run=False,
+                preserve_train_windows=True,
+            )
             discovery_scope = f"train_windows/{window['window_id']}/discovery"
             clear_window_runtime_cache()
             
