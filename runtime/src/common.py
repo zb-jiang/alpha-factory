@@ -4,6 +4,7 @@ import ast
 from collections import Counter
 import json
 import math
+import os
 import re
 import sys
 from pathlib import Path
@@ -86,11 +87,30 @@ def log_data_loading(start_time: str, end_time: str, instruments: int, rows: int
     print(f"   加载数据: {start_time} ~ {end_time}, {instruments} 只股票, {rows:,} 行", flush=True)
 
 
-RUNTIME_ROOT = Path(__file__).resolve().parents[1]
-CONFIG_DIR = RUNTIME_ROOT / "config"
-DATA_DIR = RUNTIME_ROOT / "data"
-OUTPUT_DIR = RUNTIME_ROOT / "outputs"
-SRC_DIR = RUNTIME_ROOT / "src"
+SRC_DIR = Path(__file__).resolve().parents[1]
+
+
+def _resolve_staging_dir() -> Path:
+    for i, arg in enumerate(sys.argv):
+        if arg == "--staging" and i + 1 < len(sys.argv):
+            return Path(sys.argv[i + 1]).resolve()
+        if arg.startswith("--staging="):
+            return Path(arg.split("=", 1)[1]).resolve()
+    env_staging = os.environ.get("STAGING_DIR", "").strip()
+    if env_staging:
+        return Path(env_staging).resolve()
+    raise RuntimeError(
+        "必须指定 staging 目录。请通过 --staging <path> 参数或 STAGING_DIR 环境变量指定。\n"
+        "示例: python step10_iterate.py --staging D:/staging/tenant_A\n"
+        "示例: set STAGING_DIR=D:/staging/tenant_A && python step10_iterate.py"
+    )
+
+
+STAGING_DIR = _resolve_staging_dir()
+CONFIG_DIR = STAGING_DIR / "config"
+DATA_DIR = STAGING_DIR / "data"
+OUTPUT_DIR = STAGING_DIR / "outputs"
+JOINQUANT_DIR = STAGING_DIR / "joinquant"
 MARKET_CONTEXT_CONFIG_PATH = CONFIG_DIR / "market_context.yaml"
 SELECTOR_CONFIG_PATH = CONFIG_DIR / "selector.yaml"
 SCORE_CONFIG_PATH = CONFIG_DIR / "score.yaml"
@@ -705,12 +725,27 @@ def _load_layered_configs() -> tuple[dict[str, Any], dict[str, Any], dict[str, A
     return env_cfg, analysis_cfg, backtest_cfg
 
 
+def _normalize_data_cache_dir(config: dict[str, Any]) -> dict[str, Any]:
+    ts_cfg = config.get("tushare")
+    if not isinstance(ts_cfg, dict):
+        return config
+    raw_dir = ts_cfg.get("data_cache_dir")
+    if not raw_dir:
+        ts_cfg["data_cache_dir"] = str(DATA_DIR / "tushare_cache")
+        return config
+    p = Path(raw_dir)
+    if not p.is_absolute():
+        ts_cfg["data_cache_dir"] = str((DATA_DIR / p).resolve())
+    return config
+
+
 def env_config() -> dict[str, Any]:
     env_cfg, analysis_cfg, _ = _load_layered_configs()
     config = _deep_merge(env_cfg, analysis_cfg)
     context = runtime_context()
     if context:
         config = _deep_merge(config, context)
+    config = _normalize_data_cache_dir(config)
     return _normalize_price_adjust_block(
         _normalize_preprocess_block(_normalize_label_block(config))
     )

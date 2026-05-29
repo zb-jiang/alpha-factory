@@ -10,8 +10,8 @@ from typing import Any
 import yaml
 
 from common import (
+    JOINQUANT_DIR,
     OUTPUT_DIR,
-    RUNTIME_ROOT,
     analysis_rule_config,
     backtest_rule_config,
     env_config,
@@ -1383,6 +1383,7 @@ def execute_trades(context):
 def run() -> None:
     parser = argparse.ArgumentParser(description="Generate JoinQuant strategy code for a specific factor")
     parser.add_argument("--factor", required=True, help="Factor name to generate JoinQuant code for")
+    parser.add_argument("--staging", required=False, help="Staging directory path (or set STAGING_DIR env var)")
     args = parser.parse_args()
 
     factor_name = args.factor
@@ -1441,7 +1442,7 @@ def run() -> None:
         report_fields=report_fields,
     )
 
-    output_dir = RUNTIME_ROOT / "joinquant"
+    output_dir = JOINQUANT_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{factor_name}.py"
     output_path.write_text(code, encoding="utf-8")
