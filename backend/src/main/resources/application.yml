@@ -1,0 +1,36 @@
+server:
+  port: 8081
+
+spring:
+  datasource:
+    url: jdbc:mysql://localhost:3306/factor_factory?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&characterEncoding=UTF-8
+    username: root
+    password: passw0rd
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQLDialect
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: Asia/Shanghai
+
+jwt:
+  secret: FactorFactory2026SecretKeyForJWTTokenGenerationMustBeLongEnough
+  expiration: 86400000
+
+staging:
+  root-dir: D:/staging
+  config-template-dir: ${user.dir}/../runtime/config
+
+execution:
+  max-concurrent-tasks: 4
+  python-executable: python
+  src-dir: ${user.dir}/../runtime/src
+
+logging:
+  level:
+    com.factorfactory.webapp: DEBUG

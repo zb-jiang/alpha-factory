@@ -72,7 +72,13 @@ runtime/config/env.yaml
 
 # Java / Maven
 jq2qmt/target/
+backend/target/
 *.class
+
+# Node / Vue (webapp)
+webapp/node_modules/
+webapp/dist/
+webapp/.vite/
 
 # Windows
 Thumbs.db
@@ -111,3 +117,12 @@ dmypy.json
 # Claude Code
 .claude/
 .omc/
+
+# Agent rules (项目内部指引，不纳入版本控制)
+AGENTS.md
+
+# Quant tutorials (付费内容，不纳入版本控制)
+quant_tutorials/
+
+# Docs (内部文档，不纳入版本控制)
+docs/
