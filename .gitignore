@@ -70,6 +70,10 @@ runtime/config/env.yaml
 *.bak
 *.cache
 
+# Java / Maven
+jq2qmt/target/
+*.class
+
 # Windows
 Thumbs.db
 ehthumbs.db

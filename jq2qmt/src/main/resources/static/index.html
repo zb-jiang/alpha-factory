@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JQ2QMT Signal Monitor</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
+        .header { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); padding: 20px 32px; border-bottom: 1px solid #334155; display: flex; justify-content: space-between; align-items: center; }
+        .header h1 { font-size: 22px; color: #38bdf8; }
+        .header .status { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+        .status-dot { width: 10px; height: 10px; border-radius: 50%; }
+        .status-dot.up { background: #22c55e; box-shadow: 0 0 8px #22c55e; }
+        .status-dot.down { background: #ef4444; box-shadow: 0 0 8px #ef4444; }
+        .container { max-width: 1400px; margin: 0 auto; padding: 24px; }
+        .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
+        .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 20px; }
+        .card .label { font-size: 13px; color: #94a3b8; margin-bottom: 8px; }
+        .card .value { font-size: 28px; font-weight: 700; color: #f1f5f9; }
+        .card .value.blue { color: #38bdf8; }
+        .card .value.green { color: #22c55e; }
+        .card .value.yellow { color: #eab308; }
+        .card .value.red { color: #ef4444; }
+        .section { background: #1e293b; border: 1px solid #334155; border-radius: 12px; margin-bottom: 24px; overflow: hidden; }
+        .section-header { padding: 16px 20px; border-bottom: 1px solid #334155; display: flex; justify-content: space-between; align-items: center; }
+        .section-header h2 { font-size: 16px; color: #e2e8f0; }
+        .section-body { padding: 16px 20px; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #1e293b; font-size: 13px; }
+        th { color: #94a3b8; font-weight: 500; background: #0f172a; position: sticky; top: 0; }
+        tr:hover td { background: #334155; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+        .badge.buy { background: #166534; color: #86efac; }
+        .badge.sell { background: #991b1b; color: #fca5a5; }
+        .badge.adjust { background: #854d0e; color: #fde047; }
+        .badge.filled { background: #166534; color: #86efac; }
+        .badge.rejected { background: #991b1b; color: #fca5a5; }
+        .badge.skipped { background: #854d0e; color: #fde047; }
+        .badge.error { background: #7f1d1d; color: #fecaca; }
+        .badge.partial { background: #1e3a5f; color: #93c5fd; }
+        .badge.signal { background: #1e3a5f; color: #93c5fd; }
+        .badge.result { background: #3b1764; color: #d8b4fe; }
+        .badge.dead { background: #7f1d1d; color: #fecaca; }
+        .controls { display: flex; gap: 12px; align-items: center; }
+        .controls select, .controls input, .controls button { padding: 6px 12px; border-radius: 6px; border: 1px solid #475569; background: #0f172a; color: #e2e8f0; font-size: 13px; }
+        .controls button { background: #2563eb; border-color: #2563eb; cursor: pointer; }
+        .controls button:hover { background: #1d4ed8; }
+        .empty { text-align: center; padding: 40px; color: #64748b; }
+        .refresh-info { font-size: 12px; color: #64748b; }
+        .tab-bar { display: flex; gap: 0; border-bottom: 1px solid #334155; }
+        .tab { padding: 10px 20px; cursor: pointer; font-size: 14px; color: #94a3b8; border-bottom: 2px solid transparent; }
+        .tab.active { color: #38bdf8; border-bottom-color: #38bdf8; }
+        .tab:hover { color: #e2e8f0; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .scroll-table { max-height: 400px; overflow-y: auto; }
+        .scroll-table::-webkit-scrollbar { width: 6px; }
+        .scroll-table::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>JQ2QMT Signal Monitor</h1>
+        <div class="status">
+            <div class="status-dot" id="statusDot"></div>
+            <span id="statusText">Connecting...</span>
+            <span class="refresh-info" id="refreshInfo"></span>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="cards">
+            <div class="card">
+                <div class="label">Signal Streams</div>
+                <div class="value blue" id="cardStreams">-</div>
+            </div>
+            <div class="card">
+                <div class="label">Total Signals</div>
+                <div class="value green" id="cardSignals">-</div>
+            </div>
+            <div class="card">
+                <div class="label">Total Results</div>
+                <div class="value yellow" id="cardResults">-</div>
+            </div>
+            <div class="card">
+                <div class="label">Dead Letters</div>
+                <div class="value red" id="cardDead">-</div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-header">
+                <h2>Stream Overview</h2>
+            </div>
+            <div class="section-body">
+                <div class="scroll-table">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Stream Name</th>
+                                <th>Type</th>
+                                <th>Length</th>
+                                <th>Consumer Groups</th>
+                            </tr>
+                        </thead>
+                        <tbody id="streamTable"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="tab-bar">
+                <div class="tab active" data-tab="signals">Signals</div>
+                <div class="tab" data-tab="results">Results</div>
+                <div class="tab" data-tab="pending">Pending</div>
+            </div>
+            <div class="section-header">
+                <h2>Signal Details</h2>
+                <div class="controls">
+                    <select id="strategySelect"><option value="">Select Strategy</option></select>
+                    <input type="number" id="countInput" value="50" min="1" max="200" style="width:80px">
+                    <button onclick="loadDetails()">Refresh</button>
+                </div>
+            </div>
+            <div class="tab-content active" id="tab-signals">
+                <div class="scroll-table">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Record ID</th>
+                                <th>Signal ID</th>
+                                <th>Action</th>
+                                <th>Code</th>
+                                <th>Pct</th>
+                                <th>Price</th>
+                                <th>Signal Time</th>
+                            </tr>
+                        </thead>
+                        <tbody id="signalTable"></tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="tab-content" id="tab-results">
+                <div class="scroll-table">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Signal ID</th>
+                                <th>Status</th>
+                                <th>Order ID</th>
+                                <th>Filled Price</th>
+                                <th>Filled Volume</th>
+                                <th>Execute Time</th>
+                                <th>Remark</th>
+                            </tr>
+                        </thead>
+                        <tbody id="resultTable"></tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="tab-content" id="tab-pending">
+                <div class="scroll-table">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Record ID</th>
+                                <th>Consumer</th>
+                                <th>Delivery Count</th>
+                            </tr>
+                        </thead>
+                        <tbody id="pendingTable"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = window.location.origin;
+        const API_KEY = new URLSearchParams(window.location.search).get('apiKey') || '';
+        const headers = API_KEY ? {'X-API-Key': API_KEY} : {};
+
+        function api(path) {
+            return fetch(API_BASE + path, {headers})
+                .then(r => r.json())
+                .then(d => d.data)
+                .catch(e => { console.error(e); return null; });
+        }
+
+        async function refreshDashboard() {
+            const dash = await api('/api/v1/monitor/dashboard');
+            if (!dash) {
+                document.getElementById('statusDot').className = 'status-dot down';
+                document.getElementById('statusText').textContent = 'Disconnected';
+                return;
+            }
+            document.getElementById('statusDot').className = 'status-dot up';
+            document.getElementById('statusText').textContent = 'Connected';
+            document.getElementById('refreshInfo').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+            document.getElementById('cardStreams').textContent = dash.totalSignalStreams || 0;
+            document.getElementById('cardSignals').textContent = dash.totalSignalCount || 0;
+            document.getElementById('cardResults').textContent = dash.totalResultCount || 0;
+            document.getElementById('cardDead').textContent = dash.totalDeadCount || 0;
+
+            const sel = document.getElementById('strategySelect');
+            const currentVal = sel.value;
+            sel.innerHTML = '<option value="">Select Strategy</option>';
+            (dash.strategies || []).forEach(s => {
+                const opt = document.createElement('option');
+                opt.value = s; opt.textContent = s;
+                sel.appendChild(opt);
+            });
+            if (currentVal) sel.value = currentVal;
+        }
+
+        async function refreshStreams() {
+            const streams = await api('/api/v1/monitor/streams');
+            const tbody = document.getElementById('streamTable');
+            if (!streams || streams.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" class="empty">No streams found</td></tr>';
+                return;
+            }
+            tbody.innerHTML = streams.map(s => `
+                <tr>
+                    <td>${s.streamName}</td>
+                    <td><span class="badge ${s.type}">${s.type}</span></td>
+                    <td>${s.length}</td>
+                    <td>${s.consumerGroupCount || 0}</td>
+                </tr>
+            `).join('');
+        }
+
+        async function loadDetails() {
+            const strategy = document.getElementById('strategySelect').value;
+            const count = document.getElementById('countInput').value || 50;
+            if (!strategy) return;
+
+            const [signals, results, pending] = await Promise.all([
+                api(`/api/v1/monitor/signals/${strategy}?count=${count}`),
+                api(`/api/v1/monitor/results/${strategy}?count=${count}`),
+                api(`/api/v1/monitor/pending/${strategy}`)
+            ]);
+
+            const sigBody = document.getElementById('signalTable');
+            if (!signals || signals.length === 0) {
+                sigBody.innerHTML = '<tr><td colspan="7" class="empty">No signals</td></tr>';
+            } else {
+                sigBody.innerHTML = signals.reverse().map(s => `
+                    <tr>
+                        <td>${s._redis_record_id || ''}</td>
+                        <td>${s.signal_id || ''}</td>
+                        <td><span class="badge ${(s.action || '').toLowerCase()}">${s.action || ''}</span></td>
+                        <td>${s.code || ''}</td>
+                        <td>${s.pct || ''}</td>
+                        <td>${s.price || ''}</td>
+                        <td>${s.signal_time || ''}</td>
+                    </tr>
+                `).join('');
+            }
+
+            const resBody = document.getElementById('resultTable');
+            if (!results || results.length === 0) {
+                resBody.innerHTML = '<tr><td colspan="7" class="empty">No results</td></tr>';
+            } else {
+                resBody.innerHTML = results.reverse().map(r => `
+                    <tr>
+                        <td>${r.signal_id || ''}</td>
+                        <td><span class="badge ${(r.status || '').toLowerCase()}">${r.status || ''}</span></td>
+                        <td>${r.order_id || ''}</td>
+                        <td>${r.filled_price || ''}</td>
+                        <td>${r.filled_volume || ''}</td>
+                        <td>${r.execute_time || ''}</td>
+                        <td>${r.remark || ''}</td>
+                    </tr>
+                `).join('');
+            }
+
+            const penBody = document.getElementById('pendingTable');
+            if (!pending || pending.length === 0) {
+                penBody.innerHTML = '<tr><td colspan="3" class="empty">No pending signals</td></tr>';
+            } else {
+                penBody.innerHTML = pending.map(p => `
+                    <tr>
+                        <td>${p.recordId || ''}</td>
+                        <td>${p.consumerName || ''}</td>
+                        <td>${p.totalDeliveryCount || ''}</td>
+                    </tr>
+                `).join('');
+            }
+        }
+
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                tab.classList.add('active');
+                document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+            });
+        });
+
+        refreshDashboard();
+        refreshStreams();
+        setInterval(() => { refreshDashboard(); refreshStreams(); }, 10000);
+    </script>
+</body>
+</html>
