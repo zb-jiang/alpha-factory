@@ -43,6 +43,7 @@ runtime/data/ricequant_cache/
 # Output Files (运行结果，不需要提交)
 runtime/outputs/
 runtime/outputs/**/
+runtime/joinquant/
 
 # Iteration outputs (迭代输出，不需要提交)
 runtime/outputs/iter_*/
