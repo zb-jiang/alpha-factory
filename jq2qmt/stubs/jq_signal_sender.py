@@ -2,6 +2,7 @@ import uuid
 import json
 import logging
 import requests
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,6 @@ class JqSignalSender:
 
     def _is_sim_trade(self):
         try:
-            from jqdata import g
             if hasattr(g, '_context_ref') and g._context_ref is not None:
                 return g._context_ref.run_params.type == 'sim_trade'
         except Exception:
@@ -69,23 +69,32 @@ class JqSignalSender:
             'signalTime': signal_time or ''
         }
 
-        try:
-            url = f'{self.middleware_url}/api/v1/signals/send'
-            resp = self._session.post(url, json=payload, timeout=10)
-            result = resp.json()
-            if result.get('code') == 200:
-                logger.info('[JqSignalSender] Signal sent: %s %s pct=%.4f signalId=%s',
-                            action, code, pct, payload['signalId'])
-                return result.get('data', {})
-            else:
-                logger.error('[JqSignalSender] Failed: %s', result.get('message', 'Unknown error'))
+        url = f'{self.middleware_url}/api/v1/signals/send'
+        # 使用 print 确保日志出现在聚宽回测输出中（logger 可能被聚宽过滤）
+        print(f'[JqSignalSender] HTTP POST {url} payload={json.dumps(payload, ensure_ascii=False)}')
+
+        for attempt in range(3):
+            try:
+                resp = self._session.post(url, json=payload, timeout=10)
+                result = resp.json()
+                if result.get('code') == 200:
+                    print(f'[JqSignalSender] Signal sent OK: {action} {code} pct={pct:.4f} recordId={result.get("data", "")}')
+                    return result.get('data', {})
+                else:
+                    print(f'[JqSignalSender] Failed (attempt {attempt + 1}/3): code={result.get("code")} msg={result.get("message", "Unknown")}')
+                    if attempt < 2:
+                        time.sleep(1)
+                        continue
+                    return None
+            except requests.exceptions.Timeout:
+                print(f'[JqSignalSender] Timeout (attempt {attempt + 1}/3): {action} {code}')
+                if attempt < 2:
+                    time.sleep(1)
+                    continue
                 return None
-        except requests.exceptions.Timeout:
-            logger.error('[JqSignalSender] Timeout sending signal: %s %s', action, code)
-            return None
-        except Exception as e:
-            logger.error('[JqSignalSender] Error: %s', repr(e))
-            return None
+            except Exception as e:
+                print(f'[JqSignalSender] Error (attempt {attempt + 1}/3): {repr(e)}')
+                return None
 
     def send_buy(self, code, pct, price=0.0):
         return self.send_signal('BUY', code, pct, price)
@@ -136,45 +145,61 @@ class JqSignalSender:
             return False
 
 
-def signal_order_target_value(code, target_value, style=None):
+def signal_order(code, amount, style=None, context=None):
     """
-    Wrapper for order_target_value in JoinQuant strategy.
-    Replaces all order_target_value() calls to also send signals to middleware.
+    Wrapper for order() in JoinQuant strategy.
+    Replaces all order() calls to also send signals to middleware.
 
     Usage:
-        # Original: order_target_value(code, 0)
-        # Replace: signal_order_target_value(code, 0)
+        # Original: order(code, -shares_to_sell)
+        # Replace: signal_order(code, -shares_to_sell, context=context)
 
-        # Original: order_target_value(code, target_value, style=LimitOrderStyle(p))
-        # Replace: signal_order_target_value(code, target_value, style=LimitOrderStyle(p))
+        # Original: order(code, actual_shares)
+        # Replace: signal_order(code, actual_shares, context=context)
+
+        # Original: order(code, shares, style=LimitOrderStyle(p))
+        # Replace: signal_order(code, shares, style=LimitOrderStyle(p), context=context)
+
+    Args:
+        code: stock code (e.g. '000001.XSHE')
+        amount: number of shares. Positive=buy, Negative=sell
+        style: order style (e.g. LimitOrderStyle), optional
+        context: 显式传入聚宽 context 对象。如果不传，则回退到 g._context_ref。
+
+    Note: g, order, get_current_data are global objects injected by JoinQuant
+    framework into the strategy namespace. They cannot be imported from jqdata.
     """
-    try:
-        from jqdata import g, order_target_value, get_current_data
-    except ImportError:
-        raise ImportError('This function must run in JoinQuant environment')
-
-    context = g._context_ref
+    if context is None:
+        context = g._context_ref
     current_data = get_current_data()
-    is_buy = target_value > 0 and code not in context.portfolio.positions
-    is_sell = target_value == 0 and code in context.portfolio.positions
+    is_buy = amount > 0
+    is_sell = amount < 0
 
     pct = 0.0
-    price = 0.0
+    price = current_data[code].last_price
+
     if is_sell:
-        pct = 1.0
-        price = current_data[code].last_price
-    elif is_buy:
-        price = current_data[code].last_price
+        abs_amount = abs(amount)
+        if code in context.portfolio.positions:
+            total_amount = context.portfolio.positions[code].total_amount
+            remaining_amount = total_amount - abs_amount
+            if remaining_amount > 0 and context.portfolio.total_value > 0:
+                pct = (remaining_amount * price) / context.portfolio.total_value
+            else:
+                pct = 0.0
+        else:
+            pct = 0.0
+    else:
         if context.portfolio.total_value > 0:
-            pct = target_value / context.portfolio.total_value
+            pct = (amount * price) / context.portfolio.total_value
 
     if style is not None:
-        my_order = order_target_value(code, target_value, style=style)
+        my_order = order(code, amount, style=style)
     else:
-        my_order = order_target_value(code, target_value)
+        my_order = order(code, amount)
 
     if my_order is not None and hasattr(g, 'signal_sender') and g.signal_sender is not None:
-        action = 'BUY' if is_buy else ('SELL' if is_sell else 'ADJUST')
+        action = 'BUY' if is_buy else 'SELL'
         g.signal_sender.send_signal(action, code, pct, price)
 
     return my_order
@@ -193,12 +218,10 @@ def init_signal_sender(middleware_url, api_key, strategy, mode=1):
                 api_key='your-api-key',
                 strategy=g.strategy
             )
-    """
-    try:
-        from jqdata import g
-    except ImportError:
-        raise ImportError('This function must run in JoinQuant environment')
 
+    Note: g is a global object injected by JoinQuant framework into the
+    strategy namespace. It cannot be imported from the jqdata package.
+    """
     g.signal_sender = JqSignalSender(
         middleware_url=middleware_url,
         api_key=api_key,

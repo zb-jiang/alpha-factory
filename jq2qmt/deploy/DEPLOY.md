@@ -219,11 +219,13 @@ curl -X POST http://localhost:8080/api/v1/signals/send \
 
 ### 4.3 策略改造示例
 
-```python
-# ===== 在策略顶部添加 =====
-from jq_signal_sender import JqSignalSender, signal_order_target_value, init_signal_sender
+> **注意**：上一步已经把 `jq_signal_sender.py` 的内容粘贴到策略编辑器顶部，所有函数已在全局命名空间中，**不需要写 import**。
 
-# ===== 在 initialize() 中初始化 =====
+#### 4.3.1 初始化信号发送器
+
+在 `initialize()` 函数中添加：
+
+```python
 def initialize(context):
     g.strategy = 'factor_alpha_001'
     g._context_ref = context
@@ -235,17 +237,26 @@ def initialize(context):
                 # 0=始终发信号（本地调试用，回测时也会发）
     )
     # ... 原有初始化代码 ...
-
-# ===== 替换所有 order_target_value =====
-# 原代码: order_target_value(code, 0)
-# 改为:   signal_order_target_value(code, 0)
-
-# 原代码: order_target_value(code, target_value)
-# 改为:   signal_order_target_value(code, target_value)
-
-# 原代码: order_target_value(code, target_value, style=LimitOrderStyle(p))
-# 改为:   signal_order_target_value(code, target_value, style=LimitOrderStyle(p))
 ```
+
+#### 4.3.2 替换 order() 调用
+
+step14 生成的脚本使用 `order()` 下单，需要替换为 `signal_order()`：
+
+```python
+# 原代码: order(code, -shares_to_sell)
+# 改为:   signal_order(code, -shares_to_sell, context=context)
+
+# 原代码: order(code, actual_shares)
+# 改为:   signal_order(code, actual_shares, context=context)
+
+# 原代码: order(code, shares, style=LimitOrderStyle(p))
+# 改为:   signal_order(code, shares, style=LimitOrderStyle(p), context=context)
+```
+
+> **为什么显式传 `context=context`？**  
+> 聚宽在不同回调函数中会传入不同的 `context` 对象。`signal_order` 内部需要读取 `context.portfolio.positions` 来判断当前持仓，显式传入可以确保使用当前回调的 `context`，避免因 `g._context_ref` 和当前回调不同步导致持仓判断错误。
+
 
 ## 5. QMT 端配置
 

@@ -2,7 +2,7 @@ package com.factorfactory.jq2qmt.model;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
-import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.PositiveOrZero;
 
 import java.io.Serializable;
 import java.time.LocalDateTime;
@@ -17,7 +17,7 @@ public class TradeSignal implements Serializable {
     private String code;
 
     @NotNull(message = "pct is required")
-    @Positive(message = "pct must be positive")
+    @PositiveOrZero(message = "pct must be positive or zero")
     private Double pct;
 
     private Double price;

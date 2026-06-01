@@ -187,18 +187,48 @@ public class RedisStreamService {
 
     @SuppressWarnings("unchecked")
     public List<Map<String, String>> getResultHistory(String strategy, int count) {
-        String streamKey = properties.getStream().resultStreamKey(strategy);
+        String resultStreamKey = properties.getStream().resultStreamKey(strategy);
+        String signalStreamKey = properties.getStream().signalStreamKey(strategy);
 
         List<MapRecord<String, Object, Object>> rawRecords =
-                redisTemplate.opsForStream().range(streamKey, Range.unbounded());
+                redisTemplate.opsForStream().range(resultStreamKey, Range.unbounded());
 
         if (rawRecords == null) {
             return Collections.emptyList();
         }
 
+        Map<String, Map<String, String>> signalMap = new HashMap<>();
+        try {
+            List<MapRecord<String, Object, Object>> signalRecords =
+                    redisTemplate.opsForStream().range(signalStreamKey, Range.unbounded());
+            if (signalRecords != null) {
+                for (MapRecord<String, Object, Object> rec : signalRecords) {
+                    Map<String, String> msg = recordToMap(rec);
+                    String sid = msg.get("signal_id");
+                    if (sid != null && !sid.isEmpty()) {
+                        Map<String, String> info = new HashMap<>();
+                        info.put("code", msg.getOrDefault("code", ""));
+                        info.put("action", msg.getOrDefault("action", ""));
+                        signalMap.put(sid, info);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to load signal history for result enrichment: {}", e.getMessage());
+        }
+
+        final Map<String, Map<String, String>> finalSignalMap = signalMap;
         return rawRecords.stream()
                 .limit(count)
                 .map(this::recordToMap)
+                .peek(r -> {
+                    String sid = r.get("signal_id");
+                    if (sid != null && finalSignalMap.containsKey(sid)) {
+                        Map<String, String> info = finalSignalMap.get(sid);
+                        r.putIfAbsent("code", info.getOrDefault("code", ""));
+                        r.putIfAbsent("action", info.getOrDefault("action", ""));
+                    }
+                })
                 .collect(Collectors.toList());
     }
 

@@ -307,8 +307,10 @@ def _translate_expr_to_single_stock(expr: str) -> str:
     return expr
 
 
-def _detect_joinquant_field_requirements(sorted_feature_names: list[str]) -> tuple[list[str], list[str]]:
+def _detect_joinquant_field_requirements(sorted_feature_names: list[str], raw_names_in_formula: set[str] | None = None) -> tuple[list[str], list[str]]:
     used_names = set(sorted_feature_names)
+    if raw_names_in_formula:
+        used_names |= raw_names_in_formula
     valuation_fields = [name for name in JQ_VALUATION_FIELD_MAP if name in used_names]
     report_fields = [name for name in JQ_REPORT_FIELD_MAP if name in used_names]
     return valuation_fields, report_fields
@@ -555,6 +557,11 @@ def _generate_strategy_code(
         report_fields,
     )
 
+    fundamental_env_inject = ""
+    if fundamental_series_fields:
+        inject_lines = [f"            env['{field}'] = {field}" for field in fundamental_series_fields]
+        fundamental_env_inject = "\n".join(inject_lines)
+
     chip_compute_in_loop = ""
     if has_chip:
         chip_compute_in_loop = textwrap.indent(textwrap.dedent(f"""\
@@ -794,6 +801,7 @@ def compute_factor_scores(context):
             env.update(OPERATOR_MAP)
             env['np'] = np
             env['pd'] = pd
+{fundamental_env_inject}
             score = eval(FACTOR_FORMULA, {{"__builtins__": {{}}}}, env)
             if isinstance(score, pd.Series):
                 score = float(score.iloc[-1])
@@ -1409,6 +1417,7 @@ def run() -> None:
     allowed_feature_names = set(all_features.keys()) | allowed_raw
 
     used_feature_names = formula_feature_names(formula, allowed_feature_names)
+    raw_names_in_formula = used_feature_names & allowed_raw
     required_features: dict[str, str] = {}
     for feat_name in used_feature_names:
         _resolve_feature_deps(feat_name, all_features, allowed_raw, required_features)
@@ -1417,7 +1426,7 @@ def run() -> None:
 
     has_chip = _has_chip_features(required_features)
     chip_windows = _detect_chip_windows(required_features) if has_chip else []
-    valuation_fields, report_fields = _detect_joinquant_field_requirements(sorted_feature_names)
+    valuation_fields, report_fields = _detect_joinquant_field_requirements(sorted_feature_names, raw_names_in_formula)
 
     print(f"  required features: {sorted_feature_names}")
     print(f"  has chip features: {has_chip}")

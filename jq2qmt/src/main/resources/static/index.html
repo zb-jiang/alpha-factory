@@ -148,6 +148,8 @@
                         <thead>
                             <tr>
                                 <th>Signal ID</th>
+                                <th>Action</th>
+                                <th>Code</th>
                                 <th>Status</th>
                                 <th>Order ID</th>
                                 <th>Filled Price</th>
@@ -262,11 +264,13 @@
 
             const resBody = document.getElementById('resultTable');
             if (!results || results.length === 0) {
-                resBody.innerHTML = '<tr><td colspan="7" class="empty">No results</td></tr>';
+                resBody.innerHTML = '<tr><td colspan="9" class="empty">No results</td></tr>';
             } else {
                 resBody.innerHTML = results.reverse().map(r => `
                     <tr>
                         <td>${r.signal_id || ''}</td>
+                        <td><span class="badge ${(r.action || '').toLowerCase()}">${r.action || ''}</span></td>
+                        <td>${r.code || ''}</td>
                         <td><span class="badge ${(r.status || '').toLowerCase()}">${r.status || ''}</span></td>
                         <td>${r.order_id || ''}</td>
                         <td>${r.filled_price || ''}</td>

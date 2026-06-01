@@ -404,18 +404,35 @@ class QmtSignalWorker:
                                     remark='No available position to sell')
                 return
 
-            sell_volume = int(target_pos.m_nCanUseVolume * pct)
-            sell_volume = (sell_volume // 100) * 100
-
-            if sell_volume <= 0:
-                self._report_result(strategy, signal_id, 'SKIPPED',
-                                    remark='Sell volume too small after rounding')
-                return
-
             current_price = self._get_current_price(code)
             ok, reason = self.risk_checker.check_slippage(signal_price, current_price)
             if not ok:
                 self._report_result(strategy, signal_id, 'SKIPPED', remark=reason)
+                return
+
+            total_asset = self._xt_trader.query_stock_asset(self._xt_account)
+            if total_asset is None:
+                self._report_result(strategy, signal_id, 'ERROR', remark='Cannot query account asset')
+                return
+
+            if pct <= 1e-6:
+                sell_volume = target_pos.m_nCanUseVolume
+            else:
+                target_value = total_asset.m_dTotalAsset * pct
+                current_value = target_pos.m_nCanUseVolume * current_price
+                if current_value <= target_value:
+                    self._report_result(strategy, signal_id, 'SKIPPED',
+                                        remark=f'Already below target: current={current_value:.2f} target={target_value:.2f}')
+                    return
+                sell_value = current_value - target_value
+                sell_volume = int(sell_value / current_price)
+
+            lot_size = 200 if code.startswith('688') else 100
+            sell_volume = (sell_volume // lot_size) * lot_size
+
+            if sell_volume <= 0:
+                self._report_result(strategy, signal_id, 'SKIPPED',
+                                    remark='Sell volume too small after rounding')
                 return
 
             order_id = self._xt_trader.order_stock(
