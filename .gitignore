@@ -98,6 +98,9 @@ htmlcov/
 
 # MyPy
 .mypy_cache/
+
+# Local-only documentation
+guojin-qmt-setup-guide.md
 .dmypy.json
 dmypy.json
 
