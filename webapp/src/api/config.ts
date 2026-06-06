@@ -1,22 +1,79 @@
 import api from './index'
 
-export interface ConfigResponse {
+// ============================================================
+// 类型定义
+// ============================================================
+
+export interface SelectOption {
+  label: string
+  value: string
+  description?: string
+}
+
+export interface ConfigField {
+  key: string
+  label: string
+  description?: string
+  type: 'text' | 'number' | 'select' | 'switch' | 'slider' | 'date' | 'password' | 'tag_select' | 'provider_list'
+  value: any
+  defaultValue: any
+  placeholder?: string
+  options?: SelectOption[]
+  min?: number
+  max?: number
+  step?: number
+  precision?: number
+  required?: boolean
+  readonly?: boolean
+  source?: 'global' | 'user' | 'task'
+  showWhenKey?: string
+  showWhenValue?: any
+}
+
+export interface ConfigGroup {
   name: string
-  content: string
+  label: string
+  description?: string
+  icon?: string
+  fields: ConfigField[]
 }
 
-export function listConfigs(taskId: number) {
-  return api.get<any, { data: ConfigResponse[] }>(`/tasks/${taskId}/config`)
+export interface StructuredConfigResponse {
+  section: string
+  sectionLabel: string
+  sectionDescription?: string
+  sectionIcon?: string
+  groups: ConfigGroup[]
 }
 
-export function getConfig(taskId: number, configName: string) {
-  return api.get<any, { data: ConfigResponse }>(`/tasks/${taskId}/config/${configName}`)
+// ============================================================
+// 系统配置 API（原全局+用户配置合并）
+// ============================================================
+
+export function getSystemConfig() {
+  return api.get<any, { data: StructuredConfigResponse }>('/config/system')
 }
 
-export function updateConfig(taskId: number, configName: string, content: string) {
-  return api.put(`/tasks/${taskId}/config/${configName}`, { content })
+export function updateSystemConfigSection(section: string, values: Record<string, any>) {
+  return api.put(`/config/system/${section}`, values)
 }
 
-export function resetConfig(taskId: number, configName: string) {
-  return api.post(`/tasks/${taskId}/config/${configName}/reset`)
+// ============================================================
+// 任务级配置 API
+// ============================================================
+
+export function getTaskConfigTabs(taskId: number) {
+  return api.get<any, { data: StructuredConfigResponse[] }>(`/tasks/${taskId}/config`)
+}
+
+export function getTaskConfigTab(taskId: number, tab: string) {
+  return api.get<any, { data: StructuredConfigResponse }>(`/tasks/${taskId}/config/${tab}`)
+}
+
+export function updateTaskConfigTab(taskId: number, tab: string, values: Record<string, any>) {
+  return api.put(`/tasks/${taskId}/config/${tab}`, values)
+}
+
+export function testLlmConnection(taskId: number, params: { base_url: string; model: string; api_key: string }) {
+  return api.post<any, { data: { success: boolean; message: string } }>(`/tasks/${taskId}/config/llm-test`, params)
 }

@@ -16,19 +16,10 @@ export const STEP_LABELS: Record<string, string> = {
   '14': 'Step14 导出聚宽代码',
 }
 
-export const STATUS_MAP: Record<string, { label: string; type: string }> = {
-  IDLE: { label: '空闲', type: 'info' },
-  RUNNING: { label: '运行中', type: 'success' },
-  STOPPED: { label: '已停止', type: 'warning' },
-  ERROR: { label: '错误', type: 'danger' },
-}
-
-export const CONFIG_LABELS: Record<string, string> = {
-  env: '环境配置 (env.yaml)',
-  analysis_rule: '分析口径 (analysis_rule.yaml)',
-  backtest_rule: '回测配置 (backtest_rule.yaml)',
-  feature_pool: '特征池 (feature_pool.yaml)',
-  market_context: '市场环境 (market_context.yaml)',
-  score: '评分权重 (score.yaml)',
-  selector: '窗口选择器 (selector.yaml)',
+export const STATUS_MAP: Record<string, { label: string; type: string; cssClass: string }> = {
+  NEW: { label: '新建', type: 'info', cssClass: 'sb-status-new' },
+  RUNNING: { label: '运行中', type: 'success', cssClass: 'sb-status-running' },
+  STOPPED: { label: '已终止', type: 'danger', cssClass: 'sb-status-stopped' },
+  COMPLETED: { label: '已完成', type: 'success', cssClass: 'sb-status-completed' },
+  ERROR: { label: '错误', type: 'warning', cssClass: 'sb-status-error' },
 }

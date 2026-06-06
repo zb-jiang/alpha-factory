@@ -16,11 +16,29 @@ const router = createRouter({
       meta: { requiresAuth: true },
     },
     {
+      path: '/scheduled-tasks',
+      name: 'ScheduledTasks',
+      component: () => import('../views/ScheduledTaskView.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
       path: '/task/:taskId',
       name: 'TaskDetail',
       component: () => import('../views/TaskDetailView.vue'),
       meta: { requiresAuth: true },
       props: true,
+    },
+    {
+      path: '/task/:taskId/config',
+      name: 'TaskConfig',
+      component: () => import('../views/TaskConfigView.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
+      path: '/settings',
+      name: 'SystemSettings',
+      component: () => import('../views/SystemSettingsView.vue'),
+      meta: { requiresAuth: true },
     },
   ],
 })

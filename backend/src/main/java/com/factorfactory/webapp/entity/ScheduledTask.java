@@ -9,12 +9,12 @@ import lombok.NoArgsConstructor;
 import java.time.LocalDateTime;
 
 @Entity
-@Table(name = "task")
+@Table(name = "scheduled_task")
 @Data
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class Task {
+public class ScheduledTask {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -24,33 +24,30 @@ public class Task {
     private Long userId;
 
     @Column(nullable = false, length = 128)
-    private String taskName;
+    private String name;
 
     @Column(length = 512)
-    private String taskDesc;
+    private String description;
 
-    @Column(nullable = false, length = 512)
-    private String stagingPath;
+    @Column(nullable = false)
+    private Long sourceTaskId;
 
-    @Enumerated(EnumType.STRING)
-    @Column(nullable = false, length = 16)
+    @Column(nullable = false, length = 64)
+    private String cronExpression;
+
+    @Column(nullable = false)
     @Builder.Default
-    private TaskStatus status = TaskStatus.NEW;
+    private boolean enabled = true;
 
-    @Column(length = 16)
-    private String currentStep;
+    private LocalDateTime lastRunAt;
 
-    private Long pid;
+    private LocalDateTime nextRunAt;
 
     @Column(nullable = false, updatable = false)
     private LocalDateTime createdAt;
 
     @Column(nullable = false)
     private LocalDateTime updatedAt;
-
-    public enum TaskStatus {
-        NEW, RUNNING, STOPPED, COMPLETED, ERROR
-    }
 
     @PrePersist
     protected void onCreate() {

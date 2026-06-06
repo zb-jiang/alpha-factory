@@ -161,7 +161,7 @@ public class ExecutionService {
 
                 Task task = taskRepository.findById(taskId).orElse(null);
                 if (task != null) {
-                    task.setStatus(exitCode == 0 ? Task.TaskStatus.IDLE : Task.TaskStatus.ERROR);
+                    task.setStatus(exitCode == 0 ? Task.TaskStatus.COMPLETED : Task.TaskStatus.ERROR);
                     task.setCurrentStep(null);
                     task.setPid(null);
                     taskRepository.save(task);

@@ -5,7 +5,7 @@ export interface TaskResponse {
   taskName: string
   taskDesc: string
   stagingPath: string
-  status: 'IDLE' | 'RUNNING' | 'STOPPED' | 'ERROR'
+  status: 'NEW' | 'RUNNING' | 'STOPPED' | 'COMPLETED' | 'ERROR'
   currentStep: string | null
   pid: number | null
   createdAt: string
