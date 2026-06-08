@@ -1,192 +1,397 @@
-# 原始字段 (Fields): 相当于“最基础的食材”，也就是交易所直接产生的原始数据
+# 原始字段 (Fields): 相当于"最基础的食材"，也就是交易所直接产生的原始数据
 # 当前字段集已经覆盖价格、成交额、成交均价、换手、市值与行业等 A股日频生产常用底层数据
 # 对于 Tushare 日频链路，VWAP 基于 daily.amount（千元）与 daily.vol（手）按 amount * 10 / volume 派生
 raw_fields:
-  - open    # 开盘价，用于刻画隔夜跳空与日内强弱
-  - close   # 收盘价，用于构建收益率、趋势、波动率等核心价格特征
-  - high    # 最高价，用于刻画上影线、区间突破、振幅上沿
-  - low     # 最低价，用于刻画下影线、回撤、振幅下沿
-  - volume  # 成交量，用于刻画交易活跃度、放量缩量、价量共振
-  - amount  # 成交额，来自 Tushare daily.amount，可用于衡量真实资金参与强度
-  - vwap    # 成交量加权平均价，在 Tushare 日频下由 amount 与 volume 派生，可用于近似刻画全天成交重心
-  - turnover  # 换手率，来自 Tushare daily_basic.turnover_rate，可用于衡量筹码交换速度
-  - market_cap  # 总市值，来自 Tushare daily_basic.total_mv，可用于容量与风格约束
-  - pe_ttm  # 滚动市盈率，来自 Tushare daily_basic.pe_ttm，可用于价值风格刻画
-  - pb  # 市净率，来自 Tushare daily_basic.pb，可用于估值与资产定价约束
-  - ps_ttm  # 滚动市销率，来自 Tushare daily_basic.ps_ttm，可用于成长股高估值识别
-  - dv_ttm  # 滚动股息率，来自 Tushare daily_basic.dv_ttm，可用于红利风格刻画
-  - eps  # 每股收益，来自 Tushare fina_indicator.eps，按 ann_date 做 as-of 对齐
-  - roe  # 净资产收益率，来自 Tushare fina_indicator.roe，按 ann_date 做 as-of 对齐
-  - netprofit_yoy  # 净利润同比增速，来自 Tushare fina_indicator.netprofit_yoy，按 ann_date 做 as-of 对齐
-  - or_yoy  # 营业收入同比增速，来自 Tushare fina_indicator.or_yoy，按 ann_date 做 as-of 对齐
-  - industry  # 行业分类，来自 Tushare stock_basic.industry，可用于行业分组或中性化处理
+  - name: open
+    description: 开盘价，用于刻画隔夜跳空与日内强弱
+  - name: close
+    description: 收盘价，用于构建收益率、趋势、波动率等核心价格特征
+  - name: high
+    description: 最高价，用于刻画上影线、区间突破、振幅上沿
+  - name: low
+    description: 最低价，用于刻画下影线、回撤、振幅下沿
+  - name: volume
+    description: 成交量，用于刻画交易活跃度、放量缩量、价量共振
+  - name: amount
+    description: 成交额，来自 Tushare daily.amount，可用于衡量真实资金参与强度
+  - name: vwap
+    description: 成交量加权平均价，在 Tushare 日频下由 amount 与 volume 派生，可用于近似刻画全天成交重心
+  - name: turnover
+    description: 换手率，来自 Tushare daily_basic.turnover_rate，可用于衡量筹码交换速度
+  - name: market_cap
+    description: 总市值，来自 Tushare daily_basic.total_mv，可用于容量与风格约束
+  - name: pe_ttm
+    description: 滚动市盈率，来自 Tushare daily_basic.pe_ttm，可用于价值风格刻画
+  - name: pb
+    description: 市净率，来自 Tushare daily_basic.pb，可用于估值与资产定价约束
+  - name: ps_ttm
+    description: 滚动市销率，来自 Tushare daily_basic.ps_ttm，可用于成长股高估值识别
+  - name: dv_ttm
+    description: 滚动股息率，来自 Tushare daily_basic.dv_ttm，可用于红利风格刻画
+  - name: eps
+    description: 每股收益，来自 Tushare fina_indicator.eps，按 ann_date 做 as-of 对齐
+  - name: roe
+    description: 净资产收益率，来自 Tushare fina_indicator.roe，按 ann_date 做 as-of 对齐
+  - name: netprofit_yoy
+    description: 净利润同比增速，来自 Tushare fina_indicator.netprofit_yoy，按 ann_date 做 as-of 对齐
+  - name: or_yoy
+    description: 营业收入同比增速，来自 Tushare fina_indicator.or_yoy，按 ann_date 做 as-of 对齐
+  - name: industry
+    description: 行业分类，来自 Tushare stock_basic.industry，可用于行业分组或中性化处理
 
-# 基础特征 (Features): 相当于“切好、腌制好的半成品”，是基于原始数据经过简单计算得出的指标
+# 基础特征 (Features): 相当于"切好、腌制好的半成品"，是基于原始数据经过简单计算得出的指标
 base_features:
   # 价格动量与收益：衡量不同周期的方向性变化、跳空与日内强弱
-  - name: ret_1d                  # 1日收益率，衡量最短周期价格变化
+  - name: ret_1d
+    description: 1日收益率，衡量最短周期价格变化
     expr: close.pct_change(1)
-  - name: ret_5d                  # 5日收益率，衡量一周级别短期动量
+  - name: ret_5d
+    description: 5日收益率，衡量一周级别短期动量
     expr: close.pct_change(5)
-  - name: ret_20d                 # 20日收益率，衡量一月级别中短期动量
+  - name: ret_10d
+    description: 10日收益率，衡量两周级别短期趋势
+    expr: close.pct_change(10)
+  - name: ret_20d
+    description: 20日收益率，衡量一月级别中短期动量
     expr: close.pct_change(20)
-  - name: ret_60d                 # 60日收益率，衡量季度级别中期趋势
+  - name: ret_60d
+    description: 60日收益率，衡量季度级别中期趋势
     expr: close.pct_change(60)
-  - name: gap_open_ret            # 跳空收益率，衡量隔夜情绪与开盘缺口
+  - name: gap_open_ret
+    description: 跳空收益率，衡量隔夜情绪与开盘缺口
     expr: open / close.shift(1) - 1
-  - name: intraday_ret            # 日内收益率，衡量开盘到收盘的当日强弱
+  - name: intraday_ret
+    description: 日内收益率，衡量开盘到收盘的当日强弱
     expr: close / open - 1
 
   # 价格位置与区间结构：衡量收盘所在位置、振幅、区间突破与回撤
-  - name: high_low_range          # 日内振幅，衡量当天波动区间大小
+  - name: high_low_range
+    description: 日内振幅，衡量当天波动区间大小
     expr: high / low - 1
-  - name: close_to_high           # 收盘贴近最高价程度，越接近0代表收在高位
+  - name: close_to_high
+    description: 收盘贴近最高价程度，越接近0代表收在高位
     expr: close / high - 1
-  - name: close_to_low            # 收盘贴近最低价程度，越接近0代表收在低位
+  - name: close_to_low
+    description: 收盘贴近最低价程度，越接近0代表收在低位
     expr: close / low - 1
-  - name: price_pos_20d           # 20日价格位置，衡量当前价在近20日区间中的相对高度
+  - name: price_pos_10d
+    description: 10日价格位置，衡量当前价在近10日区间中的相对高度
+    expr: (close - close.rolling(10).min()) / (close.rolling(10).max() - close.rolling(10).min())
+  - name: price_pos_20d
+    description: 20日价格位置，衡量当前价在近20日区间中的相对高度
     expr: (close - close.rolling(20).min()) / (close.rolling(20).max() - close.rolling(20).min())
-  - name: max_drawdown_20d        # 20日最大回撤，衡量月度回撤压力
+  - name: price_pos_60d
+    description: 60日价格位置，衡量当前价在近60日区间中的相对高度
+    expr: (close - close.rolling(60).min()) / (close.rolling(60).max() - close.rolling(60).min())
+  - name: max_drawdown_10d
+    description: 10日最大回撤，衡量短期回撤压力
+    expr: close / close.rolling(10).max() - 1
+  - name: max_drawdown_20d
+    description: 20日最大回撤，衡量月度回撤压力
     expr: close / close.rolling(20).max() - 1
-  - name: breakout_20d            # 20日向上突破幅度，衡量是否接近或突破近期新高
+  - name: max_drawdown_60d
+    description: 60日最大回撤，衡量中期回撤压力
+    expr: close / close.rolling(60).max() - 1
+  - name: rebound_20d
+    description: 20日反弹幅度，衡量是否脱离近期低点
+    expr: close / close.rolling(20).min().shift(1) - 1
+  - name: breakout_20d
+    description: 20日向上突破幅度，衡量是否接近或突破近期新高
     expr: close / close.rolling(20).max().shift(1) - 1
 
   # 波动风险：衡量收益离散程度
-  - name: realized_vol_20d        # 20日实现波动率，衡量月度收益离散程度
+  - name: realized_vol_5d
+    description: 5日实现波动率，衡量短期收益离散程度
+    expr: close.pct_change().rolling(5).std()
+  - name: realized_vol_20d
+    description: 20日实现波动率，衡量月度收益离散程度
     expr: close.pct_change().rolling(20).std()
+  - name: realized_vol_60d
+    description: 60日实现波动率，衡量中期收益离散程度
+    expr: close.pct_change().rolling(60).std()
 
   # 成交量行为：衡量交易活跃度、放量缩量与量能稳定性
-  - name: volume_mean_20d         # 20日平均成交量，衡量月度平均活跃度
+  - name: volume_mean_5d
+    description: 5日平均成交量，衡量短期平均活跃度
+    expr: volume.rolling(5).mean()
+  - name: volume_mean_20d
+    description: 20日平均成交量，衡量月度平均活跃度
     expr: volume.rolling(20).mean()
-  - name: volume_ratio_20d        # 当日量比20日均量，衡量相对月度放量水平
+  - name: volume_mean_60d
+    description: 60日平均成交量，衡量中期平均活跃度
+    expr: volume.rolling(60).mean()
+  - name: volume_ratio_5d
+    description: 当日量比5日均量，衡量是否突然放量
+    expr: volume / volume_mean_5d
+  - name: volume_ratio_20d
+    description: 当日量比20日均量，衡量相对月度放量水平
     expr: volume / volume_mean_20d
-  - name: volume_vol_20d          # 成交量波动率，衡量量能稳定性
+  - name: volume_vol_20d
+    description: 成交量波动率，衡量量能稳定性
     expr: volume.pct_change().rolling(20).std()
 
   # 资金强度与成交额：衡量资金参与深度与放量成交额
-  - name: amount_mean_20d         # 20日平均成交额，衡量月度资金参与的平均强度
+  - name: amount_mean_5d
+    description: 5日平均成交额，衡量短期资金参与的平均强度
+    expr: amount.rolling(5).mean()
+  - name: amount_mean_20d
+    description: 20日平均成交额，衡量月度资金参与的平均强度
     expr: amount.rolling(20).mean()
-  - name: amount_ratio_20d        # 成交额相对20日均值之比，衡量是否出现显著放量成交额
+  - name: amount_ratio_20d
+    description: 成交额相对20日均值之比，衡量是否出现显著放量成交额
     expr: amount / amount_mean_20d
+  - name: amount_vol_20d
+    description: 成交额波动率，衡量资金参与是否稳定
+    expr: amount.pct_change().rolling(20).std()
 
   # VWAP 成交重心：衡量尾盘位置与全天成交重心趋势
-  - name: close_to_vwap           # 收盘相对成交均价偏离，衡量尾盘相对全天成交重心的强弱
+  - name: close_to_vwap
+    description: 收盘相对成交均价偏离，衡量尾盘相对全天成交重心的强弱
     expr: close / vwap - 1
-  - name: vwap_ret_20d            # 成交均价20日变化率，衡量一月内全天成交重心的中短期趋势
+  - name: high_to_vwap
+    description: 最高价相对成交均价偏离，衡量盘中上冲是否显著高于全天成交重心
+    expr: high / vwap - 1
+  - name: low_to_vwap
+    description: 最低价相对成交均价偏离，衡量盘中下探是否显著低于全天成交重心
+    expr: low / vwap - 1
+  - name: vwap_ret_5d
+    description: 成交均价5日变化率，衡量一周内全天成交重心的短期趋势
+    expr: vwap.pct_change(5)
+  - name: vwap_ret_20d
+    description: 成交均价20日变化率，衡量一月内全天成交重心的中短期趋势
     expr: vwap.pct_change(20)
 
   # 换手与筹码交换：衡量筹码周转速度与换手异常
-  - name: turnover_mean_20d       # 20日平均换手率，衡量月度筹码交换强度
+  - name: turnover_mean_5d
+    description: 5日平均换手率，衡量短期筹码交换强度
+    expr: turnover.rolling(5).mean()
+  - name: turnover_mean_20d
+    description: 20日平均换手率，衡量月度筹码交换强度
     expr: turnover.rolling(20).mean()
-  - name: turnover_ratio_20d      # 当日换手率相对20日均值之比，衡量换手是否异常活跃
+  - name: turnover_ratio_20d
+    description: 当日换手率相对20日均值之比，衡量换手是否异常活跃
     expr: turnover / turnover_mean_20d
+  - name: turnover_vol_20d
+    description: 换手率波动率，衡量交易热度是否忽高忽低
+    expr: turnover.pct_change().rolling(20).std()
 
   # 市值容量：衡量股票体量变化与容量稳定性
-  - name: market_cap_change_20d   # 20日总市值变化率，衡量容量扩张或收缩
+  - name: market_cap_change_20d
+    description: 20日总市值变化率，衡量容量扩张或收缩
     expr: market_cap.pct_change(20)
-  - name: market_cap_stability_20d  # 20日市值稳定度，衡量容量波动是否平稳
+  - name: market_cap_stability_20d
+    description: 20日市值稳定度，衡量容量波动是否平稳
     expr: market_cap.pct_change().rolling(20).std()
 
   # 基本面估值：用于支持价值、红利与成长风格的日频估值刻画
-  - name: pe_ttm                  # 滚动市盈率，值越低通常代表估值越便宜
+  - name: pe_ttm
+    description: 滚动市盈率，值越低通常代表估值越便宜
     expr: pe_ttm
-  - name: pb                      # 市净率，值越低通常代表资产相对价格更便宜
+  - name: pb
+    description: 市净率，值越低通常代表资产相对价格更便宜
     expr: pb
-  - name: ps_ttm                  # 滚动市销率，适合刻画高成长高估值与低估值销售倍率差异
+  - name: ps_ttm
+    description: 滚动市销率，适合刻画高成长高估值与低估值销售倍率差异
     expr: ps_ttm
-  - name: dv_ttm                  # 滚动股息率，值越高通常代表红利属性越强
+  - name: dv_ttm
+    description: 滚动股息率，值越高通常代表红利属性越强
     expr: dv_ttm
 
   # 季频财务基本面：按公告日 ann_date 做 as-of 对齐后展开到交易日，避免未来函数
-  - name: eps                     # 每股收益，适合刻画盈利能力与估值约束
+  - name: eps
+    description: 每股收益，适合刻画盈利能力与估值约束
     expr: eps
-  - name: roe                     # 净资产收益率，适合刻画质量与盈利效率
+  - name: roe
+    description: 净资产收益率，适合刻画质量与盈利效率
     expr: roe
-  - name: netprofit_yoy           # 净利润同比增速，适合刻画业绩成长
+  - name: netprofit_yoy
+    description: 净利润同比增速，适合刻画业绩成长
     expr: netprofit_yoy
-  - name: or_yoy                  # 营业收入同比增速，适合刻画收入成长
+  - name: or_yoy
+    description: 营业收入同比增速，适合刻画收入成长
     expr: or_yoy
-  - name: earnings_yield          # 盈利收益率，适合把低PE映射成“高收益率”刻画
+  - name: earnings_yield
+    description: 盈利收益率，等于1/pe_ttm，适合把低PE映射成"高收益率"刻画
     expr: 1 / pe_ttm
-  - name: sales_yield             # 销售收益率，适合把低PS映射成“高销售支撑”刻画
+  - name: sales_yield
+    description: 销售收益率，等于1/ps_ttm，适合把低PS映射成"高销售支撑"刻画
     expr: 1 / ps_ttm
-  - name: quality_value           # 质量价值结合，ROE高且PB低时更强
+  - name: quality_value
+    description: 质量价值结合，等于roe/pb，ROE高且PB低时更强
     expr: roe / pb
-  - name: profit_revenue_gap      # 利润增速相对收入增速的优势，衡量利润弹性是否强于收入扩张
+  - name: profit_revenue_gap
+    description: 利润增速相对收入增速的优势，等于netprofit_yoy-or_yoy，衡量利润弹性是否强于收入扩张
     expr: netprofit_yoy - or_yoy
 
   # 筹码分布特征：衡量筹码成本结构、集中度与获利盘比例
   # 筹码集中度：值越小代表筹码越集中，抛压越小
-  - name: chip_concentration_90d  # 90日筹码集中度，衡量季度级别筹码锁定程度
+  - name: chip_concentration_90d
+    description: 90日筹码集中度，衡量季度级别筹码锁定程度，值越小代表筹码越集中、抛压越小
     expr: chip.concentration_90d
-  - name: chip_concentration_210d # 210日筹码集中度，衡量年度级别筹码锁定程度
+  - name: chip_concentration_210d
+    description: 210日筹码集中度，衡量年度级别筹码锁定程度，值越小代表筹码越集中、抛压越小
     expr: chip.concentration_210d
 
   # 获利盘比例：当前价以下的筹码占比，>80%抛压大，<20%可能见底
-  - name: profit_ratio_90d        # 90日获利盘比例，衡量季度级别获利盘压力
+  - name: profit_ratio_90d
+    description: 90日获利盘比例，衡量季度级别获利盘压力，>80%抛压大，<20%可能见底
     expr: chip.profit_ratio_90d
-  - name: profit_ratio_210d       # 210日获利盘比例，衡量年度级别获利盘压力
+  - name: profit_ratio_210d
+    description: 210日获利盘比例，衡量年度级别获利盘压力，>80%抛压大，<20%可能见底
     expr: chip.profit_ratio_210d
 
   # 平均成本偏离度：当前价相对平均成本的偏离，偏离度越小越接近市场平均成本
-  - name: avg_cost_distance_90d   # 90日平均成本偏离度
+  - name: avg_cost_distance_90d
+    description: 90日平均成本偏离度，当前价相对90日平均成本的偏离，偏离度越小越接近市场平均成本
     expr: chip.avg_cost_distance_90d
-  - name: avg_cost_distance_210d  # 210日平均成本偏离度
+  - name: avg_cost_distance_210d
+    description: 210日平均成本偏离度，当前价相对210日平均成本的偏离，偏离度越小越接近市场平均成本
     expr: chip.avg_cost_distance_210d
 
   # 筹码峰距离：当前价相对筹码峰的距离，距离越近支撑/压力越强
-  - name: peak_distance_90d       # 90日筹码峰距离
+  - name: peak_distance_90d
+    description: 90日筹码峰距离，当前价相对90日筹码峰的距离，距离越近支撑/压力越强
     expr: chip.peak_distance_90d
-  - name: peak_distance_210d      # 210日筹码峰距离
+  - name: peak_distance_210d
+    description: 210日筹码峰距离，当前价相对210日筹码峰的距离，距离越近支撑/压力越强
     expr: chip.peak_distance_210d
 
 # 允许使用的算子 (Operators): 相当于"烹饪手法"，用来限制大模型，它只能用这些方法去组合产生新的因子
 allowed_operators:
-  - add           # 加法，用于构建线性组合或加总信号
-  - sub           # 减法，用于提取强弱差、斜率差、增量信息
-  - mul           # 乘法，用于构建共振、交互和条件放大效应
-  - div           # 除法，用于做比值、归因或风险惩罚
-  - abs           # 绝对值，用于提取偏离强度而忽略方向
-  - log           # 对数变换，用于压缩长尾分布
-  - sqrt          # 平方根变换，用于弱化极端值影响
-  - sign          # 符号函数，用于只保留方向不保留幅度
-  - rolling_mean  # 滚动均值，用于平滑短期噪声
-  - rolling_std   # 滚动标准差，用于刻画时序波动
-  - rolling_sum   # 滚动求和，用于累计近期冲击
-  - rolling_max   # 滚动最大值，用于刻画突破和阶段高点
-  - rolling_min   # 滚动最小值，用于刻画支撑和阶段低点
-  - delay         # 时序滞后，用于引用过去值
-  - delta         # 时序变化量，用于衡量阶段增减幅度
-  - pct_change    # 时序收益率变化，用于统一计算相对变化
-  - ema           # 指数移动平均，用于强调近期信息
-  - ts_rank       # 时序排序，用于衡量当前值在历史窗口中的相对位置
-  - ts_zscore     # 时序标准化，用于衡量当前值相对自身历史的偏离程度
-  - rolling_corr  # 滚动相关性，用于刻画两个序列关系是否同步变化
-  - rank          # 截面排序，用于比较同一天不同股票的相对位置
-  - zscore        # 截面标准化，用于消除量纲并保留相对偏离
-  - minmax        # 截面归一化，用于压缩到统一数值区间
-  - clip          # 数值截断，用于限制极端值
-  - winsorize     # 截面缩尾，用于降低极端样本对排序的干扰
+  - name: add
+    signature: left + right 或 add(left, right)
+    type: 算术
+    description: 加法，用于构建线性组合或加总信号
+  - name: sub
+    signature: left - right 或 sub(left, right)
+    type: 算术
+    description: 减法，用于提取强弱差、斜率差、增量信息
+  - name: mul
+    signature: left * right 或 mul(left, right)
+    type: 算术
+    description: 乘法，用于构建共振、交互和条件放大效应
+  - name: div
+    signature: left / right 或 div(left, right)
+    type: 算术
+    description: 除法，用于做比值、归因或风险惩罚；分母为 0 会转为缺失值
+  - name: abs
+    signature: abs(series)
+    type: 逐元素
+    description: 绝对值，用于提取偏离强度而忽略方向
+  - name: log
+    signature: log(series)
+    type: 逐元素
+    description: 对数变换，用于压缩长尾分布；0 会转为缺失值
+  - name: sqrt
+    signature: sqrt(series)
+    type: 逐元素
+    description: 平方根变换，用于弱化极端值影响；负值按 0 处理
+  - name: sign
+    signature: sign(series)
+    type: 逐元素
+    description: 符号函数，用于只保留方向不保留幅度，输出 -1、0、1
+  - name: rolling_mean
+    signature: rolling_mean(series, window)
+    type: 时序
+    description: 按单只股票的时间序列计算滚动均值，min_periods=window，用于平滑噪声
+  - name: rolling_std
+    signature: rolling_std(series, window)
+    type: 时序
+    description: 按单只股票的时间序列计算滚动标准差，min_periods=window，用于刻画波动
+  - name: rolling_sum
+    signature: rolling_sum(series, window)
+    type: 时序
+    description: 按单只股票的时间序列计算滚动求和，min_periods=window，用于累计近期冲击
+  - name: rolling_max
+    signature: rolling_max(series, window)
+    type: 时序
+    description: 按单只股票的时间序列计算滚动最大值，用于刻画突破和阶段高点
+  - name: rolling_min
+    signature: rolling_min(series, window)
+    type: 时序
+    description: 按单只股票的时间序列计算滚动最小值，用于刻画支撑和阶段低点
+  - name: delay
+    signature: delay(series, periods)
+    type: 时序
+    description: 按单只股票的时间序列滞后 periods 期，用于引用过去值
+  - name: delta
+    signature: delta(series, periods)
+    type: 时序
+    description: 当前值减去 periods 期前的值，即 series - delay(series, periods)
+  - name: pct_change
+    signature: pct_change(series, periods)
+    type: 时序
+    description: 按单只股票的时间序列计算 periods 期变化率
+  - name: ema
+    signature: ema(series, span)
+    type: 时序
+    description: 按单只股票的时间序列计算指数移动平均，强调近期信息
+  - name: ts_rank
+    signature: ts_rank(series, window)
+    type: 时序
+    description: 按单只股票的时间序列，计算当前值在过去 window 期窗口中的百分位排名
+  - name: ts_zscore
+    signature: ts_zscore(series, window)
+    type: 时序
+    description: 按单只股票的时间序列，计算当前值相对过去 window 期均值和标准差的 z-score
+  - name: rolling_corr
+    signature: rolling_corr(left, right, window)
+    type: 时序
+    description: 按单只股票的时间序列，计算两个序列过去 window 期的滚动相关性
+  - name: rank
+    signature: rank(series)
+    type: 横截面
+    description: 每天在所有股票之间做百分位排名，用于比较同一天股票间相对强弱
+  - name: zscore
+    signature: zscore(series)
+    type: 横截面
+    description: 每天在所有股票之间做标准化，输出相对当日横截面的偏离程度
+  - name: minmax
+    signature: minmax(series)
+    type: 横截面
+    description: 每天在所有股票之间做 0-1 归一化
+  - name: clip
+    signature: clip(series, lower, upper)
+    type: 逐元素
+    description: 把数值截断到 [lower, upper] 区间
+  - name: winsorize
+    signature: winsorize(series, lower_quantile, upper_quantile)
+    type: 横截面
+    description: 每天按横截面分位数缩尾，例如 winsorize(x, 0.01, 0.99)
 
 # 因子生成约束 (Generation Constraints): 用来收紧 LLM 的搜索空间，提升生产稳定性与可解释性
 generation_constraints:
-  max_call_depth: 3                # 算子嵌套最多 3 层，避免公式过度套娃
-  max_feature_count: 4             # 单个公式最多使用 4 个基础特征，保证逻辑清晰
-  max_operator_count: 4            # 单个公式最多调用 4 次算子，避免无意义复杂化
-  max_same_feature_reuse: 2        # 同一特征最多重复使用 2 次，避免围绕单一信号反复加工
-  max_same_operator_reuse: 2       # 同一算子最多重复使用 2 次，避免同类变换层层叠加
-  allowed_windows: [1, 5, 10, 20, 60, 120]  # 仅允许固定窗口，避免 LLM 随意发明奇怪周期
+  max_call_depth:
+    value: 3
+    description: 算子嵌套最多 3 层，避免公式过度套娃
+  max_feature_count:
+    value: 4
+    description: 单个公式最多使用 4 个基础特征，保证逻辑清晰
+  max_operator_count:
+    value: 4
+    description: 单个公式最多调用 4 次算子，避免无意义复杂化
+  max_same_feature_reuse:
+    value: 2
+    description: 同一特征最多重复使用 2 次，避免围绕单一信号反复加工
+  max_same_operator_reuse:
+    value: 2
+    description: 同一算子最多重复使用 2 次，避免同类变换层层叠加
+  allowed_windows:
+    value: [1, 5, 10, 20, 60, 120]
+    description: 仅允许固定窗口，避免 LLM 随意发明奇怪周期
   forbidden_operator_chains:
-    - [rank, zscore]               # 禁止排序后再做标准化，避免重复截面标准化
-    - [zscore, rank]               # 禁止标准化后再排序，避免信息重复压缩
-    - [rank, minmax]               # 禁止排序后再归一化，避免重复截面映射
-    - [minmax, rank]               # 禁止归一化后再排序，避免无效再加工
-    - [ts_rank, rank]              # 禁止时序排序后再截面排序，避免双重排序堆叠
-    - [rank, ts_rank]              # 禁止截面排序后再时序排序，避免排序链过长
-    - [rolling_mean, ema]          # 禁止均值后再做 EMA，避免重复平滑
-    - [ema, rolling_mean]          # 禁止 EMA 后再做均值，避免重复平滑
-    - [ema, ema]                   # 禁止 EMA 套 EMA，避免同类平滑反复叠加
-    - [rolling_mean, rolling_mean] # 禁止均值套均值，避免同类平滑反复叠加
+    value:
+      - [rank, zscore]
+      - [zscore, rank]
+      - [rank, minmax]
+      - [minmax, rank]
+      - [ts_rank, rank]
+      - [rank, ts_rank]
+      - [rolling_mean, ema]
+      - [ema, rolling_mean]
+      - [ema, ema]
+      - [rolling_mean, rolling_mean]
+    description: 禁止的算子链组合，违反即被拒绝；避免重复标准化、重复排序、重复平滑
 
 # 特征族总开关：关闭后会从基础特征池中移除 chip.* 特征，并自动禁用 chip_distribution 分析师
 enable_chip_features: false

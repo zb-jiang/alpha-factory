@@ -18,6 +18,28 @@ import yaml
 
 _BANNER_WIDTH = 60
 
+FUNDAMENTAL_FEATURE_NAMES = [
+    "pe_ttm",
+    "pb",
+    "ps_ttm",
+    "dv_ttm",
+    "eps",
+    "roe",
+    "netprofit_yoy",
+    "or_yoy",
+    "earnings_yield",
+    "sales_yield",
+    "quality_value",
+    "profit_revenue_gap",
+    "market_cap_change_20d",
+    "market_cap_stability_20d",
+    "turnover_mean_20d",
+    "turnover_ratio_20d",
+    "ret_20d",
+    "ret_60d",
+    "realized_vol_20d",
+]
+
 
 def _current_banner_scope() -> str:
     if not RUNTIME_CONTEXT_PATH.exists():
@@ -306,10 +328,6 @@ CONFIG_OWNERSHIP: dict[str, set[str]] = {
         "freq",
         "sample_instrument",
         "max_instruments",
-        "llm_model",
-        "llm_base_url",
-        "llm_api_key",
-        "llm_temperature",
         "llm_candidate_count",
         "summary_top_k",
         "unstable_top_k",
@@ -319,7 +337,6 @@ CONFIG_OWNERSHIP: dict[str, set[str]] = {
         "min_rank_ic_ir_to_backtest",
         "min_positive_ic_ratio",
         "enable_direction_filter",
-        "enable_multi_agent",
         "llm_agents",
     },
     "analysis_rule": {
@@ -1358,8 +1375,16 @@ def list_instruments(config: dict[str, Any] | None = None) -> list[str]:
     return codes
 
 
-def raw_field_tokens(raw_fields: list[str]) -> list[str]:
-    return [field if field.startswith("$") else f"${field}" for field in raw_fields]
+def raw_field_tokens(raw_fields: list) -> list[str]:
+    """将 raw_fields 转为 tushare 字段 token，自动加 $ 前缀。
+
+    raw_fields 中的元素可以是字符串或 dict（含 name/description）。
+    """
+    result: list[str] = []
+    for field in raw_fields:
+        name = field["name"] if isinstance(field, dict) else field
+        result.append(name if name.startswith("$") else f"${name}")
+    return result
 
 
 def load_raw_data(
@@ -1370,7 +1395,11 @@ def load_raw_data(
 ) -> pd.DataFrame:
     cfg = dict(config or env_config())
     fp_cfg = feature_pool_config()
-    fields = list(dict.fromkeys(raw_fields or list(fp_cfg.get("raw_fields", []))))
+    fields_raw = raw_fields or list(fp_cfg.get("raw_fields", []))
+    # raw_fields 中的元素可能是 dict（含 name/description），提取 name
+    fields = list(dict.fromkeys(
+        f["name"] if isinstance(f, dict) else f for f in fields_raw
+    ))
     
     start_timestamp, end_timestamp = active_run_window(cfg)
     if warmup_trading_days > 0:
@@ -1840,6 +1869,58 @@ def compute_feature_corr(feature_frame: pd.DataFrame, label_name: str) -> pd.Dat
     return corr
 
 
+def compute_fundamental_feature_health(feature_frame: pd.DataFrame, label_name: str) -> dict[str, Any]:
+    available = [name for name in FUNDAMENTAL_FEATURE_NAMES if name in feature_frame.columns]
+    label = feature_frame[label_name]
+    rows: list[dict[str, Any]] = []
+    for name in available:
+        merged = pd.concat([feature_frame[name], label], axis=1, keys=["feature", "label"]).dropna()
+        if merged.empty:
+            rows.append(
+                {
+                    "feature_name": name,
+                    "label_corr": 0.0,
+                    "long_short_return": 0.0,
+                    "top_quantile_return": 0.0,
+                    "bottom_quantile_return": 0.0,
+                    "valid_observations": 0,
+                }
+            )
+            continue
+        by_date = []
+        for _, day_frame in merged.groupby(level="datetime", sort=False):
+            if len(day_frame) < 10 or day_frame["feature"].nunique(dropna=True) < 3:
+                continue
+            bottom = day_frame["feature"].quantile(0.2)
+            top = day_frame["feature"].quantile(0.8)
+            top_return = day_frame.loc[day_frame["feature"] >= top, "label"].mean()
+            bottom_return = day_frame.loc[day_frame["feature"] <= bottom, "label"].mean()
+            if pd.notna(top_return) and pd.notna(bottom_return):
+                by_date.append((float(top_return), float(bottom_return)))
+        if by_date:
+            top_mean = float(np.mean([item[0] for item in by_date]))
+            bottom_mean = float(np.mean([item[1] for item in by_date]))
+        else:
+            top_mean = 0.0
+            bottom_mean = 0.0
+        rows.append(
+            {
+                "feature_name": name,
+                "label_corr": float(merged["feature"].corr(merged["label"]) or 0.0),
+                "long_short_return": top_mean - bottom_mean,
+                "top_quantile_return": top_mean,
+                "bottom_quantile_return": bottom_mean,
+                "valid_observations": int(len(merged)),
+            }
+        )
+    rows = sorted(rows, key=lambda item: abs(float(item["long_short_return"])), reverse=True)
+    return {
+        "description": "基本面分析师专用体检：对基本面/风格相关特征单独计算与标签的相关性，以及按日横截面 top20% - bottom20% 的平均标签收益差，避免基本面特征被全局短期相关性排序淹没。",
+        "features": rows,
+        "top_long_short_features": [item["feature_name"] for item in rows[:5]],
+    }
+
+
 def build_summary_payload(stats: pd.DataFrame, corr: pd.DataFrame, label_name: str) -> dict[str, Any]:
     cfg = env_config()
     top_k = int(cfg.get("summary_top_k", 3))
@@ -1994,8 +2075,16 @@ WINDOW_OPERATOR_ARG_INDEXES = {
 
 
 def generation_constraints(feature_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    """提取 generation_constraints，将 {key: {value: ..., description: ...}} 格式转为 {key: value}。"""
     fp_cfg = feature_cfg or feature_pool_config()
-    return dict(fp_cfg.get("generation_constraints", {}))
+    raw = dict(fp_cfg.get("generation_constraints", {}))
+    result: dict[str, Any] = {}
+    for key, val in raw.items():
+        if isinstance(val, dict) and "value" in val:
+            result[key] = val["value"]
+        else:
+            result[key] = val
+    return result
 
 
 def _number_constant_value(node: ast.AST) -> int | float:

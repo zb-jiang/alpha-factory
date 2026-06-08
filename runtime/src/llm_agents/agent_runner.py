@@ -36,6 +36,7 @@ class AgentConfig:
     base_url: str
     api_key: str
     temperature: float = 0.2
+    max_tokens: int = 8192
     timeout_seconds: float = 60.0
     max_retries: int = 2
     request_name: str = ""
@@ -96,6 +97,7 @@ def call_llm_agent(config: AgentConfig, messages: list[dict[str, str]]) -> dict[
                 model=config.model,
                 messages=messages,
                 temperature=config.temperature,
+                max_tokens=config.max_tokens,
                 timeout=config.timeout_seconds,
             )
             content = response.choices[0].message.content or ""

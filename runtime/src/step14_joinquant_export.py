@@ -7,8 +7,6 @@ import textwrap
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from common import (
     JOINQUANT_DIR,
     OUTPUT_DIR,
@@ -58,14 +56,6 @@ def _load_all_features() -> dict[str, str]:
     features: dict[str, str] = {}
     for item in feature_cfg.get("base_features", []):
         features[str(item["name"])] = str(item["expr"])
-    config_dir = Path(__file__).resolve().parents[1] / "config"
-    for extra_name in ["feature_pool_extended.yaml", "feature_pool_combination.yaml"]:
-        extra_path = config_dir / extra_name
-        if extra_path.exists():
-            with extra_path.open("r", encoding="utf-8") as f:
-                extra_cfg = yaml.safe_load(f) or {}
-            for item in extra_cfg.get("base_features", []):
-                features[str(item["name"])] = str(item["expr"])
     return features
 
 

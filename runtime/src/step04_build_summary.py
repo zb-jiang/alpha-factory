@@ -12,6 +12,9 @@ def run() -> None:
     corr = pd.read_csv(OUTPUT_DIR / "health" / "feature_corr.csv", index_col=0)
     label_column = label_name(config)
     summary = build_summary_payload(stats, corr, label_column)
+    fundamental_health_path = OUTPUT_DIR / "health" / "fundamental_feature_health.json"
+    if fundamental_health_path.exists():
+        summary["fundamental_feature_health"] = read_json(fundamental_health_path)
     previous_top_path = OUTPUT_DIR / "backtest" / "top3_factors.json"
     if previous_top_path.exists():
         summary["previous_round_top_factors"] = read_json(previous_top_path)

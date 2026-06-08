@@ -6,6 +6,7 @@ from common import (
     build_summary_payload,
     compute_feature_corr,
     compute_feature_stats,
+    compute_fundamental_feature_health,
     env_config,
     feature_pool_config,
     label_name,
@@ -26,9 +27,12 @@ def run() -> None:
     label_column = label_name(config)
     stats = compute_feature_stats(feature_frame, label_column)
     corr = compute_feature_corr(feature_frame, label_column)
+    fundamental_health = compute_fundamental_feature_health(feature_frame, label_column)
     summary = build_summary_payload(stats, corr, label_column)
+    summary["fundamental_feature_health"] = fundamental_health
     write_table(OUTPUT_DIR / "health" / "feature_stats.csv", stats)
     write_table(OUTPUT_DIR / "health" / "feature_corr.csv", corr)
+    write_json(OUTPUT_DIR / "health" / "fundamental_feature_health.json", fundamental_health)
     write_json(OUTPUT_DIR / "health" / "health_summary.json", summary)
     log_step_end(
         "02",

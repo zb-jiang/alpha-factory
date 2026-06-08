@@ -103,6 +103,7 @@ rebalance_interval: 1
 # - monthly: first_trading_day_of_month / last_trading_day_of_month
 rebalance_anchor: first_trading_day_of_week
 # 每个观测日最小有效样本占比（n_valid / label_available），低于阈值的观测日不参与 IC/IR 聚合。
+# 注意：此参数仅作用于因子分析阶段IC/IR 聚合；回测阶段有独立的 min_score_coverage参数进行交易
 min_valid_ratio_per_observation: 0.9
 
 # 【6. 收益标签配置（LLM 挖掘阶段与因子研究阶段共用）】
@@ -132,7 +133,7 @@ preprocess:
   # - sigma: 3sigma
   outlier_method: none
   outlier_options:
-    # n: MAD / 3sigma 使用的倍数阈值。米框界面里常见默认输入就是 3。
+    # n: MAD / 3sigma 使用的倍数阈值。米框界面里常见默认输入就是 3。以 3sigma 方法为例，n=3 表示界限为mean +- 3 × std。
     n: 3.0
     # lower_quantile / upper_quantile: 分位法使用的头尾分位点。
     # 例如 0.01 / 0.99 表示把当天最极端的头尾各 1% 压回边界。

@@ -19,6 +19,7 @@ from common import (
     load_raw_data,
     log_step_end,
     log_step_start,
+    read_json,
     weekly_rebalance_dates,
     write_json,
     write_table,
@@ -248,6 +249,13 @@ def run_backtest_batch_export() -> None:
     factor_names = [str(item) for item in factor_values.index.get_level_values("factor_name").unique()]
     if not factor_names:
         raise RuntimeError("factor_values.parquet 中没有可回测因子")
+    # 构建 factor_name -> formula 映射，用于 skipped_factors 输出
+    _formula_map: dict[str, str] = {}
+    _validated_path = OUTPUT_DIR / "llm" / "factors_validated.json"
+    if _validated_path.exists():
+        for _f in read_json(_validated_path).get("factors", []):
+            if isinstance(_f, dict) and _f.get("factor_name"):
+                _formula_map[str(_f["factor_name"])] = str(_f.get("formula", ""))
     factor_metrics_path = OUTPUT_DIR / "backtest" / "factor_metrics.csv"
     factor_metrics = pd.read_csv(factor_metrics_path).set_index("factor_name") if factor_metrics_path.exists() else pd.DataFrame()
     min_rank_ic_to_backtest = float(cfg.get("min_rank_ic_to_backtest", 0.01))
@@ -280,22 +288,22 @@ def run_backtest_batch_export() -> None:
                 llm_direction = str(factor_metrics.loc[factor_name, "llm_direction"])
                 if abs(mean_rank_ic) < min_rank_ic_to_backtest:
                     reason = f"Rank IC too low (|{mean_rank_ic:.4f}| < {min_rank_ic_to_backtest})"
-                    skipped_factors.append({"factor_name": factor_name, "reason": reason})
+                    skipped_factors.append({"factor_name": factor_name, "formula": _formula_map.get(factor_name, ""), "reason": reason})
                     continue
                 if abs(rank_ic_ir) < min_rank_ic_ir_to_backtest:
                     reason = f"Rank IC IR too low (|{rank_ic_ir:.4f}| < {min_rank_ic_ir_to_backtest})"
-                    skipped_factors.append({"factor_name": factor_name, "reason": reason})
+                    skipped_factors.append({"factor_name": factor_name, "formula": _formula_map.get(factor_name, ""), "reason": reason})
                     continue
                 if enable_direction_filter and llm_direction != empirical_direction:
                     reason = f"Direction mismatch (LLM={llm_direction}, empirical={empirical_direction})"
-                    skipped_factors.append({"factor_name": factor_name, "reason": reason})
+                    skipped_factors.append({"factor_name": factor_name, "formula": _formula_map.get(factor_name, ""), "reason": reason})
                     continue
                 is_negative_ic = mean_rank_ic < 0
                 score_sign = -1.0 if is_negative_ic else 1.0
                 win_rate = pos_ratio if not is_negative_ic else (1 - pos_ratio)
                 if win_rate < min_positive_ic_ratio:
                     reason = f"Directional win rate too low ({win_rate:.2f} < {min_positive_ic_ratio})"
-                    skipped_factors.append({"factor_name": factor_name, "reason": reason})
+                    skipped_factors.append({"factor_name": factor_name, "formula": _formula_map.get(factor_name, ""), "reason": reason})
                     continue
 
             bundle = _build_data_bundle_for_factor(factor_name, factor_values, ohlcv_map, score_sign=score_sign)
@@ -348,7 +356,7 @@ def run_backtest_batch_export() -> None:
                 position_rows.extend(positions_df.to_dict(orient="records"))
 
         except Exception as exc:
-            skipped_factors.append({"factor_name": factor_name, "reason": str(exc)})
+            skipped_factors.append({"factor_name": factor_name, "formula": _formula_map.get(factor_name, ""), "reason": str(exc)})
             print(f"  跳过: {factor_name} ({exc})")
 
     metrics_df = pd.DataFrame(metric_rows).set_index("factor_name") if metric_rows else pd.DataFrame()

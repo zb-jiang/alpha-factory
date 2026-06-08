@@ -7,7 +7,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from common import feature_pool_config
+
 from .agent_runner import AgentConfig, call_llm_agent
+from .context_builders import build_summary_context, build_market_context, build_operator_context, build_constraints_context
 
 _GENERATOR_SYSTEM = """你是一个顶级的量化交易策略研究员和金融数据科学家。你精通A股市场微观结构、多因子模型、行为金融学以及Alpha挖掘。
 你的任务是严格遵循首席分析师的设计方向，挖掘出具有强预测能力、低相关性且逻辑严密的全新选股因子（Alpha因子）。
@@ -20,10 +23,11 @@ _GENERATOR_SYSTEM = """你是一个顶级的量化交易策略研究员和金融
 5. 禁止使用未来函数（如 .shift(-1)）
 6. 公式必须严格遵守【公式约束】中的硬性规则（嵌套深度、特征数量、算子数量、禁止链等）
 7. 公式应简洁清晰，避免过度复杂的多层嵌套
-8. 如果设计方向涉及 pe_ttm、pb、ps_ttm、dv_ttm、eps、roe、netprofit_yoy、or_yoy，请正确解释它们的金融含义：pe_ttm/pb 更偏价值，dv_ttm 更偏红利，ps_ttm 更偏高成长预期定价，roe 更偏质量，netprofit_yoy/or_yoy 更偏财务成长
-9. 当前系统已接入按 ann_date 做 as-of 对齐的季频财务数据，因此可以使用 eps、roe、netprofit_yoy、or_yoy 来表达真实的盈利能力和成长逻辑；但 pe_ttm、pb、ps_ttm、dv_ttm 仍应优先解释为估值/红利/风格偏好，而不是直接等同于财务成长
-10. 当使用基本面风格特征时，可以生成“价值修复”“红利防守”“质量成长”“收入/利润同比改善”这类与当前数据含义一致的逻辑，但必须避免未来函数叙事，确保理由与已接入字段一致
-11. 如果市场环境中出现 northbound、leverage、capital_structure 等资金面标签，请把它们用于决定因子更偏进攻、防守、拥挤修复还是风险收缩；尤其当“外资谨慎/杠杆激进”或“外资积极/杠杆收缩”出现时，要在 risk 和 expected_failure_regime 中明确体现资金分歧风险
+8. 构造公式时必须参考特征体检报告中的 high_corr_pairs。如果两个特征高度相关，同时放入同一公式通常是冗余，应避免；确有必要同时使用时，优先用差值或比值提取增量信号
+9. 如果设计方向涉及 pe_ttm、pb、ps_ttm、dv_ttm、eps、roe、netprofit_yoy、or_yoy，请正确解释它们的金融含义：pe_ttm/pb 更偏价值，dv_ttm 更偏红利，ps_ttm 更偏高成长预期定价，roe 更偏质量，netprofit_yoy/or_yoy 更偏财务成长
+10. 当前系统已接入按 ann_date 做 as-of 对齐的季频财务数据，因此可以使用 eps、roe、netprofit_yoy、or_yoy 来表达真实的盈利能力和成长逻辑；但 pe_ttm、pb、ps_ttm、dv_ttm 仍应优先解释为估值/红利/风格偏好，而不是直接等同于财务成长
+11. 当使用基本面风格特征时，可以生成"价值修复""红利防守""质量成长""收入/利润同比改善"这类与当前数据含义一致的逻辑，但必须避免未来函数叙事，确保理由与已接入字段一致
+12. 如果市场环境中出现 northbound、leverage、capital_structure 等资金面标签，请把它们用于决定因子更偏进攻、防守、拥挤修复还是风险收缩；尤其当"外资谨慎/杠杆激进"或"外资积极/杠杆收缩"出现时，要在 risk 和 expected_failure_regime 中明确体现资金分歧风险
 
 方向只能是 higher_better（因子值越大越看多）或 lower_better（因子值越小越看多）。
 
@@ -41,15 +45,43 @@ _REQUIRED_FACTOR_FIELDS = {
 }
 
 
+def _build_feature_specs(feature_names: list[str]) -> list[dict[str, str]]:
+    """从 feature_pool.yaml 读取特征的 description 和 expr，构建带说明的特征列表。"""
+    feature_cfg = feature_pool_config()
+    feature_info_map: dict[str, dict[str, str]] = {}
+    for item in feature_cfg.get("base_features", []):
+        name = str(item.get("name", ""))
+        feature_info_map[name] = {
+            "description": str(item.get("description", "")),
+            "expr": str(item.get("expr", "")),
+        }
+    result: list[dict[str, str]] = []
+    for name in feature_names:
+        info = feature_info_map.get(name, {})
+        result.append({
+            "name": name,
+            "description": info.get("description", ""),
+            "expr": info.get("expr", ""),
+        })
+    return result
+
+
 def _build_generator_messages(design_direction: dict[str, Any], context: dict[str, Any]) -> list[dict[str, str]]:
     """构建生成器的 messages。"""
-    user_content = f"""请根据以下设计方向，生成 {design_direction.get('candidate_count', 10)} 个候选因子。
+    operator_context = build_operator_context(list(context.get("allowed_operators", [])))
+    constraints_context = build_constraints_context(dict(context.get("generation_constraints", {})))
+    summary_context = build_summary_context(dict(context.get("llm_summary", {})))
+    summary_context["数据"]["previous_top"] = context.get("previous_top", [])
+    summary_context["数据"]["previous_skipped"] = context.get("previous_skipped", [])
+    market_context = build_market_context(dict(context.get("market_context", {})))
+
+    user_content = f"""请根据以下设计方向，生成 {context.get('candidate_count', 10)} 个候选因子。
 
 【设计方向】
 {json.dumps(design_direction, ensure_ascii=False, indent=2)}
 
-【全部可用特征列表】（公式中使用的特征必须来自此列表）
-{json.dumps(context.get('feature_names', []), ensure_ascii=False)}
+【全部可用特征列表】（公式中使用的特征必须来自此列表，每个特征包含 description 业务含义和 expr 计算公式）
+{json.dumps(_build_feature_specs(context.get('feature_names', [])), ensure_ascii=False)}
 
 【首席分析师推荐特征】（优先使用）
 {json.dumps(design_direction.get('recommended_features', []), ensure_ascii=False)}
@@ -57,17 +89,17 @@ def _build_generator_messages(design_direction: dict[str, Any], context: dict[st
 【首席分析师建议规避特征】（严禁使用）
 {json.dumps(design_direction.get('avoid_features', []), ensure_ascii=False)}
 
-【允许的算子】
-{json.dumps(context.get('allowed_operators', []), ensure_ascii=False)}
+【允许的算子及字段说明】
+{json.dumps(operator_context, ensure_ascii=False)}
 
-【公式约束】（硬性规则，任何不满足的公式都会在验证阶段被直接拒绝）
-{json.dumps(context.get('generation_constraints', {}), ensure_ascii=False, indent=2)}
+【公式约束及字段说明】（硬性规则，任何不满足的公式都会在验证阶段被直接拒绝）
+{json.dumps(constraints_context, ensure_ascii=False, indent=2)}
 
-【特征体检报告摘要】
-{json.dumps(context.get('llm_summary', {}), ensure_ascii=False)}
+【特征体检报告摘要及字段说明】
+{json.dumps(summary_context, ensure_ascii=False)}
 
-【市场环境】
-{json.dumps(context.get('market_context', {}), ensure_ascii=False)}
+【市场环境及字段说明】
+{json.dumps(market_context, ensure_ascii=False)}
 
 请严格按照以下 JSON Schema 输出（只输出 JSON，不要 Markdown 代码块）：
 {{

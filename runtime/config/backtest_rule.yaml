@@ -12,7 +12,6 @@ TopKDropout:
   holding_count: 20
   # 权重模式：
   # - equal_weight：等权持仓（默认）
-  # - score_weight：按因子分做权重分配（分高仓位更大）
   weight_mode: equal_weight
   # 每次调仓最多换出数量（用于显式控制换手，阶段三实现）
   max_drop_per_day: 5
@@ -102,7 +101,6 @@ Execution:
 
   # 交易价格设定：
   # - next_open: 使用信号后的下一交易日开盘价成交
-  # - next_close: 使用信号后的下一交易日收盘价成交
   trade_price: next_open
 
   # 买入手续费率（包含佣金、过户费等），0.0015 表示千分之1.5

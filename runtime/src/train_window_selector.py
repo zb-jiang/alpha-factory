@@ -122,7 +122,11 @@ def _month_end(month_start: pd.Timestamp) -> pd.Timestamp:
 
 
 def _prepare_required_raw_fields(feature_cfg: dict[str, Any], fields: dict[str, Any]) -> list[str]:
-    raw_fields = list(feature_cfg.get("raw_fields", []))
+    # raw_fields 中的元素可能是 dict（含 name/description），提取 name
+    raw_fields = [
+        f["name"] if isinstance(f, dict) else f
+        for f in feature_cfg.get("raw_fields", [])
+    ]
     required = [
         fields.get("close", "close"),
         fields.get("turnover", "turnover"),

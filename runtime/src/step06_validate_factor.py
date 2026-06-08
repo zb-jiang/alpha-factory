@@ -40,7 +40,7 @@ def run() -> None:
     factor_payload = FactorPayload.model_validate(payload)
     feature_cfg = feature_pool_config()
     allowed_features = {item["name"] for item in feature_cfg.get("base_features", [])}
-    allowed_operators = set(feature_cfg.get("allowed_operators", []))
+    allowed_operators = {item["name"] for item in feature_cfg.get("allowed_operators", [])}
     constraints = generation_constraints(feature_cfg)
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
