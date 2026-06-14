@@ -14,6 +14,8 @@ import re
 import time
 import threading
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -21,6 +23,9 @@ from openai import OpenAI
 
 
 _LOG_LOCK = threading.Lock()
+
+# Prompt 落盘目录：runtime/outputs/llm/prompts
+_PROMPT_LOG_DIR = Path(__file__).resolve().parent.parent.parent / "outputs" / "llm" / "prompts"
 
 
 def _log(message: str) -> None:
@@ -76,6 +81,39 @@ def _parse_json_from_text(text: str) -> Any:
     raise ValueError("无法从大模型输出中提取 JSON")
 
 
+def _log_prompt(caller_name: str, model: str, messages: list[dict[str, str]]) -> None:
+    """将 prompt 以 banner 形式写入 runtime/outputs/llm/prompts/<safe_name>.txt。
+
+    每次调用都覆盖同名文件（同一 agent 多次调用只保留最新）。
+    """
+    banner_width = 100
+    border = "═" * banner_width
+    title = f" PROMPT START | {caller_name} | model={model} ".center(banner_width, "═")
+    end_title = f" PROMPT END   | {caller_name} | model={model} ".center(banner_width, "═")
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    lines: list[str] = [border, title, f"timestamp: {timestamp}", border]
+    for idx, msg in enumerate(messages):
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        sep_len = max(0, banner_width - 20 - len(role))
+        lines.append(f"── [{idx + 1}/{len(messages)}] role={role} " + "─" * sep_len)
+        lines.append(content)
+    lines.append(border)
+    lines.append(end_title)
+    lines.append(border)
+
+    # 文件名使用 caller_name，去除文件系统不允许的字符
+    safe_name = re.sub(r'[\\/:*?"<>|]', "_", caller_name).strip()
+    if not safe_name:
+        safe_name = "agent"
+    file_path = _PROMPT_LOG_DIR / f"{safe_name}.txt"
+
+    with _LOG_LOCK:
+        _PROMPT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        file_path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def call_llm_agent(config: AgentConfig, messages: list[dict[str, str]]) -> dict[str, Any]:
     """调用 LLM Agent，返回解析后的 JSON 字典。
 
@@ -84,6 +122,9 @@ def call_llm_agent(config: AgentConfig, messages: list[dict[str, str]]) -> dict[
     http_client = _create_http_client()
     client = OpenAI(api_key=config.api_key, base_url=config.base_url, http_client=http_client)
     caller_name = str(config.request_name or config.model)
+
+    # 打印 prompt（每个 agent 调用只打印一次，重试不重复打印）
+    _log_prompt(caller_name, config.model, messages)
 
     last_error: Exception | None = None
     for attempt in range(config.max_retries + 1):

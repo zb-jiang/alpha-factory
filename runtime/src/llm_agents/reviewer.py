@@ -20,7 +20,7 @@ from .context_builders import build_operator_context, build_constraints_context,
 _REVIEWER_SYSTEM = """你是因子质量评审员。你以极其严格的标准评审每个候选因子，只给出两种决定：
 
 - PASS：因子通过评审，可以进入后续流程
-- REJECT:<原因>：因子被拒绝，必须说明具体原因
+- REJECT：因子被拒绝，必须在 reason 字段中说明具体原因
 
 评审维度（按优先级排序）：
 1. 未来函数风险：公式中是否使用了未来数据（如 .shift(-1)）—— 发现即 REJECT
@@ -70,30 +70,30 @@ def _build_reviewer_messages(
 {json.dumps(raw_response_draft.get('factors', []), ensure_ascii=False, indent=2)}
 
 【允许使用的特征列表】（每个特征包含 description 业务含义和 expr 计算公式）
-{json.dumps(_build_feature_specs(context.get('feature_names', [])), ensure_ascii=False)}
+{json.dumps(_build_feature_specs(context.get('feature_names', [])), ensure_ascii=False, indent=2)}
 
 【允许使用的算子及字段说明】
-{json.dumps(operator_context, ensure_ascii=False)}
+{json.dumps(operator_context, ensure_ascii=False, indent=2)}
 
 【公式约束】（硬性规则，违反即 REJECT）
 {json.dumps(constraints_context, ensure_ascii=False, indent=2)}
 
 【特征体检报告摘要及字段说明】（重点关注 high_corr_pairs，用于评审维度8）
-{json.dumps(summary_context, ensure_ascii=False)}
+{json.dumps(summary_context, ensure_ascii=False, indent=2)}
 
 【设计方向】（用于逻辑一致性检查）
-{json.dumps(context.get('design_direction', {}), ensure_ascii=False)}
+{json.dumps(context.get('design_direction', {}), ensure_ascii=False, indent=2)}
 
 【历史被淘汰因子】（用于相似度检查）
-{json.dumps(context.get('previous_skipped', []), ensure_ascii=False)}
+{json.dumps(context.get('previous_skipped', []), ensure_ascii=False, indent=2)}
 
 请严格按照以下 JSON Schema 输出（只输出 JSON，不要 Markdown 代码块）：
 {{
   "review_results": [
     {{
       "factor_name": "因子名称",
-      "decision": "PASS 或 REJECT:具体原因",
-      "reason": "如果 REJECT，这里写具体原因；如果 PASS，留空"
+      "decision": "PASS 或 REJECT，二选一，不要附加任何额外内容",
+      "reason": "中文简述：PASS 时可留空字符串；REJECT 时必须说明具体原因，包括违反的评审维度编号和具体问题"
     }}
   ]
 }}"""
@@ -120,25 +120,32 @@ def _parse_review_results(raw: dict[str, Any]) -> tuple[list[dict[str, Any]], li
         if not isinstance(item, dict):
             continue
         factor_name = str(item.get("factor_name", ""))
-        decision = str(item.get("decision", "")).strip()
-        reason = str(item.get("reason", ""))
+        decision_raw = str(item.get("decision", "")).strip()
+        reason = str(item.get("reason", "")).strip()
 
         if not factor_name:
             continue
 
-        if decision == "PASS":
-            passed.append({"factor_name": factor_name, "decision": decision, "reason": reason})
-        elif decision.startswith("REJECT"):
-            rejected.append({"factor_name": factor_name, "decision": decision, "reason": reason})
+        # 提取核心决策（兼容 LLM 偶尔附加冒号原因的旧格式）
+        decision_key = decision_raw.split(":", 1)[0].split("：", 1)[0].strip().upper()
+        # 如果 decision 中带了冒号原因但 reason 为空，把冒号后的内容补到 reason
+        if ":" in decision_raw or "：" in decision_raw:
+            tail = decision_raw.split(":", 1)[-1] if ":" in decision_raw else decision_raw.split("：", 1)[-1]
+            tail = tail.strip()
+            if tail and not reason:
+                reason = tail
+
+        if decision_key == "PASS":
+            passed.append({"factor_name": factor_name, "decision": "PASS", "reason": reason})
+        elif decision_key == "REJECT":
+            rejected.append({"factor_name": factor_name, "decision": "REJECT", "reason": reason or "未提供拒绝原因"})
         else:
             # 未知决策视为拒绝
-            rejected.append(
-                {
-                    "factor_name": factor_name,
-                    "decision": "REJECT:评审结果不明确，按拒绝处理",
-                    "reason": reason,
-                }
-            )
+            rejected.append({
+                "factor_name": factor_name,
+                "decision": "REJECT",
+                "reason": reason or f"评审结果不明确（原始 decision={decision_raw!r}），按拒绝处理",
+            })
 
     return passed, rejected
 

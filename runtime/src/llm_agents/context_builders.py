@@ -34,7 +34,13 @@ def build_summary_context(llm_summary: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_market_context(market_context: dict[str, Any]) -> dict[str, Any]:
-    """为市场环境增加字段说明。"""
+    """为市场环境增加字段说明。
+
+    会剔除 meta 字段（包含 train_start_date / train_end_date / config_source / funding_sources），
+    避免 LLM 看到具体年份后调用知识库记忆产生事后偏见。
+    """
+    # 浅拷贝并去除 meta 字段，避免污染传入对象
+    sanitized = {k: v for k, v in market_context.items() if k != "meta"}
     return {
         "字段说明": {
             "train_context": "当前训练/挖掘窗口对应的市场环境，不是实时行情；用于判断本轮因子更适合趋势、反转、防守、进攻等逻辑。",
@@ -50,7 +56,7 @@ def build_market_context(market_context: dict[str, Any]) -> dict[str, Any]:
             "labels.leverage": "两融情绪，例如升温、平稳、降温。",
             "labels.capital_structure": "资金结构组合状态，例如同向进攻、同向防守、外资谨慎、杠杆激进。",
         },
-        "数据": market_context,
+        "数据": sanitized,
     }
 
 
