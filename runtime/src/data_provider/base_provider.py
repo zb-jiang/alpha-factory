@@ -122,10 +122,28 @@ class BaseDataProvider(ABC):
     ) -> pd.DataFrame:
         """获取市场级日度指标。
 
-        典型用途是北向资金、融资融券等“按交易日只有一条或少量聚合记录”的
+        典型用途是北向资金、融资融券等"按交易日只有一条或少量聚合记录"的
         市场状态序列。默认实现为不支持，具体数据源可按需覆盖。
         """
         raise NotImplementedError("当前数据提供者未实现市场级日度指标接口")
+
+    def get_macro_indicators(
+        self,
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame:
+        """获取宏观经济指标（Shibor, M2, PMI, CPI, PPI）。
+
+        返回以 month (YYYYMM) 为索引的 DataFrame，包含：
+        - shibor_1y: 1年期 Shibor 利率（日频月均值）
+        - m2_yoy: M2 同比增速
+        - pmi_manufacturing: 制造业 PMI
+        - cpi_yoy: CPI 同比
+        - ppi_yoy: PPI 同比
+
+        默认实现为不支持，具体数据源可按需覆盖。
+        """
+        raise NotImplementedError("当前数据提供者未实现宏观经济指标接口")
     
     def is_initialized(self) -> bool:
         """检查是否已初始化"""

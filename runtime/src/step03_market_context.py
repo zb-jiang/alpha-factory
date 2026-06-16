@@ -64,6 +64,24 @@ def run() -> None:
         start_date=str(pd.Timestamp(raw_dates.min()).date()),
         end_date=str(pd.Timestamp(raw_dates.max()).date()),
     ) if not raw_frame.empty else pd.DataFrame()
+
+    # 获取宏观经济指标（Shibor, M2, PMI, CPI, PPI）
+    macro_frame = pd.DataFrame()
+    try:
+        macro_frame = provider.get_macro_indicators(
+            start_date=str(pd.Timestamp(raw_dates.min()).date()),
+            end_date=str(pd.Timestamp(raw_dates.max()).date()),
+        )
+        if not macro_frame.empty:
+            # 过滤出训练窗口内的宏观数据
+            train_start_month = train_start.strftime("%Y%m")
+            train_end_month = train_end.strftime("%Y%m")
+            macro_frame = macro_frame[
+                (macro_frame["month"] >= train_start_month) & (macro_frame["month"] <= train_end_month)
+            ]
+    except Exception as e:
+        print(f"警告: 获取宏观经济指标失败，宏观标签将以'未知'降级: {e}")
+
     daily_market = compute_daily_market(
         raw_frame,
         fields=fields,
@@ -78,8 +96,9 @@ def run() -> None:
             "train_end_date": str(train_end.date()),
             "config_source": "runtime/config/market_context.yaml",
             "funding_sources": ["moneyflow_hsgt", "margin"],
+            "macro_sources": ["shibor", "cn_m", "cn_pmi", "cn_cpi", "cn_ppi"],
         },
-        "train_context": build_train_context(train_window, thresholds),
+        "train_context": build_train_context(train_window, thresholds, macro_data=macro_frame, windows=windows),
     }
     write_json(OUTPUT_DIR / "health" / "market_context.json", market_context)
     train_ctx = market_context.get("train_context", {})

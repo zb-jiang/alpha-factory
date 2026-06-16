@@ -18,7 +18,7 @@ _GENERATOR_SYSTEM = """你是一个顶级的量化交易策略研究员和金融
 核心约束：
 1. 你只能使用【首席分析师推荐特征】中的特征构造公式；严禁使用【首席分析师建议规避特征】或推荐列表之外的任何特征
 2. 每个因子必须有明确的经济学逻辑解释（reason 字段）
-3. 每个因子必须指明最可能失效的市场环境（expected_failure_regime 字段），且必须使用市场环境的 9 个标签维度（trend / volatility / liquidity / dispersion / breadth / style / northbound / leverage / capital_structure）的合法取值组合，便于后续做 regime-aware 归因；自由文本只能作为括号内补充说明，不能取代标签
+3. 每个因子必须指明最可能失效的市场环境（expected_failure_regime 字段），且必须使用市场环境的 13 个标签维度（trend / volatility / liquidity / dispersion / breadth / style / northbound / leverage / capital_structure / rate / macro_liquidity / economy / inflation）的合法取值组合，便于后续做 regime-aware 归因；自由文本只能作为括号内补充说明，不能取代标签
 4. 公式必须可被 Python 直接 eval 执行，仅允许使用 +、-、*、/ 等基本算术运算符和【允许的算子】中的函数算子
 5. 禁止使用未来函数（如 .shift(-1)）
 6. 公式必须严格遵守【公式约束】中的硬性规则（嵌套深度、特征数量、算子数量、禁止链等）
@@ -112,7 +112,7 @@ def _build_generator_messages(design_direction: dict[str, Any], context: dict[st
       "direction": "higher_better 或 lower_better",
       "reason": "中文简述因子的经济学逻辑",
       "risk": "中文简述风险",
-      "expected_failure_regime": "最可能失效的市场环境，必须使用以下 9 个标签维度的取值组合（用顿号或加号连接），并附简短中文说明。允许的维度与取值：trend(上行/震荡/下行)、volatility(高/中/低)、liquidity(高/中/低)、dispersion(高/中/低)、breadth(普涨/分化/普跌)、style(大盘占优/小盘占优)、northbound(偏流入/中性/偏流出)、leverage(升温/平稳/降温)、capital_structure(同向进攻/同向防守/外资谨慎/杠杆激进/中性)。例如：'trend=下行、volatility=高、capital_structure=外资谨慎（资金退潮+市场普跌）'"
+      "expected_failure_regime": "最可能失效的市场环境，必须使用以下 13 个标签维度的取值组合（用顿号或加号连接），并附简短中文说明。允许的维度与取值：trend(上行/震荡/下行)、volatility(高/中/低)、liquidity(高/中/低)、dispersion(高/中/低)、breadth(普涨/分化/普跌)、style(大盘占优/小盘占优)、northbound(偏流入/中性/偏流出)、leverage(升温/平稳/降温)、capital_structure(同向进攻/同向防守/外资谨慎/杠杆激进/中性)、rate(宽松/中性/收紧)、macro_liquidity(扩张/中性/收缩)、economy(扩张/中性/收缩/未知)、inflation(上行/中性/下行)。例如：'trend=下行、rate=收紧、economy=收缩（利率上行+经济衰退双杀）'"
     }}
   ]
 }}"""

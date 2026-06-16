@@ -124,6 +124,60 @@ def _classify_alignment(value: float | None) -> str:
     return "中性"
 
 
+def _classify_rate(shibor_change: float | None, easing_threshold: float, tightening_threshold: float) -> str:
+    """根据 Shibor 变化量判断利率方向。"""
+    if shibor_change is None:
+        return "未知"
+    if shibor_change <= easing_threshold:
+        return "宽松"
+    if shibor_change >= tightening_threshold:
+        return "收紧"
+    return "中性"
+
+
+def _classify_macro_liquidity(m2_yoy_change: float | None, threshold: float) -> str:
+    """根据 M2 同比变化趋势判断宏观流动性。"""
+    if m2_yoy_change is None:
+        return "未知"
+    if m2_yoy_change >= threshold:
+        return "扩张"
+    if m2_yoy_change <= -threshold:
+        return "收缩"
+    return "中性"
+
+
+def _classify_economy(pmi_value: float | None, pmi_change: float | None, expansion_threshold: float) -> str:
+    """根据 PMI 水平和趋势判断经济周期。"""
+    if pmi_value is None:
+        return "未知"
+    if pmi_value > expansion_threshold and (pmi_change is None or pmi_change >= 0):
+        return "扩张"
+    if pmi_value < expansion_threshold and (pmi_change is None or pmi_change <= 0):
+        return "收缩"
+    return "中性"
+
+
+def _classify_inflation(cpi_change: float | None, ppi_change: float | None, threshold: float) -> str:
+    """根据 CPI 和 PPI 同比变化趋势判断通胀方向。"""
+    signals = []
+    for change in [cpi_change, ppi_change]:
+        if change is not None:
+            if change >= threshold:
+                signals.append(1)
+            elif change <= -threshold:
+                signals.append(-1)
+            else:
+                signals.append(0)
+    if not signals:
+        return "未知"
+    composite = sum(signals) / len(signals)
+    if composite > 0:
+        return "上行"
+    if composite < 0:
+        return "下行"
+    return "中性"
+
+
 def _rolling_min_periods(window: int, fallback: int) -> int:
     return max(1, min(window, fallback, max(3, window // 2)))
 
@@ -336,6 +390,8 @@ def compute_daily_market(
 def build_window_context(
     window_frame: pd.DataFrame,
     thresholds: dict[str, Any],
+    macro_data: pd.DataFrame | None = None,
+    windows: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if window_frame.empty:
         return {"summary_text": "当前样本期无有效市场数据。", "labels": {}, "stats": {}}
@@ -377,6 +433,131 @@ def build_window_context(
     }
     labels["capital_structure"] = _classify_capital_structure(labels["northbound"], labels["leverage"])
     north_alignment_label = _classify_alignment(northbound_alignment_mean)
+
+    # ── 宏观维度标签 ──────────────────────────────────────────
+    macro_stats: dict[str, Any] = {}
+    rate_label = "未知"
+    macro_liquidity_label = "未知"
+    economy_label = "未知"
+    inflation_label = "未知"
+
+    if macro_data is not None and not macro_data.empty and windows is not None:
+        rate_easing = _cfg_float(thresholds, "rate_easing_threshold", -0.0025)
+        rate_tightening = _cfg_float(thresholds, "rate_tightening_threshold", 0.0025)
+        m2_change_threshold = _cfg_float(thresholds, "m2_yoy_change_threshold", 0.3)
+        pmi_expansion = _cfg_float(thresholds, "pmi_expansion_threshold", 50.0)
+        inflation_change_threshold = _cfg_float(thresholds, "inflation_yoy_change_threshold", 0.3)
+
+        m2_trend_months = _cfg_int(windows, "m2_trend_months", 3)
+        pmi_trend_months = _cfg_int(windows, "pmi_trend_months", 3)
+        inflation_trend_months = _cfg_int(windows, "inflation_trend_months", 3)
+
+        # 取训练窗口末尾对应的宏观数据
+        # 宏观数据是月频，取最后 N 个月来计算趋势
+        macro_sorted = macro_data.sort_values("month").reset_index(drop=True)
+        last_row = macro_sorted.iloc[-1] if not macro_sorted.empty else None
+
+        # 10. 利率方向：Shibor 1Y 变化
+        if "shibor_1y" in macro_sorted.columns and last_row is not None:
+            shibor_current = _safe_float(last_row.get("shibor_1y"))
+            if shibor_current is not None and len(macro_sorted) >= 2:
+                # 找 shibor_trend_days 天前的 Shibor
+                shibor_trend_days = _cfg_int(windows, "shibor_trend_days", 20)
+                # Shibor 是月均值，往前找约 shibor_trend_days/22 个月
+                lookback_months = max(1, shibor_trend_days // 22)
+                if len(macro_sorted) > lookback_months:
+                    shibor_prev = _safe_float(macro_sorted.iloc[-(lookback_months + 1)].get("shibor_1y"))
+                    if shibor_prev is not None:
+                        shibor_change = shibor_current - shibor_prev
+                        rate_label = _classify_rate(shibor_change, rate_easing, rate_tightening)
+                        macro_stats["shibor_1y_current"] = shibor_current
+                        macro_stats["shibor_1y_change"] = shibor_change
+                    else:
+                        macro_stats["shibor_1y_current"] = shibor_current
+                        macro_stats["shibor_1y_change"] = None
+                else:
+                    macro_stats["shibor_1y_current"] = shibor_current
+                    macro_stats["shibor_1y_change"] = None
+            else:
+                macro_stats["shibor_1y_current"] = shibor_current if shibor_current else None
+                macro_stats["shibor_1y_change"] = None
+
+        # 11. 宏观流动性：M2 同比变化趋势
+        if "m2_yoy" in macro_sorted.columns and last_row is not None:
+            m2_yoy_current = _safe_float(last_row.get("m2_yoy"))
+            if m2_yoy_current is not None and len(macro_sorted) > m2_trend_months:
+                m2_yoy_prev = _safe_float(macro_sorted.iloc[-(m2_trend_months + 1)].get("m2_yoy"))
+                if m2_yoy_prev is not None:
+                    m2_yoy_change = m2_yoy_current - m2_yoy_prev
+                    macro_liquidity_label = _classify_macro_liquidity(m2_yoy_change, m2_change_threshold)
+                    macro_stats["m2_yoy_current"] = m2_yoy_current
+                    macro_stats["m2_yoy_change"] = m2_yoy_change
+                else:
+                    macro_stats["m2_yoy_current"] = m2_yoy_current
+                    macro_stats["m2_yoy_change"] = None
+            else:
+                macro_stats["m2_yoy_current"] = m2_yoy_current
+                macro_stats["m2_yoy_change"] = None
+
+        # 12. 经济周期：PMI 水平和趋势
+        if "pmi_manufacturing" in macro_sorted.columns and last_row is not None:
+            pmi_current = _safe_float(last_row.get("pmi_manufacturing"))
+            if pmi_current is not None and len(macro_sorted) > pmi_trend_months:
+                pmi_prev = _safe_float(macro_sorted.iloc[-(pmi_trend_months + 1)].get("pmi_manufacturing"))
+                if pmi_prev is not None:
+                    pmi_change = pmi_current - pmi_prev
+                    economy_label = _classify_economy(pmi_current, pmi_change, pmi_expansion)
+                    macro_stats["pmi_current"] = pmi_current
+                    macro_stats["pmi_change"] = pmi_change
+                else:
+                    economy_label = _classify_economy(pmi_current, None, pmi_expansion)
+                    macro_stats["pmi_current"] = pmi_current
+                    macro_stats["pmi_change"] = None
+            else:
+                economy_label = _classify_economy(pmi_current, None, pmi_expansion) if pmi_current is not None else "未知"
+                macro_stats["pmi_current"] = pmi_current
+                macro_stats["pmi_change"] = None
+
+        # 13. 通胀方向：CPI/PPI 同比变化趋势
+        cpi_change_val = None
+        ppi_change_val = None
+        if "cpi_yoy" in macro_sorted.columns and last_row is not None:
+            cpi_current = _safe_float(last_row.get("cpi_yoy"))
+            if cpi_current is not None and len(macro_sorted) > inflation_trend_months:
+                cpi_prev = _safe_float(macro_sorted.iloc[-(inflation_trend_months + 1)].get("cpi_yoy"))
+                if cpi_prev is not None:
+                    cpi_change_val = cpi_current - cpi_prev
+                    macro_stats["cpi_yoy_current"] = cpi_current
+                    macro_stats["cpi_yoy_change"] = cpi_change_val
+                else:
+                    macro_stats["cpi_yoy_current"] = cpi_current
+                    macro_stats["cpi_yoy_change"] = None
+            else:
+                macro_stats["cpi_yoy_current"] = cpi_current
+                macro_stats["cpi_yoy_change"] = None
+
+        if "ppi_yoy" in macro_sorted.columns and last_row is not None:
+            ppi_current = _safe_float(last_row.get("ppi_yoy"))
+            if ppi_current is not None and len(macro_sorted) > inflation_trend_months:
+                ppi_prev = _safe_float(macro_sorted.iloc[-(inflation_trend_months + 1)].get("ppi_yoy"))
+                if ppi_prev is not None:
+                    ppi_change_val = ppi_current - ppi_prev
+                    macro_stats["ppi_yoy_current"] = ppi_current
+                    macro_stats["ppi_yoy_change"] = ppi_change_val
+                else:
+                    macro_stats["ppi_yoy_current"] = ppi_current
+                    macro_stats["ppi_yoy_change"] = None
+            else:
+                macro_stats["ppi_yoy_current"] = ppi_current
+                macro_stats["ppi_yoy_change"] = None
+
+        inflation_label = _classify_inflation(cpi_change_val, ppi_change_val, inflation_change_threshold)
+
+    labels["rate"] = rate_label
+    labels["macro_liquidity"] = macro_liquidity_label
+    labels["economy"] = economy_label
+    labels["inflation"] = inflation_label
+
     summary_text = (
         f"当前市场状态：趋势{labels['trend']}（20日累计收益均值 {_fmt_pct(trend_mean)}），"
         f"波动{labels['volatility']}（分位 {_fmt_num(vol_rank_mean)}），"
@@ -386,7 +567,11 @@ def build_window_context(
         f"风格偏{labels['style']}（大小盘收益差均值 {_fmt_pct(style_mean, 3)}），"
         f"北向资金{labels['northbound']}（强度分位 {_fmt_num(northbound_rank_mean)}，净流入日占比 {_fmt_pct(northbound_inflow_ratio_mean)}，与趋势{north_alignment_label}），"
         f"两融情绪{labels['leverage']}（融资净流分位 {_fmt_num(margin_flow_rank_mean)}，融资余额分位 {_fmt_num(margin_balance_rank_mean)}，融券余额变化 {_fmt_pct(short_balance_change_mean)}），"
-        f"资金结构{labels['capital_structure']}。"
+        f"资金结构{labels['capital_structure']}，"
+        f"利率{labels['rate']}（Shibor 1Y {_fmt_num(macro_stats.get('shibor_1y_current'), 4)}%，变化 {_fmt_pct(macro_stats.get('shibor_1y_change'), 4)}），"
+        f"宏观流动性{labels['macro_liquidity']}（M2同比 {_fmt_num(macro_stats.get('m2_yoy_current'), 2)}%，变化 {_fmt_num(macro_stats.get('m2_yoy_change'), 2)}），"
+        f"经济周期{labels['economy']}（PMI {_fmt_num(macro_stats.get('pmi_current'), 2)}），"
+        f"通胀{labels['inflation']}（CPI同比 {_fmt_num(macro_stats.get('cpi_yoy_current'), 2)}%，PPI同比 {_fmt_num(macro_stats.get('ppi_yoy_current'), 2)}%）。"
     )
     return {
         "summary_text": summary_text,
@@ -401,6 +586,10 @@ def build_window_context(
             "northbound": f"{labels['northbound']}（依据 northbound_flow_rank_mean 的历史分位映射）",
             "leverage": f"{labels['leverage']}（综合融资净流与融资余额分位映射）",
             "capital_structure": f"{labels['capital_structure']}（结合北向资金方向与杠杆情绪共同判断）",
+            "rate": f"{labels['rate']}（依据 Shibor 1Y 变化量与利率阈值映射）",
+            "macro_liquidity": f"{labels['macro_liquidity']}（依据 M2 同比变化趋势映射）",
+            "economy": f"{labels['economy']}（依据 PMI 水平与趋势映射）",
+            "inflation": f"{labels['inflation']}（综合 CPI/PPI 同比变化趋势映射）",
         },
         "mapping_explain": _build_mapping_explain(
             trend_mean,
@@ -430,6 +619,7 @@ def build_window_context(
             "margin_flow_rank_mean": margin_flow_rank_mean,
             "margin_balance_rank_mean": margin_balance_rank_mean,
             "short_balance_change_mean": short_balance_change_mean,
+            **macro_stats,
         },
     }
 
@@ -437,8 +627,10 @@ def build_window_context(
 def build_train_context(
     train_window: pd.DataFrame,
     thresholds: dict[str, Any],
+    macro_data: pd.DataFrame | None = None,
+    windows: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return build_window_context(train_window, thresholds)
+    return build_window_context(train_window, thresholds, macro_data=macro_data, windows=windows)
 
 
 __all__ = ["build_train_context", "build_window_context", "compute_daily_market"]

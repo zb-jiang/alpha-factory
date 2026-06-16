@@ -55,6 +55,10 @@ def build_market_context(market_context: dict[str, Any]) -> dict[str, Any]:
             "labels.northbound": "北向资金方向，例如偏流入、中性、偏流出。",
             "labels.leverage": "两融情绪，例如升温、平稳、降温。",
             "labels.capital_structure": "资金结构组合状态，例如同向进攻、同向防守、外资谨慎、杠杆激进。",
+            "labels.rate": "利率方向，例如宽松、收紧、中性。宽松利好成长股，收紧利好价值股。",
+            "labels.macro_liquidity": "宏观流动性，例如扩张、收缩、中性。M2扩张利好小盘，收缩利好大盘蓝筹。",
+            "labels.economy": "经济周期，例如扩张、收缩、中性。扩张利好周期股，收缩利好防守型资产。",
+            "labels.inflation": "通胀方向，例如上行、下行、中性。上行利好上游资源品，下行利好成长股估值。",
         },
         "数据": sanitized,
     }

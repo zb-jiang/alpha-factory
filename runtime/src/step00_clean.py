@@ -73,6 +73,8 @@ def clean_outputs(
         ("backtest/*", "files"),
         # LLM 输出
         ("llm/*", "files"),
+        # LLM prompts 子目录
+        ("llm/prompts", "directories"),
         # 多 Agent 模式下分析师中间产物
         ("llm/agent_outputs", "directories"),
         # 当前运行态上下文

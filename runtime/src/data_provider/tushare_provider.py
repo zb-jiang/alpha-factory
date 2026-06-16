@@ -1767,6 +1767,144 @@ class TushareProvider(BaseDataProvider):
         if trading_dates:
             merged = merged.reindex(pd.Index(pd.to_datetime(trading_dates), name="datetime"))
         return merged.sort_index()
+
+    def get_macro_indicators(
+        self,
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame:
+        """获取宏观经济指标（Shibor, M2, PMI, CPI, PPI）。
+
+        返回一个以 month (YYYYMM) 为索引的 DataFrame，包含：
+        - shibor_1y: 1年期 Shibor 利率（日频月均值）
+        - m2_yoy: M2 同比增速
+        - pmi_manufacturing: 制造业 PMI
+        - cpi_yoy: CPI 同比
+        - ppi_yoy: PPI 同比
+        """
+        self.initialize()
+        start_text = str(start_date).replace("-", "")
+        end_text = str(end_date).replace("-", "")
+        start_month = start_text[:6]
+        end_month = end_text[:6]
+
+        frames: dict[str, pd.DataFrame] = {}
+
+        # 1. Shibor 1Y（日频 → 月均值）
+        try:
+            shibor_df = self._call_pro_api(
+                "shibor",
+                start_date=start_text,
+                end_date=end_text,
+            )
+            if shibor_df is not None and not shibor_df.empty:
+                shibor_df["date"] = pd.to_datetime(shibor_df["date"], errors="coerce")
+                shibor_df["month"] = shibor_df["date"].dt.strftime("%Y%m")
+                if "1y" in shibor_df.columns:
+                    shibor_df["1y"] = pd.to_numeric(shibor_df["1y"], errors="coerce")
+                    monthly = shibor_df.groupby("month")["1y"].mean().reset_index()
+                    monthly.columns = ["month", "shibor_1y"]
+                    frames["shibor"] = monthly
+        except Exception as e:
+            if not self._market_indicator_warned.get("shibor", False):
+                self._market_indicator_warned["shibor"] = True
+                print(f"警告: 获取 Shibor 数据失败: {e}")
+
+        # 2. M2 同比（月频）
+        try:
+            m2_df = self._call_pro_api(
+                "cn_m",
+                start_m=start_month,
+                end_m=end_month,
+            )
+            if m2_df is not None and not m2_df.empty:
+                m2_monthly = m2_df[["month"]].copy()
+                if "m2_yoy" in m2_df.columns:
+                    m2_monthly["m2_yoy"] = pd.to_numeric(m2_df["m2_yoy"], errors="coerce")
+                else:
+                    m2_monthly["m2_yoy"] = np.nan
+                frames["m2"] = m2_monthly
+        except Exception as e:
+            if not self._market_indicator_warned.get("cn_m", False):
+                self._market_indicator_warned["cn_m"] = True
+                print(f"警告: 获取 M2 数据失败: {e}")
+
+        # 3. PMI（月频）
+        try:
+            pmi_df = self._call_pro_api(
+                "cn_pmi",
+                start_m=start_month,
+                end_m=end_month,
+            )
+            if pmi_df is not None and not pmi_df.empty:
+                # Tushare cn_pmi 返回大写列名，统一转小写
+                pmi_df.columns = [c.lower() for c in pmi_df.columns]
+                pmi_monthly = pmi_df[["month"]].copy()
+                if "pmi010000" in pmi_df.columns:
+                    pmi_monthly["pmi_manufacturing"] = pd.to_numeric(pmi_df["pmi010000"], errors="coerce")
+                else:
+                    pmi_monthly["pmi_manufacturing"] = np.nan
+                frames["pmi"] = pmi_monthly
+        except Exception as e:
+            if not self._market_indicator_warned.get("cn_pmi", False):
+                self._market_indicator_warned["cn_pmi"] = True
+                print(f"警告: 获取 PMI 数据失败: {e}")
+
+        # 4. CPI 同比（月频）
+        try:
+            cpi_df = self._call_pro_api(
+                "cn_cpi",
+                start_m=start_month,
+                end_m=end_month,
+            )
+            if cpi_df is not None and not cpi_df.empty:
+                cpi_monthly = cpi_df[["month"]].copy()
+                if "nt_yoy" in cpi_df.columns:
+                    cpi_monthly["cpi_yoy"] = pd.to_numeric(cpi_df["nt_yoy"], errors="coerce")
+                else:
+                    cpi_monthly["cpi_yoy"] = np.nan
+                frames["cpi"] = cpi_monthly
+        except Exception as e:
+            if not self._market_indicator_warned.get("cn_cpi", False):
+                self._market_indicator_warned["cn_cpi"] = True
+                print(f"警告: 获取 CPI 数据失败: {e}")
+
+        # 5. PPI 同比（月频）
+        try:
+            ppi_df = self._call_pro_api(
+                "cn_ppi",
+                start_m=start_month,
+                end_m=end_month,
+            )
+            if ppi_df is not None and not ppi_df.empty:
+                ppi_monthly = ppi_df[["month"]].copy()
+                if "ppi_yoy" in ppi_df.columns:
+                    ppi_monthly["ppi_yoy"] = pd.to_numeric(ppi_df["ppi_yoy"], errors="coerce")
+                else:
+                    ppi_monthly["ppi_yoy"] = np.nan
+                frames["ppi"] = ppi_monthly
+        except Exception as e:
+            if not self._market_indicator_warned.get("cn_ppi", False):
+                self._market_indicator_warned["cn_ppi"] = True
+                print(f"警告: 获取 PPI 数据失败: {e}")
+
+        if not frames:
+            return pd.DataFrame()
+
+        # 合并所有宏观数据
+        merged: pd.DataFrame | None = None
+        for frame in frames.values():
+            if merged is None:
+                merged = frame
+            else:
+                merged = merged.merge(frame, on="month", how="outer")
+
+        if merged is None or merged.empty:
+            return pd.DataFrame()
+
+        merged = merged.sort_values("month").reset_index(drop=True)
+        merged["month"] = merged["month"].astype(str)
+        return merged
     
     def get_all_industries(self) -> pd.DataFrame:
         """获取所有行业列表
