@@ -43,7 +43,7 @@ def build_market_context(market_context: dict[str, Any]) -> dict[str, Any]:
     sanitized = {k: v for k, v in market_context.items() if k != "meta"}
     return {
         "字段说明": {
-            "train_context": "当前训练/挖掘窗口对应的市场环境，不是实时行情；用于判断本轮因子更适合趋势、反转、防守、进攻等逻辑。",
+            "train_context": "当前市场环境，不是实时行情；用于判断本轮因子更适合趋势、反转、防守、进攻等逻辑。",
             "summary_text": "市场环境的自然语言摘要。",
             "labels": "结构化市场标签集合。",
             "labels.trend": "市场方向状态，例如上行、震荡、下行。",
