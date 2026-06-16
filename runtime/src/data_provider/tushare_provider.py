@@ -52,6 +52,23 @@ class TushareProvider(BaseDataProvider):
         "$roe": "roe",
         "$netprofit_yoy": "netprofit_yoy",
         "$or_yoy": "or_yoy",
+        # ── 基本面扩展：盈利质量子维度 ─────────────────────────────────
+        "$q_roe": "q_roe",
+        "$grossprofit_margin": "grossprofit_margin",
+        "$netprofit_margin": "netprofit_margin",
+        "$q_ocf_to_sales": "q_ocf_to_sales",
+        "$dt_netprofit_yoy": "dt_netprofit_yoy",
+        # ── 基本面扩展：投资因子子维度 ─────────────────────────────────
+        "$assets_yoy": "assets_yoy",
+        # ── 基本面扩展：财务健康子维度 ─────────────────────────────────
+        "$debt_to_assets": "debt_to_assets",
+        "$current_ratio": "current_ratio",
+        "$ocf_to_debt": "ocf_to_debt",
+        # ── 基本面扩展：现金流子维度 ─────────────────────────────────
+        "$fcff": "fcff",
+        # ── 基本面扩展：成长子维度 ─────────────────────────────────
+        "$op_yoy": "op_yoy",
+        "$equity_yoy": "equity_yoy",
         "$circ_mv": "circ_mv",
         "$total_share": "total_share",
         "$float_share": "float_share",
@@ -83,6 +100,24 @@ class TushareProvider(BaseDataProvider):
         "$roe": "fina_indicator",
         "$netprofit_yoy": "fina_indicator",
         "$or_yoy": "fina_indicator",
+        # ── 基本面扩展（全部走 fina_indicator 接口，字段名严格匹配 Tushare）──
+        # 盈利质量
+        "$q_roe": "fina_indicator",
+        "$grossprofit_margin": "fina_indicator",
+        "$netprofit_margin": "fina_indicator",
+        "$q_ocf_to_sales": "fina_indicator",
+        "$dt_netprofit_yoy": "fina_indicator",
+        # 投资因子
+        "$assets_yoy": "fina_indicator",
+        # 财务健康
+        "$debt_to_assets": "fina_indicator",
+        "$current_ratio": "fina_indicator",
+        "$ocf_to_debt": "fina_indicator",
+        # 现金流
+        "$fcff": "fina_indicator",
+        # 成长
+        "$op_yoy": "fina_indicator",
+        "$equity_yoy": "fina_indicator",
         "$circ_mv": "daily_basic",
         "$total_share": "daily_basic",
         "$float_share": "daily_basic",

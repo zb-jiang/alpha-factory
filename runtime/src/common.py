@@ -19,25 +19,37 @@ import yaml
 _BANNER_WIDTH = 60
 
 FUNDAMENTAL_FEATURE_NAMES = [
+    # ── 估值 ──────────────────────────────────────────
     "pe_ttm",
     "pb",
     "ps_ttm",
     "dv_ttm",
+    "earnings_yield",
+    "sales_yield",
+    "market_cap_change_20d",
+    "market_cap_stability_20d",
+    # ── 盈利质量 ──────────────────────────────────────
     "eps",
     "roe",
     "netprofit_yoy",
     "or_yoy",
-    "earnings_yield",
-    "sales_yield",
     "quality_value",
     "profit_revenue_gap",
-    "market_cap_change_20d",
-    "market_cap_stability_20d",
-    "turnover_mean_20d",
-    "turnover_ratio_20d",
-    "ret_20d",
-    "ret_60d",
-    "realized_vol_20d",
+    "profit_quality",
+    "q_roe_acceleration",
+    "gross_margin",
+    "net_margin",
+    "real_growth",
+    "op_growth",
+    "equity_growth",
+    # ── 投资因子 ──────────────────────────────────────
+    "asset_growth_inverse",
+    # ── 财务健康 ──────────────────────────────────────
+    "financial_health",
+    "liquidity_strength",
+    "debt_service_ability",
+    # ── 现金流 ──────────────────────────────────────
+    "fcf_yield",
 ]
 
 
@@ -1667,6 +1679,10 @@ def _compute_group_features(group: pd.DataFrame, base_features: list[dict[str, s
             env[name] = values[name]
     
     result_valid = pd.DataFrame(values, index=local_valid.index)
+    # 将所有列统一转为 float64：把 None / object 类型的"全空列"（来自缺失的财务字段）
+    # 显式转成 NaN，避免后续 result.loc[mask] = result_valid.values 触发
+    # pandas 的 dtype incompatible FutureWarning。
+    result_valid = result_valid.apply(pd.to_numeric, errors="coerce").astype("float64")
     result = pd.DataFrame(np.nan, index=local.index, columns=result_valid.columns)
     result.loc[valid_mask] = result_valid.values
     result.index.name = "datetime"
