@@ -54,6 +54,39 @@ FUNDAMENTAL_FIELD_CANDIDATES: dict[str, list[str]] = {
         "inc_revenue_year_on_year",
         "or_yoy",
     ],
+    # ── Stage C: 盈利质量原始字段 ──
+    # 注意：q_roe / q_ocf_to_sales 是单季指标，RQ 通常只提供 TTM/LYR 口径，
+    #       存在已知口径差异，不适合作为严格校验字段。
+    # grossprofit_margin / netprofit_margin 从搜索确认 RQ 命名规则为 xxx_ttm / xxx_lyr
+    "grossprofit_margin": ["gross_profit_margin", "gross_profit_margin_ttm", "gross_profit_margin_lyr"],
+    "netprofit_margin": ["net_profit_margin", "net_profit_margin_ttm", "net_profit_margin_lyr"],
+    # q_roe: RQ 无直接 q_roe 字段，最接近的替代是 return_on_equity_weighted_average_mrq_0（最近单季 ROE）
+    # 注意：mrq 口径与 tushare q_roe 存在计算方法差异，仅作近似验证
+    "q_roe": ["return_on_equity_weighted_average_mrq_0", "roe_quarterly", "q_roe", "return_on_equity_quarterly"],
+    # q_ocf_to_sales: RQ 可能有 cash_flow_to_revenue 系列
+    "q_ocf_to_sales": ["cash_flow_to_revenue", "cash_flow_to_revenue_ttm", "ocf_to_sales"],
+    # ── Stage C: 成长性原始字段 ──
+    # 注意：dt_netprofit_yoy / op_yoy 是同比口径，RQ 通常只提供 TTM 增速，
+    #       存在已知口径差异（与 netprofit_yoy / or_yoy 同类问题）。
+    "dt_netprofit_yoy": [
+        "net_profit_deduct_non_recurring_growth_ratio",
+        "net_profit_deduct_non_recurring_growth_ratio_ttm",
+        "dt_netprofit_yoy",
+    ],
+    "op_yoy": [
+        "operating_profit_growth_ratio",
+        "operating_profit_growth_ratio_ttm",
+        "op_yoy",
+    ],
+    "equity_yoy": ["total_equity_growth_ratio", "equity_growth_ratio", "total_equity_yoy"],
+    "assets_yoy": ["total_assets_growth_ratio", "assets_growth_ratio", "total_assets_yoy"],
+    # ── Stage C: 财务健康原始字段 ──
+    "debt_to_assets": ["debt_to_assets", "debt_to_assets_ratio", "asset_liability_ratio", "liability_to_assets"],
+    "current_ratio": ["current_ratio", "working_capital_ratio"],
+    "ocf_to_debt": ["cash_flow_to_debt", "ocf_to_debt", "operating_cash_flow_to_debt"],
+    # ── Stage C: 现金流原始字段 ──
+    # fcff: RQ 衍生因子中可能用 free_cash_flow 或 enterprise_free_cash_flow
+    "fcff": ["fcff", "free_cash_flow_firm", "enterprise_free_cash_flow", "free_cash_flow"],
 }
 INTERNAL_LOOKBACK_DAYS = 80
 BASE_DATA_FIELDS = set(INTERNAL_FIELD_ALIAS.keys()) | {"market_cap", "industry"} | set(FUNDAMENTAL_FIELD_CANDIDATES.keys())
@@ -104,6 +137,23 @@ INTERNAL_FEATURE_FORMULAS: dict[str, str] = {
     "close_to_vwap_mean_5d": "close_to_vwap.rolling(5).mean()",
     "turnover_mean_5d": "turnover.rolling(5).mean()",
     "turnover_vol_20d": "turnover.pct_change().rolling(20).std()",
+    # ── 基本面派生特征（与 feature_pool.yaml 保持一致，作为 RQ 环境 fallback） ──
+    "earnings_yield": "1 / pe_ttm",
+    "sales_yield": "1 / ps_ttm",
+    "quality_value": "roe / pb",
+    "profit_revenue_gap": "netprofit_yoy - or_yoy",
+    "profit_quality": "q_ocf_to_sales / 100",
+    "q_roe_acceleration": "q_roe - roe / 4",
+    "gross_margin": "grossprofit_margin",
+    "net_margin": "netprofit_margin",
+    "real_growth": "dt_netprofit_yoy",
+    "op_growth": "op_yoy",
+    "equity_growth": "equity_yoy",
+    "asset_growth_inverse": "0 - assets_yoy",
+    "financial_health": "1.0 / (1.0 + debt_to_assets / 100)",
+    "liquidity_strength": "current_ratio",
+    "debt_service_ability": "ocf_to_debt",
+    "fcf_yield": "fcff / market_cap",
 }
 
 @dataclass
@@ -605,6 +655,8 @@ def _get_fundamental_field(order_book_ids: list[str], start_date: str, end_date:
             payload = rq.get_factor(order_book_ids, cached_name, start_date, end_date)
             frame = _to_frame_date_stock(payload, cached_name)
             if not frame.empty:
+                if local_name == "pe_ttm":
+                    frame = frame.where(frame > 0)
                 return frame.sort_index()
         except Exception:
             pass
@@ -618,6 +670,8 @@ def _get_fundamental_field(order_book_ids: list[str], start_date: str, end_date:
             frame = _to_frame_date_stock(payload, factor_name)
             if frame.empty:
                 continue
+            if local_name == "pe_ttm":
+                frame = frame.where(frame > 0)
             _RESOLVED_FUNDAMENTAL_FACTOR_CACHE[local_name] = factor_name
             return frame.sort_index()
         except Exception as exc:  # pragma: no cover

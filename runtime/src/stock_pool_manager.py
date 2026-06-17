@@ -14,6 +14,7 @@ class StockPoolManager:
         self.config = config
         self.stock_pool_config = config.get("stock_pool", {})
         self.pool_type = self.stock_pool_config.get("type", "all_market")
+        self._namechange_cache: dict[str, pd.DataFrame] = {}
         
     def get_stock_pool(self, start_date: str = None, end_date: str = None) -> List[str]:
         """
@@ -41,6 +42,50 @@ class StockPoolManager:
         else:
             raise ValueError(f"不支持的股票池类型: {self.pool_type}")
         return self._apply_universe_filters(codes, end_date=end_date or start_date)
+
+    @staticmethod
+    def _to_ts_code(code: str) -> str:
+        text = str(code).strip()
+        if text.startswith("SH") and len(text) == 8:
+            return f"{text[2:]}.SH"
+        if text.startswith("SZ") and len(text) == 8:
+            return f"{text[2:]}.SZ"
+        return text
+
+    def _namechange_history(self, provider: Any, code: str) -> pd.DataFrame:
+        ts_code = self._to_ts_code(code)
+        cached = self._namechange_cache.get(ts_code)
+        if cached is not None:
+            return cached
+        try:
+            frame = provider._call_pro_api(
+                "namechange",
+                ts_code=ts_code,
+                fields="ts_code,name,start_date,end_date,change_reason",
+            )
+        except Exception:
+            frame = pd.DataFrame()
+        if frame is None or frame.empty:
+            frame = pd.DataFrame(columns=["ts_code", "name", "start_date", "end_date", "change_reason"])
+        else:
+            frame = frame.copy()
+            frame["start_date"] = frame["start_date"].astype(str)
+            frame["end_date"] = frame["end_date"].fillna("").astype(str)
+            frame = frame.drop_duplicates(subset=["ts_code", "name", "start_date", "end_date", "change_reason"])
+        self._namechange_cache[ts_code] = frame
+        return frame
+
+    def _is_historical_st(self, provider: Any, code: str, date: pd.Timestamp, current_name: str) -> bool:
+        history = self._namechange_history(provider, code)
+        date_text = date.strftime("%Y%m%d")
+        if not history.empty:
+            active = history[
+                (history["start_date"] <= date_text)
+                & ((history["end_date"] == "") | (history["end_date"] >= date_text))
+            ]
+            if not active.empty:
+                return any("ST" in str(name).upper() for name in active["name"])
+        return "ST" in str(current_name).upper()
 
     def _apply_universe_filters(self, codes: List[str], end_date: str = None) -> List[str]:
         include_st = bool(self.stock_pool_config.get("include_st", True))
@@ -74,7 +119,7 @@ class StockPoolManager:
                     continue
                 name = str(meta.loc[code, "name"])
                 list_date = str(meta.loc[code, "list_date"])
-                if not include_st and "ST" in name.upper():
+                if not include_st and self._is_historical_st(provider, code, cutoff, name):
                     continue
                 if not include_new_stock and list_date and list_date > min_listed_date:
                     continue

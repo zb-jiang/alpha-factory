@@ -261,7 +261,10 @@ public class TaskConfigService {
                                 "是否包含次新股", null, "task"),
                         numField("stock_pool.new_stock_days", "新股最小上市天数",
                                 getNestedValue(values, "stock_pool", "new_stock_days"), 60,
-                                "判定新股的最小上市天数阈值", 1, 1000, 10, 0, false)
+                                "判定新股的最小上市天数阈值", 1, 1000, 10, 0, false),
+                        numField("stock_pool.index_component_search_max_open_days", "成分股回溯最大开市日数",
+                                getNestedValue(values, "stock_pool", "index_component_search_max_open_days"), 2000,
+                                "指数成分查询时向前回溯的最大开市日数量", 100, 5000, 100, 0, false)
                 ))
                 .build());
 
@@ -333,6 +336,25 @@ public class TaskConfigService {
                         field("enable_chip_features", "启用筹码特征", "switch",
                                 values.getOrDefault("enable_chip_features", false), false,
                                 "开启后会在基础特征池中加入筹码集中度、获利盘比例等特征，并启用chip_distribution分析师", null, "task")
+                ))
+                .build());
+
+        // 组9: 收益标签配置
+        groups.add(ConfigGroup.builder()
+                .name("label").label("收益标签").icon("DataLine")
+                .description("LLM挖掘阶段与因子研究阶段共用的收益标签口径")
+                .fields(List.of(
+                        field("label.name", "标签列名", "text",
+                                getNestedValue(values, "label", "name"), "rebalance_period_return",
+                                "标签列名与分析目标名称", null, "task"),
+                        field("label.return_type", "收益类型", "select",
+                                getNestedValue(values, "label", "return_type"), "period_return",
+                                "当前仅支持 period_return",
+                                List.of(opt("区间收益率", "period_return")), "task"),
+                        field("label.price_field", "价格列", "select",
+                                getNestedValue(values, "label", "price_field"), "close",
+                                "使用哪个价格列计算收益标签",
+                                List.of(opt("收盘价", "close"), opt("开盘价", "open"), opt("VWAP", "vwap")), "task")
                 ))
                 .build());
 
@@ -621,7 +643,19 @@ public class TaskConfigService {
                                 "预留资金防止手续费导致订单失败", 0, 0.1, 0.01, 2, true),
                         field("Execution.enable_detailed_backtest_log", "详细回测日志", "switch",
                                 getNestedValue(values, "Execution", "enable_detailed_backtest_log"), false,
-                                "开启后输出逐因子详细交易日志", null, "task")
+                                "开启后输出逐因子详细交易日志", null, "task"),
+                        field("Execution.suspend_action", "停牌处理", "select",
+                                getNestedValue(values, "Execution", "suspend_action"), "skip",
+                                "停牌股票的处理方式",
+                                List.of(opt("跳过不交易", "skip")), "task"),
+                        field("Execution.limit_up_action", "涨停买入处理", "select",
+                                getNestedValue(values, "Execution", "limit_up_action"), "skip_buy",
+                                "涨停时买入的处理方式",
+                                List.of(opt("跳过不买入", "skip_buy")), "task"),
+                        field("Execution.limit_down_action", "跌停卖出处理", "select",
+                                getNestedValue(values, "Execution", "limit_down_action"), "delay_sell",
+                                "跌停时卖出的处理方式",
+                                List.of(opt("延迟卖出（每日重试）", "delay_sell")), "task")
                 ))
                 .build());
 
@@ -664,9 +698,33 @@ public class TaskConfigService {
                         numField("windows.margin_days", "两融情绪窗口（天）",
                                 getNestedValue(values, "windows", "margin_days"), 5,
                                 "看最近几天的融资净流累计", 1, 30, 1, 0, true),
+                        numField("windows.flow_rank_lookback_days", "资金面分位回看（天）",
+                                getNestedValue(values, "windows", "flow_rank_lookback_days"), 250,
+                                "北向/两融指标与过去多少天比较算分位", 50, 500, 10, 0, true),
+                        numField("windows.min_size_style_sample", "风格判断最少股票数",
+                                getNestedValue(values, "windows", "min_size_style_sample"), 20,
+                                "少于这么多只股票时不做大小盘判断", 5, 200, 5, 0, true),
+                        numField("windows.min_rolling_periods", "滚动计算最少天数",
+                                getNestedValue(values, "windows", "min_rolling_periods"), 10,
+                                "至少攒够多少天才开始算滚动指标", 5, 100, 5, 0, true),
+                        numField("windows.min_rank_periods", "分位计算最少天数",
+                                getNestedValue(values, "windows", "min_rank_periods"), 50,
+                                "至少攒够多少天才开始做分位比较", 20, 200, 10, 0, true),
                         numField("windows.warmup_trading_days", "预热天数",
                                 getNestedValue(values, "windows", "warmup_trading_days"), 260,
-                                "程序在训练起点前多读的历史天数", 100, 500, 10, 0, true)
+                                "程序在训练起点前多读的历史天数", 100, 500, 10, 0, true),
+                        numField("windows.shibor_trend_days", "Shibor趋势窗口（天）",
+                                getNestedValue(values, "windows", "shibor_trend_days"), 20,
+                                "Shibor利率看最近多少天的趋势变化", 5, 250, 5, 0, true),
+                        numField("windows.m2_trend_months", "M2趋势窗口（月）",
+                                getNestedValue(values, "windows", "m2_trend_months"), 3,
+                                "M2同比看最近几个月的趋势", 1, 12, 1, 0, true),
+                        numField("windows.pmi_trend_months", "PMI趋势窗口（月）",
+                                getNestedValue(values, "windows", "pmi_trend_months"), 3,
+                                "PMI看最近几个月的趋势", 1, 12, 1, 0, true),
+                        numField("windows.inflation_trend_months", "通胀趋势窗口（月）",
+                                getNestedValue(values, "windows", "inflation_trend_months"), 3,
+                                "CPI/PPI同比看最近几个月的趋势", 1, 12, 1, 0, true)
                 ))
                 .build());
 
@@ -704,7 +762,22 @@ public class TaskConfigService {
                                 "融资分位>=此值记为升温", 0.5, 1, 0.01, 2, true),
                         numField("thresholds.leverage_cold_low", "两融降温阈值",
                                 getNestedValue(values, "thresholds", "leverage_cold_low"), 0.33,
-                                "融资分位<=此值记为降温", 0, 0.5, 0.01, 2, true)
+                                "融资分位<=此值记为降温", 0, 0.5, 0.01, 2, true),
+                        numField("thresholds.rate_easing_threshold", "利率宽松阈值",
+                                getNestedValue(values, "thresholds", "rate_easing_threshold"), -0.0025,
+                                "Shibor下降超过此值记为宽松（如-0.0025=降25bp）", -0.1, 0, 0.0005, 4, true),
+                        numField("thresholds.rate_tightening_threshold", "利率收紧阈值",
+                                getNestedValue(values, "thresholds", "rate_tightening_threshold"), 0.0025,
+                                "Shibor上升超过此值记为收紧（如0.0025=升25bp）", 0, 0.1, 0.0005, 4, true),
+                        numField("thresholds.m2_yoy_change_threshold", "M2同比变化阈值",
+                                getNestedValue(values, "thresholds", "m2_yoy_change_threshold"), 0.3,
+                                "M2同比月度变化绝对值超过此值算有趋势", 0.1, 2, 0.1, 2, true),
+                        numField("thresholds.pmi_expansion_threshold", "PMI扩张阈值",
+                                getNestedValue(values, "thresholds", "pmi_expansion_threshold"), 50.0,
+                                "PMI>此值表示制造业扩张", 40, 60, 1, 1, true),
+                        numField("thresholds.inflation_yoy_change_threshold", "通胀同比变化阈值",
+                                getNestedValue(values, "thresholds", "inflation_yoy_change_threshold"), 0.3,
+                                "CPI/PPI同比月度变化绝对值超过此值算有趋势", 0.1, 2, 0.1, 2, true)
                 ))
                 .build());
 
@@ -867,6 +940,9 @@ public class TaskConfigService {
                 .name("data_params").label("数据参数").icon("Coin")
                 .description("数据缓存和频率相关参数")
                 .fields(List.of(
+                        field("enable_meta_reconcile", "启用元数据对齐", "switch",
+                                values.getOrDefault("enable_meta_reconcile", true), true,
+                                "开启后Tushare数据拉取时会做元数据对齐校验", null, "task"),
                         numField("placeholder_expire_days", "占位符过期天数",
                                 values.getOrDefault("placeholder_expire_days", 3), 3,
                                 "Tushare暂时获取不到数据时插入占位符，超过此天数自动过期重新拉取", 1, 30, 1, 0, true),

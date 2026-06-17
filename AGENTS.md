@@ -4,9 +4,10 @@
 4. 现在已知的ricequant和tushare之间的底层数据的情况。如果本地因子分析结果和ricequant因子分析结果比对不一致经过分析是下面原因造成的，可以不必深究了（对于因为成分股不同而造成的比对结果不同，需要明确找到成分股不同的证据）
    - tushare和ricequant的原始数据有一个口径不同是已知的，tushare是“千元”+“手”， ricequant是“元”+“股”
    - tushare在某些日期取不到指数成分股，本地代码是通过回溯的方式获取成分股的，所以会出现某些横截面成分股不同的情况， 但这个需要找到明确的成分股不同的证据
-   - ricequant平台不支持turnover字段的获取
+   - ricequant平台不支持turnover，assets_yoy，debt_to_assets，dt_netprofit_yoy，equity_yoy，q_ocf_to_sales字段的获取
    - dv_ttm特征值在ricequant和tushare之间存在已知口径差异：大多数股票可以对上，但少数股票（已发现主要集中在部分科创板股票和个别银行股）存在单位或口径不一致，因此dv_ttm不适合作为严格校验本地与ricequant因子分析链路是否一致的标准字段
    - netprofit_yoy、or_yoy字段在ricequant和tushare之间存在已知口径差异：本地使用tushare fina_indicator中的netprofit_yoy、or_yoy，同比口径按公告日做as-of对齐；ricequant侧当前只能稳定映射到net_profit_growth_ratio_ttm、operating_revenue_growth_ratio_ttm这类TTM增速字段。两边大方向通常相关，但不是同一口径，因此netprofit_yoy、or_yoy以及依赖它们的组合因子不适合作为严格校验本地与ricequant因子分析链路是否一致的标准字段
+   - 对于包含 q_roe_acceleration 特征的因子在ricequant上的验证结果会与本地有偏差，因为ricequant没有 q_roe 字段，只能通过 return_on_equity_weighted_average_mrq_0 字段近似计算
    - 已经验证验证了多次，ricequant和tushare的每日OCHLV数据是严格能对上的
 5. 该项目的缓存机制是SQLLite数据库。按照业务逻辑缓存的使用方式是：
    - 先从缓存读取数据
@@ -27,3 +28,4 @@
    - 因为成分股权重数据的ready程度不同而引起本地和joinquant平台的交易股票的交易量差异，如果是这个原因需要找到详细的数据证据
    - 本地交易是按照“手”（100股/200股）向下取整进行交易的，而joinquant平台order_target_value可能不会向下取整，导致交易量差异（因为是聚宽内部的机制，所以不确定，但是从交易日志中看到的现象）
 11. 当你发现原因是joinquant平台的交易行为和本地不一致时，不要停止，需要查看交易行为为什么和本地不同？joinquant的交易脚本也是step14生成的呀，所以需要看看是不是step14的代码有问题
+12. backend 和 webapp两个目录下的代码是通过web UI的方式实现多用户和多租户的因子挖掘流水线。每个用户可以启动多个流水线实例（step10-step14），实例间互不干涉。每个流水线实例的代码逻辑都follow runtime/src中的逻辑。通过staging来进行实例隔离。所有的实例都有自己的配置项copy(follow runtime/config)。

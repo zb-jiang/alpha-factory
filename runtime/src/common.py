@@ -173,6 +173,7 @@ DYNAMIC_INDEX_COMPONENT_CACHE: dict[
     tuple[str, tuple[str, ...], bool, bool, int],
     dict[pd.Timestamp, set[str]],
 ] = {}
+NAMECHANGE_CACHE: dict[str, pd.DataFrame] = {}
 WINDOW_RUNTIME_CACHE: dict[str, dict[str, Any]] = {}
 
 
@@ -1245,6 +1246,52 @@ def _dynamic_index_components_by_observation_date(
     return component_map
 
 
+def _to_ts_code_from_internal(code: str) -> str:
+    text = str(code).strip()
+    if text.startswith("SH") and len(text) == 8:
+        return f"{text[2:]}.SH"
+    if text.startswith("SZ") and len(text) == 8:
+        return f"{text[2:]}.SZ"
+    return text
+
+
+def _namechange_history(provider: Any, code: str) -> pd.DataFrame:
+    ts_code = _to_ts_code_from_internal(code)
+    cached = NAMECHANGE_CACHE.get(ts_code)
+    if cached is not None:
+        return cached
+    try:
+        frame = provider._call_pro_api(  # type: ignore[attr-defined]
+            "namechange",
+            ts_code=ts_code,
+            fields="ts_code,name,start_date,end_date,change_reason",
+        )
+    except Exception:
+        frame = pd.DataFrame()
+    if frame is None or frame.empty:
+        frame = pd.DataFrame(columns=["ts_code", "name", "start_date", "end_date", "change_reason"])
+    else:
+        frame = frame.copy()
+        frame["start_date"] = frame["start_date"].astype(str)
+        frame["end_date"] = frame["end_date"].fillna("").astype(str)
+        frame = frame.drop_duplicates(subset=["ts_code", "name", "start_date", "end_date", "change_reason"])
+    NAMECHANGE_CACHE[ts_code] = frame
+    return frame
+
+
+def _is_historical_st(provider: Any, code: str, date: pd.Timestamp, current_name: str) -> bool:
+    history = _namechange_history(provider, code)
+    date_text = date.strftime("%Y%m%d")
+    if not history.empty:
+        active = history[
+            (history["start_date"] <= date_text)
+            & ((history["end_date"] == "") | (history["end_date"] >= date_text))
+        ]
+        if not active.empty:
+            return any("ST" in str(name).upper() for name in active["name"])
+    return "ST" in str(current_name).upper()
+
+
 def _apply_dynamic_universe_filters(
     config: dict[str, Any],
     component_map: dict[pd.Timestamp, set[str]],
@@ -1288,7 +1335,7 @@ def _apply_dynamic_universe_filters(
                 continue
             name = str(meta.loc[code, "name"])
             list_date = str(meta.loc[code, "list_date"])
-            if not include_st and "ST" in name.upper():
+            if not include_st and _is_historical_st(provider, code, cutoff, name):
                 continue
             if not include_new_stock and list_date and list_date > min_listed_date:
                 continue

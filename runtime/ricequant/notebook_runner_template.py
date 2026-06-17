@@ -276,8 +276,8 @@ if ENABLE_RAW_FIELD_GUARD:
     support_rows = []
     for f in _RAW_FIELDS:
         meta = raw_field_support.get(f, {"status": "unsupported", "reason": "not probed"})
-        support_rows.append({"field": f, "status": meta["status"], "reason": meta["reason"]})
-    print(pd.DataFrame(support_rows))
+        support_rows.append({"field": f, "status": meta["status"]})
+    print(pd.DataFrame(support_rows).to_string(index=False))
 
 for factor_name, factor_formula in FACTORS:
     print(f"\n[RUN] {factor_name}")

@@ -313,7 +313,7 @@ base_features:
 
   # ── 基本面：现金流 ──────────────────────────────────────
   - name: fcf_yield
-    description: 自由现金流收益率，等于 fcff / market_cap；类似 earnings_yield 但用现金流口径
+    description: 自由现金流收益率，等于 fcff / market_cap；类似 earnings_yield 但用现金流口径。注意：fcff 对金融行业（银行/保险/证券）不可用，会导致覆盖率下降，当股票池包含金融股时慎用，或配合行业中性化处理
     expr: fcff / market_cap
 
 # 允许使用的算子 (Operators): 相当于"烹饪手法"，用来限制大模型，它只能用这些方法去组合产生新的因子

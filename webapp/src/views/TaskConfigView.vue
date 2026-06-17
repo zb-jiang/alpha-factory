@@ -211,7 +211,8 @@
 import { ref, computed, onMounted, watch, markRaw } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
-  ArrowLeft, Check, DataAnalysis, ChatDotRound, TrendCharts, Sunrise, Aim, Filter, Coin, Timer, Flag, UserFilled,
+  ArrowLeft, Check, DataAnalysis, ChatDotRound, TrendCharts, Sunrise, Aim, Filter, Coin, Timer, Flag, UserFilled, DataLine, ScaleToOriginal,
+  Calendar, Operation, Money, MagicStick,
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { getTask, type TaskResponse } from '../api/task'
@@ -233,6 +234,12 @@ const ICON_MAP: Record<string, any> = {
   Timer: markRaw(Timer),
   Flag: markRaw(Flag),
   UserFilled: markRaw(UserFilled),
+  DataLine: markRaw(DataLine),
+  ScaleToOriginal: markRaw(ScaleToOriginal),
+  Calendar: markRaw(Calendar),
+  Operation: markRaw(Operation),
+  Money: markRaw(Money),
+  MagicStick: markRaw(MagicStick),
 }
 
 const router = useRouter()

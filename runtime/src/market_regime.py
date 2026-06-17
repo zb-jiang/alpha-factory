@@ -195,6 +195,7 @@ def _build_mapping_explain(
     capital_structure_label: str,
     labels: dict[str, str],
     thresholds: dict[str, Any],
+    macro_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     trend_up = _cfg_float(thresholds, "trend_up", 0.03)
     trend_down = _cfg_float(thresholds, "trend_down", -0.03)
@@ -206,6 +207,11 @@ def _build_mapping_explain(
     north_out_low = _cfg_float(thresholds, "northbound_outflow_low", rank_low)
     leverage_hot = _cfg_float(thresholds, "leverage_hot_high", rank_high)
     leverage_cold = _cfg_float(thresholds, "leverage_cold_low", rank_low)
+    rate_easing = _cfg_float(thresholds, "rate_easing_threshold", -0.0025)
+    rate_tightening = _cfg_float(thresholds, "rate_tightening_threshold", 0.0025)
+    m2_change_threshold = _cfg_float(thresholds, "m2_yoy_change_threshold", 0.3)
+    pmi_expansion = _cfg_float(thresholds, "pmi_expansion_threshold", 50.0)
+    inflation_change_threshold = _cfg_float(thresholds, "inflation_yoy_change_threshold", 0.3)
     return {
         "trend": {
             "value": trend_value,
@@ -254,6 +260,40 @@ def _build_mapping_explain(
             "value": capital_structure_label,
             "rule": "结合北向资金方向与杠杆情绪共同判定资金结构",
             "label": labels.get("capital_structure", "未知"),
+        },
+        "rate": {
+            "value": {
+                "shibor_1y_current": macro_stats.get("shibor_1y_current") if macro_stats else None,
+                "shibor_1y_change": macro_stats.get("shibor_1y_change") if macro_stats else None,
+            },
+            "rule": f"Shibor 1Y 变化量 <={rate_easing} 宽松, >={rate_tightening} 收紧, 其余中性",
+            "label": labels.get("rate", "未知"),
+        },
+        "macro_liquidity": {
+            "value": {
+                "m2_yoy_current": macro_stats.get("m2_yoy_current") if macro_stats else None,
+                "m2_yoy_change": macro_stats.get("m2_yoy_change") if macro_stats else None,
+            },
+            "rule": f"M2 同比变化 >={m2_change_threshold} 扩张, <=-{m2_change_threshold} 收缩, 其余中性",
+            "label": labels.get("macro_liquidity", "未知"),
+        },
+        "economy": {
+            "value": {
+                "pmi_current": macro_stats.get("pmi_current") if macro_stats else None,
+                "pmi_change": macro_stats.get("pmi_change") if macro_stats else None,
+            },
+            "rule": f"PMI >{pmi_expansion} 且趋势向上 扩张, PMI <{pmi_expansion} 且趋势向下 收缩, 其余中性",
+            "label": labels.get("economy", "未知"),
+        },
+        "inflation": {
+            "value": {
+                "cpi_yoy_current": macro_stats.get("cpi_yoy_current") if macro_stats else None,
+                "cpi_yoy_change": macro_stats.get("cpi_yoy_change") if macro_stats else None,
+                "ppi_yoy_current": macro_stats.get("ppi_yoy_current") if macro_stats else None,
+                "ppi_yoy_change": macro_stats.get("ppi_yoy_change") if macro_stats else None,
+            },
+            "rule": f"CPI/PPI 同比变化 >={inflation_change_threshold} 上行, <=-{inflation_change_threshold} 下行, 其余中性",
+            "label": labels.get("inflation", "未知"),
         },
     }
 
@@ -604,6 +644,7 @@ def build_window_context(
             labels["capital_structure"],
             labels,
             thresholds,
+            macro_stats,
         ),
         "stats": {
             "trend_20d_mean": trend_mean,

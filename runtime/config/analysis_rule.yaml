@@ -18,7 +18,7 @@ train_end_date: 2021-03-31
 # 样本外 (Out-of-Sample) 时间段
 # 可按需改为最新盲测区间
 test_start_date: 2026-01-01
-test_end_date: 2026-05-15
+test_end_date: 2026-06-15
 
 # 【2. 样本内训练切分配置】
 # mode 可选值:
