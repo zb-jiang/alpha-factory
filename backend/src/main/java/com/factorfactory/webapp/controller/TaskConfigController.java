@@ -56,4 +56,11 @@ public class TaskConfigController {
         Long userId = (Long) authentication.getPrincipal();
         return ApiResponse.ok(taskConfigService.testLlmConnection(userId, params));
     }
+
+    /** 诊断：检查 feature_pool.yaml 读取状态 */
+    @GetMapping("/_debug/feature-pool-preview")
+    public ApiResponse<Map<String, Object>> debugFeaturePoolPreview(Authentication authentication,
+                                                                      @PathVariable Long taskId) {
+        return ApiResponse.ok(taskConfigService.debugFeaturePoolPreview());
+    }
 }

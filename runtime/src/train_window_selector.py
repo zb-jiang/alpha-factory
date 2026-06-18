@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 
-from common import OUTPUT_DIR, env_config, feature_pool_config, load_raw_data, market_context_config, selector_config, write_json
+from common import OUTPUT_DIR, env_config, feature_pool_config, get_data_provider, load_raw_data, market_context_config, selector_config, write_json
 from market_regime import build_window_context, compute_daily_market
 
 
@@ -18,12 +18,30 @@ REGIME_FEATURE_KEYS = [
     "dispersion_rank_250d_mean",
     "breadth_up_ratio_mean",
     "size_style_spread_mean",
+    "northbound_flow_rank_mean",
+    "leverage_composite_mean",
+    "capital_structure_score",
+    "shibor_1y_change",
+    "m2_yoy_change",
+    "pmi_current",
+    "inflation_composite_mean",
 ]
 
 
 def _log(message: str) -> None:
     now = datetime.now().strftime("%H:%M:%S")
     print(f"[selector {now}] {message}", flush=True)
+
+
+def _encode_capital_structure(label: str) -> float:
+    mapping = {
+        "同向进攻": 2.0,
+        "外资积极/杠杆收缩": 1.0,
+        "中性": 0.0,
+        "外资谨慎/杠杆激进": -1.0,
+        "同向防守": -2.0,
+    }
+    return mapping.get(label, 0.0)
 
 
 def _serialize_window_record(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
@@ -145,6 +163,8 @@ def _build_monthly_regime_vectors(
     thresholds: dict[str, Any],
     history_start: pd.Timestamp,
     history_end: pd.Timestamp,
+    macro_data: pd.DataFrame | None = None,
+    windows: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
     months = pd.date_range(
         start=_normalize_month_start(history_start),
@@ -163,7 +183,11 @@ def _build_monthly_regime_vectors(
         window = daily_market.loc[(daily_market.index >= month_start) & (daily_market.index <= month_end)]
         if window.empty:
             continue
-        context = build_window_context(window, thresholds)
+        month_macro = None
+        if macro_data is not None and not macro_data.empty:
+            month_str = month_start.strftime("%Y%m")
+            month_macro = macro_data[macro_data["month"] <= month_str].copy()
+        context = build_window_context(window, thresholds, macro_data=month_macro, windows=windows)
         stats = dict(context.get("stats", {}))
         labels = dict(context.get("labels", {}))
         row = {
@@ -177,9 +201,34 @@ def _build_monthly_regime_vectors(
             "dispersion_label": labels.get("dispersion", ""),
             "breadth_label": labels.get("breadth", ""),
             "style_label": labels.get("style", ""),
+            "northbound_label": labels.get("northbound", ""),
+            "leverage_label": labels.get("leverage", ""),
+            "capital_structure_label": labels.get("capital_structure", ""),
+            "rate_label": labels.get("rate", ""),
+            "macro_liquidity_label": labels.get("macro_liquidity", ""),
+            "economy_label": labels.get("economy", ""),
+            "inflation_label": labels.get("inflation", ""),
         }
         for key in REGIME_FEATURE_KEYS:
             row[key] = stats.get(key)
+
+        # 合成/编码特征（若 stats 中未直接提供则自行计算）
+        margin_flow = stats.get("margin_flow_rank_mean")
+        margin_balance = stats.get("margin_balance_rank_mean")
+        if margin_flow is not None and margin_balance is not None:
+            row["leverage_composite_mean"] = (margin_flow + margin_balance) / 2.0
+        else:
+            row["leverage_composite_mean"] = None
+
+        row["capital_structure_score"] = _encode_capital_structure(labels.get("capital_structure", "未知"))
+
+        cpi_change = stats.get("cpi_yoy_change")
+        ppi_change = stats.get("ppi_yoy_change")
+        if cpi_change is not None and ppi_change is not None:
+            row["inflation_composite_mean"] = (cpi_change + ppi_change) / 2.0
+        else:
+            row["inflation_composite_mean"] = None
+
         rows.append(row)
         if idx % 12 == 0 or idx == total_months:
             _log(f"历史月度状态向量进度: {idx}/{total_months}")
@@ -289,35 +338,65 @@ def run() -> None:
     load_cfg["test_start_date"] = str(fetch_start.date())
     load_cfg["test_end_date"] = str(fetch_end.date())
     stock_pool_cfg = dict(load_cfg.get("stock_pool", {}) or {})
-    if selector_cfg.disable_dynamic_membership and bool(stock_pool_cfg.get("dynamic_membership", False)):
-        stock_pool_cfg["dynamic_membership"] = False
-        load_cfg["stock_pool"] = stock_pool_cfg
+    stock_pool_cfg["dynamic_membership"] = not selector_cfg.disable_dynamic_membership
+    load_cfg["stock_pool"] = stock_pool_cfg
+    if selector_cfg.disable_dynamic_membership:
         _log(
-            "selector 已临时关闭 dynamic_membership，"
+            "selector 已关闭 dynamic_membership，"
             "避免历史逐观测日成分回溯导致长时间 Tushare 频控等待"
         )
+    else:
+        _log("selector 已启用 dynamic_membership")
     raw_frame = load_raw_data(load_cfg, raw_fields=raw_fields, warmup_trading_days=warmup_days)
     instrument_count = (
         int(raw_frame.index.get_level_values(0).nunique()) if isinstance(raw_frame.index, pd.MultiIndex) else 1
     )
     _log(f"原始行情加载完成: rows={len(raw_frame)}, instruments={instrument_count}")
 
+    provider = get_data_provider(load_cfg)
+    provider.initialize()
+    raw_dates = raw_frame.index.get_level_values("datetime")
+    market_indicator_frame = provider.get_market_daily_indicators(
+        start_date=str(pd.Timestamp(raw_dates.min()).date()),
+        end_date=str(pd.Timestamp(raw_dates.max()).date()),
+    ) if not raw_frame.empty else pd.DataFrame()
+
+    macro_frame = pd.DataFrame()
+    try:
+        macro_frame = provider.get_macro_indicators(
+            start_date=str(pd.Timestamp(raw_dates.min()).date()),
+            end_date=str(pd.Timestamp(raw_dates.max()).date()),
+        )
+    except Exception as e:
+        _log(f"警告: 获取宏观经济指标失败: {e}")
+
     _log("开始计算日级市场状态向量")
-    daily_market = compute_daily_market(raw_frame, fields=fields, windows=windows)
+    daily_market = compute_daily_market(
+        raw_frame,
+        fields=fields,
+        windows=windows,
+        external_market_data=market_indicator_frame,
+    )
     _log(f"日级市场状态计算完成: {len(daily_market)} 个交易日")
 
     test_window = daily_market.loc[(daily_market.index >= test_start) & (daily_market.index <= test_end)]
     if test_window.empty:
         raise RuntimeError("test 窗口没有可用市场状态数据，无法进行训练窗口推荐")
     _log(f"test 窗口交易日: {len(test_window)}")
-    test_context = build_window_context(test_window, thresholds)
+
+    test_end_month_str = test_end.strftime("%Y%m")
+    test_macro = macro_frame[macro_frame["month"] <= test_end_month_str].copy() if not macro_frame.empty else None
+    test_context = build_window_context(test_window, thresholds, macro_data=test_macro, windows=windows)
     test_stats = dict(test_context.get("stats", {}))
     for key in REGIME_FEATURE_KEYS:
         value = test_stats.get(key)
         if value is None or pd.isna(value):
             raise RuntimeError(f"test 窗口状态向量存在缺失: {key}")
 
-    monthly_vectors = _build_monthly_regime_vectors(daily_market, thresholds, history_start, history_end)
+    monthly_vectors = _build_monthly_regime_vectors(
+        daily_market, thresholds, history_start, history_end,
+        macro_data=macro_frame, windows=windows,
+    )
     if monthly_vectors.empty:
         raise RuntimeError("历史月度状态向量为空，无法进行相似性推荐")
 

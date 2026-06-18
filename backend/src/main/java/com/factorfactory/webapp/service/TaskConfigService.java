@@ -1,8 +1,10 @@
 package com.factorfactory.webapp.service;
 
+import com.factorfactory.webapp.config.StagingProperties;
 import com.factorfactory.webapp.dto.StructuredConfigResponse;
 import com.factorfactory.webapp.dto.StructuredConfigResponse.*;
 import com.factorfactory.webapp.entity.TaskConfig;
+import com.factorfactory.webapp.exception.BusinessException;
 import com.factorfactory.webapp.repository.TaskConfigRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -12,11 +14,20 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.Duration;
 import java.util.*;
 
 /**
  * 任务级配置服务
- * 管理每个任务的独立配置，按业务语义分为8个Tab
+ * 管理每个任务的独立配置，按业务语义分为9个Tab
  */
 @Slf4j
 @Service
@@ -27,23 +38,32 @@ public class TaskConfigService {
     private final ObjectMapper objectMapper;
     private final GlobalConfigService globalConfigService;
     private final SystemConfigService systemConfigService;
+    private final StagingProperties stagingProperties;
 
     // Tab 分区名
     public static final String TAB_ANALYSIS = "analysis_rule";
+    public static final String TAB_STOCK_POOL = "stock_pool";
+    public static final String TAB_FEATURE_POOL = "feature_pool";
     public static final String TAB_LLM = "llm_params";
     public static final String TAB_BACKTEST = "backtest_rule";
     public static final String TAB_MARKET = "market_context";
+    public static final String TAB_LABEL = "label";
     public static final String TAB_SELECTOR = "selector";
     public static final String TAB_PRESCREEN = "prescreen";
     public static final String TAB_SCORE = "score";
     public static final String TAB_DATA = "data_params";
+    public static final String TAB_TUSHARE = "tushare";
 
     public List<StructuredConfigResponse> getAllTabs(Long userId, Long taskId) {
         return List.of(
+                buildFeaturePoolTab(taskId),
+                buildStockPoolTab(taskId),
+                buildTushareTab(taskId),
+                buildMarketTab(taskId),
+                buildLabelTab(taskId),
                 buildAnalysisTab(taskId),
                 buildLlmTab(userId, taskId),
                 buildBacktestTab(taskId),
-                buildMarketTab(taskId),
                 buildSelectorTab(taskId),
                 buildPrescreenTab(taskId),
                 buildScoreTab(taskId),
@@ -54,9 +74,13 @@ public class TaskConfigService {
     public StructuredConfigResponse getTab(Long userId, Long taskId, String tab) {
         return switch (tab) {
             case TAB_ANALYSIS -> buildAnalysisTab(taskId);
+            case TAB_STOCK_POOL -> buildStockPoolTab(taskId);
+            case TAB_TUSHARE -> buildTushareTab(taskId);
+            case TAB_FEATURE_POOL -> buildFeaturePoolTab(taskId);
             case TAB_LLM -> buildLlmTab(userId, taskId);
             case TAB_BACKTEST -> buildBacktestTab(taskId);
             case TAB_MARKET -> buildMarketTab(taskId);
+            case TAB_LABEL -> buildLabelTab(taskId);
             case TAB_SELECTOR -> buildSelectorTab(taskId);
             case TAB_PRESCREEN -> buildPrescreenTab(taskId);
             case TAB_SCORE -> buildScoreTab(taskId);
@@ -67,101 +91,130 @@ public class TaskConfigService {
 
     @Transactional
     public void updateTab(Long taskId, String tab, Map<String, Object> values) {
+        // 过滤掉只读的预览字段，避免大对象存入数据库
+        Map<String, Object> filtered = new LinkedHashMap<>(values);
+        filtered.remove("feature_pool_preview");
+
+        // Tushare Tab：自动复权参考日处理
+        if (TAB_TUSHARE.equals(tab)) {
+            boolean auto = (boolean) filtered.getOrDefault("price_adjust_auto", true);
+            if (auto) {
+                filtered.put("price_adjust_reference_date", "auto");
+            }
+        }
+
+        // 市场环境 Tab：参数约束校验
+        if (TAB_MARKET.equals(tab)) {
+            validateMarketContext(filtered);
+        }
+
         TaskConfig config = taskConfigRepository.findByTaskIdAndSection(taskId, tab)
                 .orElseGet(() -> TaskConfig.builder().taskId(taskId).section(tab).build());
         try {
-            config.setValue(objectMapper.writeValueAsString(values));
+            config.setValue(objectMapper.writeValueAsString(filtered));
         } catch (JsonProcessingException e) {
-            throw new RuntimeException("序列化配置失败", e);
+            throw new RuntimeException("配置序列化失败", e);
         }
         taskConfigRepository.save(config);
-        log.info("Task {} config tab {} updated", taskId, tab);
     }
 
     /**
-     * 测试 LLM 连接
-     * 向指定 base_url/model/api_key 发送一个简短的 chat completion 请求
+     * 校验市场环境配置参数之间的约束关系。
+     * 约束规则与 market_context.yaml 中的参数逻辑保持一致。
      */
-    public Map<String, Object> testLlmConnection(Long userId, Map<String, String> params) {
-        String baseUrl = params.getOrDefault("base_url", "").trim();
-        String model = params.getOrDefault("model", "").trim();
-        String apiKey = params.getOrDefault("api_key", "").trim();
-
-        if (baseUrl.isEmpty() || model.isEmpty() || apiKey.isEmpty()) {
-            return Map.of("success", false, "message", "请填写完整的 API 地址、模型名称和 API Key");
+    private void validateMarketContext(Map<String, Object> values) {
+        double trendUp = nestedDouble(values, "thresholds", "trend_up");
+        double trendDown = nestedDouble(values, "thresholds", "trend_down");
+        if (trendUp <= trendDown) {
+            throw new BusinessException("趋势上行阈值必须大于趋势下行阈值");
         }
 
-        // 确保 base_url 以 /chat/completions 结尾
-        String url = baseUrl;
-        if (!url.endsWith("/chat/completions")) {
-            url = url.endsWith("/") ? url + "chat/completions" : url + "/chat/completions";
+        double rankHigh = nestedDouble(values, "thresholds", "rank_high");
+        double rankLow = nestedDouble(values, "thresholds", "rank_low");
+        if (rankHigh <= rankLow) {
+            throw new BusinessException("分位高阈值必须大于分位低阈值");
         }
 
-        try {
-            Map<String, Object> requestBody = Map.of(
-                    "model", model,
-                    "messages", List.of(Map.of("role", "user", "content", "Hi")),
-                    "max_tokens", 5
-            );
+        double breadthOn = nestedDouble(values, "thresholds", "breadth_risk_on");
+        double breadthOff = nestedDouble(values, "thresholds", "breadth_risk_off");
+        if (breadthOn <= breadthOff) {
+            throw new BusinessException("广度偏强阈值必须大于广度偏弱阈值");
+        }
 
-            String jsonBody = objectMapper.writeValueAsString(requestBody);
+        double northHigh = nestedDouble(values, "thresholds", "northbound_inflow_high");
+        double northLow = nestedDouble(values, "thresholds", "northbound_outflow_low");
+        if (northHigh <= northLow) {
+            throw new BusinessException("北向偏流入阈值必须大于北向偏流出阈值");
+        }
 
-            java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
-                    .connectTimeout(java.time.Duration.ofSeconds(10))
-                    .build();
+        double levHigh = nestedDouble(values, "thresholds", "leverage_hot_high");
+        double levLow = nestedDouble(values, "thresholds", "leverage_cold_low");
+        if (levHigh <= levLow) {
+            throw new BusinessException("两融升温阈值必须大于两融降温阈值");
+        }
 
-            java.net.http.HttpRequest request = java.net.http.HttpRequest.newBuilder()
-                    .uri(java.net.URI.create(url))
-                    .header("Content-Type", "application/json")
-                    .header("Authorization", "Bearer " + apiKey)
-                    .timeout(java.time.Duration.ofSeconds(30))
-                    .POST(java.net.http.HttpRequest.BodyPublishers.ofString(jsonBody))
-                    .build();
+        double rateEase = nestedDouble(values, "thresholds", "rate_easing_threshold");
+        double rateTight = nestedDouble(values, "thresholds", "rate_tightening_threshold");
+        if (rateTight <= rateEase) {
+            throw new BusinessException("利率收紧阈值必须大于利率宽松阈值");
+        }
 
-            java.net.http.HttpResponse<String> response = client.send(request, java.net.http.HttpResponse.BodyHandlers.ofString());
+        int warmup = nestedInt(values, "windows", "warmup_trading_days");
+        int rankLookback = nestedInt(values, "windows", "rank_lookback_days");
+        int flowLookback = nestedInt(values, "windows", "flow_rank_lookback_days");
+        int northDays = nestedInt(values, "windows", "northbound_days");
+        int marginDays = nestedInt(values, "windows", "margin_days");
 
-            if (response.statusCode() == 200) {
-                return Map.of("success", true, "message", "连接成功！模型 " + model + " 响应正常");
-            } else {
-                String body = response.body();
-                // 尝试提取错误信息
-                String errorMsg;
-                try {
-                    Map<String, Object> errorResp = objectMapper.readValue(body, new TypeReference<Map<String, Object>>() {});
-                    Object errorObj = errorResp.get("error");
-                    if (errorObj instanceof Map) {
-                        errorMsg = String.valueOf(((Map<?, ?>) errorObj).get("message"));
-                    } else {
-                        errorMsg = body.length() > 200 ? body.substring(0, 200) + "..." : body;
-                    }
-                } catch (Exception e) {
-                    errorMsg = body.length() > 200 ? body.substring(0, 200) + "..." : body;
-                }
-                return Map.of("success", false, "message", "HTTP " + response.statusCode() + ": " + errorMsg);
-            }
-        } catch (java.net.ConnectException e) {
-            return Map.of("success", false, "message", "连接失败：无法连接到 " + url + "，请检查地址是否正确");
-        } catch (java.net.SocketTimeoutException e) {
-            return Map.of("success", false, "message", "连接超时：服务器未在30秒内响应");
-        } catch (Exception e) {
-            return Map.of("success", false, "message", "连接失败：" + e.getMessage());
+        if (warmup < rankLookback) {
+            throw new BusinessException("预热天数不能小于历史分位回看天数");
+        }
+        if (warmup < flowLookback) {
+            throw new BusinessException("预热天数不能小于资金面分位回看天数");
+        }
+        if (warmup < northDays) {
+            throw new BusinessException("预热天数不能小于北向资金窗口天数");
+        }
+        if (warmup < marginDays) {
+            throw new BusinessException("预热天数不能小于两融情绪窗口天数");
+        }
+
+        int minRankPeriods = nestedInt(values, "windows", "min_rank_periods");
+        if (minRankPeriods > rankLookback) {
+            throw new BusinessException("分位计算最少天数不能大于历史分位回看天数");
+        }
+        if (minRankPeriods > flowLookback) {
+            throw new BusinessException("分位计算最少天数不能大于资金面分位回看天数");
+        }
+
+        int minRolling = nestedInt(values, "windows", "min_rolling_periods");
+        int trendDays = nestedInt(values, "windows", "trend_days");
+        int volDays = nestedInt(values, "windows", "volatility_days");
+        int dispDays = nestedInt(values, "windows", "dispersion_days");
+        if (minRolling > trendDays) {
+            throw new BusinessException("滚动计算最少天数不能大于趋势窗口天数");
+        }
+        if (minRolling > volDays) {
+            throw new BusinessException("滚动计算最少天数不能大于波动窗口天数");
+        }
+        if (minRolling > dispDays) {
+            throw new BusinessException("滚动计算最少天数不能大于分化窗口天数");
         }
     }
 
-    /**
-     * 获取任务某个分区的配置Map
-     */
-    public Map<String, Object> getSectionMap(Long taskId, String section) {
-        return taskConfigRepository.findByTaskIdAndSection(taskId, section)
-                .map(config -> {
-                    try {
-                        return objectMapper.readValue(config.getValue(), new TypeReference<Map<String, Object>>() {});
-                    } catch (JsonProcessingException e) {
-                        log.warn("Failed to parse task config: taskId={}, section={}", taskId, section, e);
-                        return new HashMap<String, Object>();
-                    }
-                })
-                .orElseGet(HashMap::new);
+    private double nestedDouble(Map<String, Object> map, String... keys) {
+        Object value = getNestedValue(map, keys);
+        if (value instanceof Number) {
+            return ((Number) value).doubleValue();
+        }
+        return 0.0;
+    }
+
+    private int nestedInt(Map<String, Object> map, String... keys) {
+        Object value = getNestedValue(map, keys);
+        if (value instanceof Number) {
+            return ((Number) value).intValue();
+        }
+        return 0;
     }
 
     // ========================================================================
@@ -174,229 +227,484 @@ public class TaskConfigService {
         // 组1: 运行模式与时间区间
         groups.add(ConfigGroup.builder()
                 .name("time_range").label("运行模式与时间区间").icon("Calendar")
-                .description("设置分析样本模式和时间区间")
+                .description("因子挖掘与回测的整体时间区间")
                 .fields(List.of(
-                        field("run_mode", "运行模式", "select", values.getOrDefault("run_mode", "train"), "train",
-                                "train=样本内训练, test=样本外盲测",
-                                List.of(opt("样本内训练", "train"), opt("样本外盲测", "test")), "task"),
-                        field("train_start_date", "训练开始日期", "date", values.getOrDefault("train_start_date", ""), "",
-                                "样本内训练区间起始日期", null, "task"),
-                        field("train_end_date", "训练结束日期", "date", values.getOrDefault("train_end_date", ""), "",
-                                "样本内训练区间截止日期", null, "task"),
-                        field("test_start_date", "测试开始日期", "date", values.getOrDefault("test_start_date", ""), "",
-                                "样本外测试区间起始日期", null, "task"),
-                        field("test_end_date", "测试结束日期", "date", values.getOrDefault("test_end_date", ""), "",
-                                "样本外测试区间截止日期", null, "task")
+                        field("run_mode", "运行模式", "select",
+                                values.getOrDefault("run_mode", "train"), "train",
+                                "train=仅训练，test=仅测试，train_test=先训练后测试",
+                                List.of(opt("仅训练", "train"), opt("仅测试", "test"), opt("训练+测试", "train_test")), "task"),
+                        field("iteration_count", "迭代轮数", "select",
+                                values.getOrDefault("iteration_count", 1), 1,
+                                "多轮迭代会基于前一轮反馈继续挖掘",
+                                List.of(opt("1轮", "1"), opt("2轮", "2"), opt("3轮", "3"), opt("5轮", "5")), "task"),
+                        field("train_start_date", "训练开始日期", "date",
+                                values.getOrDefault("train_start_date", ""), "",
+                                "训练区间开始（含）", null, "task"),
+                        field("train_end_date", "训练结束日期", "date",
+                                values.getOrDefault("train_end_date", ""), "",
+                                "训练区间结束（含）", null, "task"),
+                        field("test_start_date", "测试开始日期", "date",
+                                values.getOrDefault("test_start_date", ""), "",
+                                "测试区间开始（含），仅在 test/train_test 模式下有效", null, "task"),
+                        field("test_end_date", "测试结束日期", "date",
+                                values.getOrDefault("test_end_date", ""), "",
+                                "测试区间结束（含），仅在 test/train_test 模式下有效", null, "task")
                 ))
                 .build());
 
         // 组2: 训练切分配置
         groups.add(ConfigGroup.builder()
-                .name("training_workflow").label("训练切分配置").icon("Split")
-                .description("设置训练窗口的切分方式")
+                .name("training_workflow").label("训练切分配置").icon("Scissor")
+                .description("训练窗口内部如何切分为发现期和验证期")
                 .fields(List.of(
                         field("training_workflow.mode", "切分模式", "select",
                                 getNestedValue(values, "training_workflow", "mode"), "static_split",
-                                "static_split=固定两段切分, walk_forward=滚动窗口",
+                                "static_split=固定切分，walk_forward=滚动窗口",
                                 List.of(opt("固定切分", "static_split"), opt("滚动窗口", "walk_forward")), "task"),
-                        field("training_workflow.static_split.discovery_start_date", "Discovery 开始日期", "date",
-                                getNestedValue(values, "training_workflow", "static_split", "discovery_start_date"), "",
-                                "海选阶段起始日期", null, "task"),
-                        field("training_workflow.static_split.discovery_end_date", "Discovery 结束日期", "date",
-                                getNestedValue(values, "training_workflow", "static_split", "discovery_end_date"), "",
-                                "海选阶段截止日期", null, "task"),
-                        field("training_workflow.static_split.validation_start_date", "Validation 开始日期", "date",
-                                getNestedValue(values, "training_workflow", "static_split", "validation_start_date"), "",
-                                "复试阶段起始日期", null, "task"),
-                        field("training_workflow.static_split.validation_end_date", "Validation 结束日期", "date",
-                                getNestedValue(values, "training_workflow", "static_split", "validation_end_date"), "",
-                                "复试阶段截止日期", null, "task"),
-                        numField("training_workflow.walk_forward.discovery_window_months", "滚动窗口 Discovery 月数",
-                                getNestedValue(values, "training_workflow", "walk_forward", "discovery_window_months"), 5,
-                                "每个滚动窗口中 discovery 阶段长度", 1, 60, 1, 0, true),
-                        numField("training_workflow.walk_forward.validation_window_months", "滚动窗口 Validation 月数",
-                                getNestedValue(values, "training_workflow", "walk_forward", "validation_window_months"), 1,
-                                "每个滚动窗口中 validation 阶段长度", 1, 60, 1, 0, true),
+                        field("training_workflow.static_split.discovery_start_date", "发现期开始", "date",
+                                getNestedValue(values, "training_workflow", "static_split.discovery_start_date"), "",
+                                "静态切分：因子发现阶段开始", null, "task"),
+                        field("training_workflow.static_split.discovery_end_date", "发现期结束", "date",
+                                getNestedValue(values, "training_workflow", "static_split.discovery_end_date"), "",
+                                "静态切分：因子发现阶段结束", null, "task"),
+                        field("training_workflow.static_split.validation_start_date", "验证期开始", "date",
+                                getNestedValue(values, "training_workflow", "static_split.validation_start_date"), "",
+                                "静态切分：因子验证阶段开始", null, "task"),
+                        field("training_workflow.static_split.validation_end_date", "验证期结束", "date",
+                                getNestedValue(values, "training_workflow", "static_split.validation_end_date"), "",
+                                "静态切分：因子验证阶段结束", null, "task"),
+                        numField("training_workflow.walk_forward.discovery_window_months", "发现窗口（月）",
+                                getNestedValue(values, "training_workflow", "walk_forward.discovery_window_months"), 24,
+                                "滚动窗口：每次发现期长度", 1, 60, 1, 0, false),
+                        numField("training_workflow.walk_forward.validation_window_months", "验证窗口（月）",
+                                getNestedValue(values, "training_workflow", "walk_forward.validation_window_months"), 6,
+                                "滚动窗口：每次验证期长度", 1, 24, 1, 0, false),
                         numField("training_workflow.walk_forward.step_months", "滚动步长（月）",
-                                getNestedValue(values, "training_workflow", "walk_forward", "step_months"), 3,
-                                "窗口向前滚动的步长", 1, 60, 1, 0, true),
+                                getNestedValue(values, "training_workflow", "walk_forward.step_months"), 6,
+                                "滚动窗口：窗口滚动步长", 1, 24, 1, 0, false),
                         numField("training_workflow.walk_forward.max_windows", "最大窗口数",
-                                getNestedValue(values, "training_workflow", "walk_forward", "max_windows"), 2,
-                                "最多生成的滚动窗口数量，0=不设上限", 0, 100, 1, 0, false)
-                ))
-                .build());
-
-        // 组3: 迭代参数
-        groups.add(ConfigGroup.builder()
-                .name("iteration").label("迭代参数").icon("Refresh")
-                .description("大模型迭代轮数")
-                .fields(List.of(
-                        numField("iteration_count", "迭代轮数",
-                                values.getOrDefault("iteration_count", 1), 1,
-                                "每个训练窗口 discovery 阶段大模型迭代几轮", 1, 10, 1, 0, true)
-                ))
-                .build());
-
-        // 组4: 股票池
-        groups.add(ConfigGroup.builder()
-                .name("stock_pool").label("股票池").icon("DataBoard")
-                .description("设置分析的目标股票池")
-                .fields(List.of(
-                        field("stock_pool.type", "股票池类型", "select",
-                                getNestedValue(values, "stock_pool", "type"), "index_components",
-                                "当前仅支持指数成分股",
-                                List.of(opt("指数成分股", "index_components")), "task"),
-                        field("stock_pool.index_code", "指数代码", "text",
-                                getNestedValue(values, "stock_pool", "index_code"), "SH000300",
-                                "如 SH000300=沪深300, SH000905=中证500, SH000852=中证1000",
-                                null, "task"),
-                        field("stock_pool.dynamic_membership", "动态成分股", "switch",
-                                getNestedValue(values, "stock_pool", "dynamic_membership"), true,
-                                "按每个观测日动态更新指数成分", null, "task"),
-                        field("stock_pool.include_st", "包含ST股票", "switch",
-                                getNestedValue(values, "stock_pool", "include_st"), false,
-                                "是否包含ST股票", null, "task"),
-                        field("stock_pool.include_new_stock", "包含次新股", "switch",
-                                getNestedValue(values, "stock_pool", "include_new_stock"), false,
-                                "是否包含次新股", null, "task"),
-                        numField("stock_pool.new_stock_days", "新股最小上市天数",
-                                getNestedValue(values, "stock_pool", "new_stock_days"), 60,
-                                "判定新股的最小上市天数阈值", 1, 1000, 10, 0, false),
-                        numField("stock_pool.index_component_search_max_open_days", "成分股回溯最大开市日数",
-                                getNestedValue(values, "stock_pool", "index_component_search_max_open_days"), 2000,
-                                "指数成分查询时向前回溯的最大开市日数量", 100, 5000, 100, 0, false)
-                ))
-                .build());
-
-        // 组5: 复权口径
-        groups.add(ConfigGroup.builder()
-                .name("price_adjust").label("复权口径").icon("TrendCharts")
-                .description("价格复权方式设置")
-                .fields(List.of(
-                        field("price_adjust", "复权方式", "select",
-                                values.getOrDefault("price_adjust", "pre"), "pre",
-                                "前复权=固定最新日价格调整历史",
-                                List.of(opt("不复权", "none"), opt("前复权", "pre"), opt("后复权", "post")), "task"),
-                        field("price_adjust_reference_date", "前复权参考日", "select",
-                                values.getOrDefault("price_adjust_reference_date", "auto"), "auto",
-                                "auto=自动取任务load_end, 或指定固定日期",
-                                List.of(opt("自动(推荐)", "auto"), opt("指定日期", "custom")), "task")
-                ))
-                .build());
-
-        // 组6: 调仓节奏
-        groups.add(ConfigGroup.builder()
-                .name("rebalance").label("调仓节奏").icon("Timer")
-                .description("因子分析口径的调仓频率设置")
-                .fields(List.of(
-                        field("rebalance", "调仓频率", "select",
-                                values.getOrDefault("rebalance", "weekly"), "weekly",
-                                "调仓周期",
-                                List.of(opt("日频", "daily"), opt("周频", "weekly"), opt("月频", "monthly")), "task"),
-                        numField("rebalance_interval", "调仓间隔",
-                                values.getOrDefault("rebalance_interval", 1), 1,
-                                "1=每个周期都调仓, 2=隔一个周期调仓", 1, 12, 1, 0, true),
-                        field("rebalance_anchor", "调仓锚点", "select",
-                                values.getOrDefault("rebalance_anchor", "first_trading_day_of_week"),
-                                "first_trading_day_of_week",
-                                "周频/月频调仓的锚点日",
-                                List.of(
-                                        opt("每周首个交易日", "first_trading_day_of_week"),
-                                        opt("每周最后交易日", "last_trading_day_of_week"),
-                                        opt("每月首个交易日", "first_trading_day_of_month"),
-                                        opt("每月最后交易日", "last_trading_day_of_month")
-                                ), "task"),
-                        numField("min_valid_ratio_per_observation", "最小有效样本占比",
-                                values.getOrDefault("min_valid_ratio_per_observation", 0.9), 0.9,
-                                "低于此阈值的观测日不参与IC/IR聚合", 0, 1, 0.05, 2, true)
-                ))
-                .build());
-
-        // 组7: 预处理
-        groups.add(ConfigGroup.builder()
-                .name("preprocess").label("预处理设置").icon("Operation")
-                .description("候选因子值的预处理方式")
-                .fields(List.of(
-                        field("preprocess.outlier_method", "离群值处理", "select",
-                                getNestedValue(values, "preprocess", "outlier_method"), "none",
-                                "截面离群值处理方式",
-                                List.of(opt("不处理", "none"), opt("MAD", "mad"), opt("分位法", "quantile"), opt("3Sigma", "sigma")), "task"),
-                        field("preprocess.neutralization", "中性化处理", "select",
-                                getNestedValue(values, "preprocess", "neutralization"), "none",
-                                "截面中性化方式",
-                                List.of(opt("不处理", "none"), opt("行业中性化", "industry"), opt("市值中性化", "market_cap"), opt("行业+市值", "industry_market_cap")), "task")
-                ))
-                .build());
-
-        // 组8: 筹码特征开关
-        groups.add(ConfigGroup.builder()
-                .name("chip_features").label("筹码特征").icon("Coin")
-                .description("是否启用筹码分布特征")
-                .fields(List.of(
-                        field("enable_chip_features", "启用筹码特征", "switch",
-                                values.getOrDefault("enable_chip_features", false), false,
-                                "开启后会在基础特征池中加入筹码集中度、获利盘比例等特征，并启用chip_distribution分析师", null, "task")
-                ))
-                .build());
-
-        // 组9: 收益标签配置
-        groups.add(ConfigGroup.builder()
-                .name("label").label("收益标签").icon("DataLine")
-                .description("LLM挖掘阶段与因子研究阶段共用的收益标签口径")
-                .fields(List.of(
-                        field("label.name", "标签列名", "text",
-                                getNestedValue(values, "label", "name"), "rebalance_period_return",
-                                "标签列名与分析目标名称", null, "task"),
-                        field("label.return_type", "收益类型", "select",
-                                getNestedValue(values, "label", "return_type"), "period_return",
-                                "当前仅支持 period_return",
-                                List.of(opt("区间收益率", "period_return")), "task"),
-                        field("label.price_field", "价格列", "select",
-                                getNestedValue(values, "label", "price_field"), "close",
-                                "使用哪个价格列计算收益标签",
-                                List.of(opt("收盘价", "close"), opt("开盘价", "open"), opt("VWAP", "vwap")), "task")
+                                getNestedValue(values, "training_workflow", "walk_forward.max_windows"), 0,
+                                "0=不限制", 0, 50, 1, 0, false)
                 ))
                 .build());
 
         return StructuredConfigResponse.builder()
                 .section(TAB_ANALYSIS)
                 .sectionLabel("分析口径")
-                .sectionDescription("设置因子分析的时间区间、训练切分、股票池、调仓节奏等核心参数")
+                .sectionDescription("配置因子分析的股票池、时间区间和预处理")
                 .sectionIcon("DataAnalysis")
                 .groups(groups)
                 .build();
     }
 
     // ========================================================================
-    // Tab 2: LLM 参数
+    // Tab 2: 股票池
+    // ========================================================================
+    private StructuredConfigResponse buildStockPoolTab(Long taskId) {
+        Map<String, Object> values = getSectionMap(taskId, TAB_STOCK_POOL);
+        List<ConfigGroup> groups = new ArrayList<>();
+
+        groups.add(ConfigGroup.builder()
+                .name("stock_pool").label("股票池").icon("DataBoard")
+                .description("参与因子挖掘和回测的股票范围")
+                .fields(List.of(
+                        field("stock_pool.type", "股票池类型", "select",
+                                getNestedValue(values, "stock_pool", "type"), "all_market",
+                                "选择股票池类型",
+                                List.of(
+                                        opt("全市场", "all_market"),
+                                        opt("指数成分股", "index_components"),
+                                        opt("行业", "industry"),
+                                        opt("自定义列表", "custom_list")
+                                ), "task"),
+                        // index_components 时显示
+                        ConfigField.builder()
+                                .key("stock_pool.index_code").label("指数代码").type("select")
+                                .value(getNestedValue(values, "stock_pool", "index_code")).defaultValue("000300.SH")
+                                .description("选择基准指数")
+                                .options(List.of(
+                                        SelectOption.builder().label("沪深300").value("000300.SH").description("000300.SH").build(),
+                                        SelectOption.builder().label("中证500").value("000905.SH").description("000905.SH").build(),
+                                        SelectOption.builder().label("中证1000").value("000852.SH").description("000852.SH").build(),
+                                        SelectOption.builder().label("上证50").value("000016.SH").description("000016.SH").build(),
+                                        SelectOption.builder().label("深证成指").value("399001.SZ").description("399001.SZ").build(),
+                                        SelectOption.builder().label("创业板指").value("399006.SZ").description("399006.SZ").build()
+                                ))
+                                .source("task")
+                                .showWhenKey("stock_pool.type").showWhenValue("index_components")
+                                .build(),
+                        // industry 时显示
+                        ConfigField.builder()
+                                .key("stock_pool.industry_name").label("行业").type("select")
+                                .value(getNestedValue(values, "stock_pool", "industry_name")).defaultValue("银行")
+                                .description("选择申万一级行业")
+                                .options(List.of(
+                                        opt("银行", "银行"), opt("医药生物", "医药生物"), opt("电子", "电子"),
+                                        opt("汽车", "汽车"), opt("食品饮料", "食品饮料"), opt("电力设备", "电力设备"),
+                                        opt("计算机", "计算机"), opt("非银金融", "非银金融"), opt("房地产", "房地产"),
+                                        opt("交通运输", "交通运输"), opt("基础化工", "基础化工"), opt("有色金属", "有色金属"),
+                                        opt("传媒", "传媒"), opt("公用事业", "公用事业"), opt("家用电器", "家用电器"),
+                                        opt("通信", "通信"), opt("国防军工", "国防军工"), opt("机械设备", "机械设备"),
+                                        opt("农林牧渔", "农林牧渔"), opt("建筑材料", "建筑材料"), opt("建筑装饰", "建筑装饰"),
+                                        opt("轻工制造", "轻工制造"), opt("钢铁", "钢铁"), opt("煤炭", "煤炭"),
+                                        opt("石油石化", "石油石化"), opt("环保", "环保"), opt("纺织服饰", "纺织服饰"),
+                                        opt("美容护理", "美容护理"), opt("商贸零售", "商贸零售"), opt("社会服务", "社会服务"),
+                                        opt("综合", "综合")
+                                ))
+                                .source("task")
+                                .showWhenKey("stock_pool.type").showWhenValue("industry")
+                                .build(),
+                        // custom_list 时显示
+                        ConfigField.builder()
+                                .key("stock_pool.instruments").label("股票列表").type("textarea")
+                                .value(getNestedValue(values, "stock_pool", "instruments")).defaultValue("")
+                                .description("每行一个股票代码，如 000001.XSHE")
+                                .source("task")
+                                .showWhenKey("stock_pool.type").showWhenValue("custom_list")
+                                .build(),
+                        ConfigField.builder()
+                                .key("stock_pool.dynamic_membership").label("动态成分股").type("switch")
+                                .value(getNestedValue(values, "stock_pool", "dynamic_membership")).defaultValue(true)
+                                .description("true=按每日实际成分股；false=按区间结束日成分股固定")
+                                .source("task")
+                                .showWhenKey("stock_pool.type").showWhenValue("index_components")
+                                .build(),
+                        ConfigField.builder()
+                                .key("stock_pool.index_component_search_max_open_days").label("成分股回溯最大开市日数").type("number")
+                                .value(getNestedValue(values, "stock_pool", "index_component_search_max_open_days")).defaultValue(2000)
+                                .description("Tushare取不到某日期成分股时，最多回溯多少个交易日")
+                                .min(0).max(5000).step(100).precision(0)
+                                .required(true).source("task")
+                                .showWhenKey("stock_pool.type").showWhenValue("index_components")
+                                .build(),
+                        field("stock_pool.include_st", "包含 ST 股票", "switch",
+                                getNestedValue(values, "stock_pool", "include_st"), false,
+                                "是否包含被特别处理(ST/*ST)的股票", null, "task"),
+                        field("stock_pool.include_new_stock", "包含新股", "switch",
+                                getNestedValue(values, "stock_pool", "include_new_stock"), false,
+                                "是否包含上市时间较短的新股", null, "task"),
+                        numField("stock_pool.new_stock_days", "新股天数阈值",
+                                getNestedValue(values, "stock_pool", "new_stock_days"), 60,
+                                "上市天数小于此值视为新股，用于新股过滤", 0, 365, 1, 0, false)
+                ))
+                .build());
+
+        return StructuredConfigResponse.builder()
+                .section(TAB_STOCK_POOL)
+                .sectionLabel("股票池")
+                .sectionDescription("配置参与因子挖掘和回测的股票范围")
+                .sectionIcon("DataBoard")
+                .groups(groups)
+                .build();
+    }
+
+    // ========================================================================
+    // Tab 3: 原始字段与特征值
+    // ========================================================================
+    private StructuredConfigResponse buildFeaturePoolTab(Long taskId) {
+        Map<String, Object> values = getSectionMap(taskId, TAB_FEATURE_POOL);
+        List<ConfigGroup> groups = new ArrayList<>();
+
+        groups.add(ConfigGroup.builder()
+                .name("feature_pool").label("").icon("")
+                .description("")
+                .fields(List.of(
+                        field("enable_chip_features", "启用筹码特征值列表", "switch",
+                                values.getOrDefault("enable_chip_features", false), false,
+                                "关闭后会过滤掉 expr 以 chip. 开头的特征值，并跳过筹码分布分析师", null, "task")
+                ))
+                .build());
+
+        groups.add(ConfigGroup.builder()
+                .name("health_check").label("特征体检参数").icon("FirstAidKit")
+                .description("控制特征健康检查摘要的生成")
+                .fields(List.of(
+                        numField("summary_top_k", "最强/最弱特征数",
+                                values.getOrDefault("summary_top_k", 3), 3,
+                                "摘要中挑选和收益标签相关性最强/最弱特征的数量", 1, 20, 1, 0, true),
+                        numField("unstable_top_k", "最不稳定特征数",
+                                values.getOrDefault("unstable_top_k", 3), 3,
+                                "摘要中挑选和收益标签相关性最不稳定特征的数量", 1, 20, 1, 0, true),
+                        numField("high_corr_threshold", "高相关阈值",
+                                values.getOrDefault("high_corr_threshold", 0.5), 0.5,
+                                "特征与收益标签的整体相关系数超过此值视为高度重合", 0, 1, 0.05, 2, true),
+                        numField("max_missing_ratio", "最大缺失率阈值",
+                                values.getOrDefault("max_missing_ratio", 0.2), 0.2,
+                                "特征值缺失占比超过此值标记为数据质量低", 0, 1, 0.05, 2, true),
+                        numField("fundamental_health_top_k", "按多空收益差排名列出的特征数量",
+                                values.getOrDefault("fundamental_health_top_k", 5), 5,
+                                "基本面分析师专用体检中按多空收益差排名列出的特征数量", 1, 20, 1, 0, true)
+                ))
+                .build());
+
+        // 读取 runtime/config/feature_pool.yaml，按 11 个分析师维度展示特征
+        Map<String, Object> preview = buildFeaturePoolPreview();
+        if (!preview.isEmpty()) {
+            groups.add(ConfigGroup.builder()
+                    .name("feature_pool_preview").label("基础特征池预览").icon("DataBoard")
+                    .description("当前可用基础特征按 11 个分析师维度分类展示")
+                    .fields(List.of(
+                            field("feature_pool_preview", "", "feature_pool_preview",
+                                    preview, preview,
+                                    null, null, "system")
+                    ))
+                    .build());
+        }
+
+        return StructuredConfigResponse.builder()
+                .section(TAB_FEATURE_POOL)
+                .sectionLabel("原始字段与特征值")
+                .sectionDescription("配置筹码特征开关、特征体检参数，预览当前基础特征池")
+                .sectionIcon("Coin")
+                .groups(groups)
+                .build();
+    }
+
+    /**
+     * 读取 runtime/config/feature_pool.yaml，将 base_features 按 11 个分析师维度分组。
+     * 返回结构：{ dimensions: [...], rawFields: [...] }
+     */
+    private Map<String, Object> buildFeaturePoolPreview() {
+        // 尝试多个路径查找 feature_pool.yaml
+        Path path = resolveFeaturePoolPath();
+        if (path == null || !Files.exists(path)) {
+            log.warn("feature_pool.yaml 未找到，已尝试路径: configTemplateDir={}", stagingProperties.getConfigTemplateDir());
+            return Map.of();
+        }
+        log.info("读取 feature_pool.yaml: {}", path);
+
+        Map<String, Object> yaml;
+        try {
+            // 使用 SnakeYAML 解析（Jackson ObjectMapper 只能解析 JSON）
+            org.yaml.snakeyaml.Yaml snakeYaml = new org.yaml.snakeyaml.Yaml();
+            try (var is = Files.newInputStream(path)) {
+                yaml = snakeYaml.load(is);
+            }
+        } catch (Exception e) {
+            log.warn("解析 feature_pool.yaml 失败: {}", e.getMessage());
+            return Map.of();
+        }
+
+        List<Map<String, Object>> rawFields = (List<Map<String, Object>>) yaml.getOrDefault("raw_fields", List.of());
+        List<Map<String, Object>> baseFeatures = (List<Map<String, Object>>) yaml.getOrDefault("base_features", List.of());
+
+        // 按特征名映射到维度（不依赖 YAML 注释格式）
+        Map<String, List<Map<String, Object>>> dimensionGroups = new LinkedHashMap<>();
+        for (DimensionDef dim : FEATURE_DIMENSIONS) {
+            dimensionGroups.put(dim.key(), new ArrayList<>());
+        }
+        for (Map<String, Object> feature : baseFeatures) {
+            String name = String.valueOf(feature.get("name"));
+            String dimKey = mapFeatureToDimension(name);
+            dimensionGroups.getOrDefault(dimKey, dimensionGroups.get("trend_momentum")).add(feature);
+        }
+
+        List<Map<String, Object>> dimensions = new ArrayList<>();
+        for (DimensionDef dim : FEATURE_DIMENSIONS) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("key", dim.key());
+            item.put("label", dim.label());
+            item.put("icon", dim.icon());
+            item.put("category", dim.category());
+            item.put("features", dimensionGroups.getOrDefault(dim.key(), List.of()));
+            dimensions.add(item);
+        }
+
+        return Map.of(
+                "dimensions", dimensions,
+                "rawFields", rawFields
+        );
+    }
+
+    /**
+     * 按特征名前缀/模式映射到分析师维度。
+     * 不依赖 YAML 注释，而是通过特征名规则确定归属，更健壮。
+     */
+    private String mapFeatureToDimension(String name) {
+        // 趋势动量：收益率、反弹、突破、vwap趋势
+        if (name.startsWith("ret_") || name.startsWith("rebound_") || name.startsWith("breakout_")
+                || name.startsWith("vwap_ret_")) {
+            return "trend_momentum";
+        }
+        // 反转均值回复：价格位置、最大回撤
+        if (name.startsWith("price_pos_") || name.startsWith("max_drawdown_")) {
+            return "reversal_mean_reversion";
+        }
+        // 波动风险：振幅、实现波动率
+        if (name.equals("high_low_range") || name.startsWith("realized_vol_")) {
+            return "volatility_risk";
+        }
+        // 量价关系：成交量、成交额相关
+        if (name.startsWith("volume_") || name.startsWith("amount_")) {
+            return "volume_price";
+        }
+        // 微观结构：日内细节（跳空、日内收益、收盘位置等）
+        if (name.startsWith("gap_") || name.startsWith("intraday_")
+                || name.startsWith("close_to_") || name.startsWith("high_to_") || name.startsWith("low_to_")) {
+            return "microstructure";
+        }
+        // 筹码分布：换手率、筹码、获利盘、成本、峰距
+        if (name.startsWith("turnover_") || name.startsWith("chip_")
+                || name.startsWith("profit_ratio_") || name.startsWith("avg_cost_")
+                || name.startsWith("peak_distance_")) {
+            return "chip_distribution";
+        }
+        // 基本面估值：PE/PB/PS/DV/盈利收益率/市值变化
+        if (name.equals("pe_ttm") || name.equals("pb") || name.equals("ps_ttm") || name.equals("dv_ttm")
+                || name.equals("earnings_yield") || name.equals("sales_yield")
+                || name.startsWith("market_cap_")) {
+            return "fundamental_value";
+        }
+        // 基本面盈利质量：EPS/ROE/增速/利润率/质量价值等
+        if (name.equals("eps") || name.equals("roe") || name.equals("netprofit_yoy") || name.equals("or_yoy")
+                || name.equals("quality_value") || name.equals("profit_revenue_gap")
+                || name.equals("profit_quality") || name.equals("q_roe_acceleration")
+                || name.equals("gross_margin") || name.equals("net_margin")
+                || name.equals("real_growth") || name.equals("op_growth") || name.equals("equity_growth")) {
+            return "fundamental_quality";
+        }
+        // 基本面投资因子：资产增长
+        if (name.equals("asset_growth_inverse")) {
+            return "fundamental_investment";
+        }
+        // 基本面财务健康：财务健康、流动性、偿债
+        if (name.equals("financial_health") || name.equals("liquidity_strength")
+                || name.equals("debt_service_ability")) {
+            return "fundamental_health";
+        }
+        // 基本面现金流：自由现金流收益率
+        if (name.equals("fcf_yield")) {
+            return "fundamental_cashflow";
+        }
+        // 默认归入趋势动量
+        return "trend_momentum";
+    }
+
+    /**
+     * 多路径回退查找 feature_pool.yaml
+     */
+    private Path resolveFeaturePoolPath() {
+        // 1. 从 stagingProperties.configTemplateDir 查找
+        String configDir = stagingProperties.getConfigTemplateDir();
+        if (configDir != null && !configDir.isBlank()) {
+            Path p = Paths.get(configDir, "feature_pool.yaml");
+            if (Files.exists(p)) return p;
+        }
+        // 2. 从 user.dir 推算
+        String userDir = System.getProperty("user.dir");
+        if (userDir != null) {
+            // 可能从 backend/ 启动
+            Path p = Paths.get(userDir, "..", "runtime", "config", "feature_pool.yaml").normalize();
+            if (Files.exists(p)) return p;
+            // 可能从项目根目录启动
+            p = Paths.get(userDir, "runtime", "config", "feature_pool.yaml").normalize();
+            if (Files.exists(p)) return p;
+        }
+        // 3. 硬编码回退
+        Path fallback = Paths.get("D:/works/alpha-factory/runtime/config/feature_pool.yaml");
+        if (Files.exists(fallback)) return fallback;
+        return null;
+    }
+
+    /**
+     * 诊断方法：返回 feature_pool.yaml 读取状态
+     */
+    public Map<String, Object> debugFeaturePoolPreview() {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("configTemplateDir", stagingProperties.getConfigTemplateDir());
+        result.put("userDir", System.getProperty("user.dir"));
+
+        // 尝试路径1
+        String configDir = stagingProperties.getConfigTemplateDir();
+        if (configDir != null && !configDir.isBlank()) {
+            Path p = Paths.get(configDir, "feature_pool.yaml");
+            result.put("path1", p.toString());
+            result.put("path1Exists", Files.exists(p));
+        }
+
+        // 尝试路径2
+        String userDir = System.getProperty("user.dir");
+        if (userDir != null) {
+            Path p1 = Paths.get(userDir, "..", "runtime", "config", "feature_pool.yaml").normalize();
+            result.put("path2", p1.toString());
+            result.put("path2Exists", Files.exists(p1));
+
+            Path p2 = Paths.get(userDir, "runtime", "config", "feature_pool.yaml").normalize();
+            result.put("path3", p2.toString());
+            result.put("path3Exists", Files.exists(p2));
+        }
+
+        // 尝试路径4
+        Path fallback = Paths.get("D:/works/alpha-factory/runtime/config/feature_pool.yaml");
+        result.put("path4", fallback.toString());
+        result.put("path4Exists", Files.exists(fallback));
+
+        // 最终解析结果
+        Path resolved = resolveFeaturePoolPath();
+        result.put("resolvedPath", resolved != null ? resolved.toString() : "null");
+
+        // 尝试读取
+        Map<String, Object> preview = buildFeaturePoolPreview();
+        result.put("previewEmpty", preview.isEmpty());
+        if (!preview.isEmpty()) {
+            result.put("dimensionCount", ((List<?>) preview.getOrDefault("dimensions", List.of())).size());
+            result.put("rawFieldCount", ((List<?>) preview.getOrDefault("rawFields", List.of())).size());
+        }
+
+        return result;
+    }
+
+    // ========================================================================
+    // Tab 3: LLM 参数
     // ========================================================================
 
-    /** Agent 定义：key=agent名称, label=显示名称, description=描述, defaultTemp=默认temperature, stage=阶段 */
+    /** Agent 定义：key=agent名称, label=显示名称, description=描述, defaultTemp=默认temperature, stage=阶段, analyst=是否分析师 */
     private static final List<AgentDef> AGENT_DEFS = List.of(
-            // 阶段1: 专业分析师团队（7个并行）
-            new AgentDef("trend_momentum", "趋势动量分析师", "识别趋势延续与动量反转信号", 0.6, 1),
-            new AgentDef("reversal_mean_reversion", "反转均值回归分析师", "捕捉均值回归与超跌反弹机会", 0.6, 1),
-            new AgentDef("volatility_risk", "波动风险分析师", "评估波动率结构与风险敞口", 0.6, 1),
-            new AgentDef("volume_price", "量价配合分析师", "分析量价背离与资金流向", 0.6, 1),
-            new AgentDef("microstructure", "微观结构分析师", "挖掘订单簿与交易微观特征", 0.6, 1),
-            new AgentDef("chip_distribution", "筹码分布分析师", "分析筹码集中度与获利盘结构", 0.6, 1),
-            new AgentDef("fundamental_value_growth", "基本面价值成长分析师", "评估基本面价值与成长性", 0.6, 1),
+            // 阶段1: 专业分析师团队（11个并行）
+            new AgentDef("trend_momentum", "趋势动量分析师", "识别趋势延续与动量反转信号", 0.6, 1, true),
+            new AgentDef("reversal_mean_reversion", "反转均值回归分析师", "捕捉均值回归与超跌反弹机会", 0.6, 1, true),
+            new AgentDef("volatility_risk", "波动风险分析师", "评估波动率结构与风险敞口", 0.6, 1, true),
+            new AgentDef("volume_price", "量价配合分析师", "分析量价背离与资金流向", 0.6, 1, true),
+            new AgentDef("microstructure", "微观结构分析师", "挖掘订单簿与交易微观特征", 0.6, 1, true),
+            new AgentDef("chip_distribution", "筹码分布分析师", "分析筹码集中度与获利盘结构", 0.6, 1, true),
+            new AgentDef("fundamental_value", "基本面估值分析师", "评估估值水平与价值偏离", 0.6, 1, true),
+            new AgentDef("fundamental_quality", "基本面盈利质量分析师", "评估盈利质量与持续性", 0.6, 1, true),
+            new AgentDef("fundamental_investment", "基本面投资因子分析师", "评估投资与资本结构因子", 0.6, 1, true),
+            new AgentDef("fundamental_health", "基本面财务健康分析师", "评估财务健康与稳健性", 0.6, 1, true),
+            new AgentDef("fundamental_cashflow", "基本面现金流分析师", "评估现金流质量与生成能力", 0.6, 1, true),
             // 阶段2: 首席分析师
-            new AgentDef("chief_analyst", "首席分析师", "整合7个分析师输出，形成统一方向", 0.6, 2),
-            // 阶段3: 因子生成器
-            new AgentDef("generator", "因子生成器", "按设计方向生成因子公式", 0.2, 3),
+            new AgentDef("chief_analyst", "首席分析师", "整合11个分析师输出，形成统一方向", 0.6, 2, false),
+            // 阶段3: 因子生产专员
+            new AgentDef("generator", "因子生产专员", "按设计方向生成因子公式", 0.2, 3, false),
             // 阶段4: 因子评审员
-            new AgentDef("reviewer", "因子评审员", "PASS/REJECT 严格评审", 0.2, 4)
+            new AgentDef("reviewer", "因子评审员", "PASS/REJECT 严格评审", 0.2, 4, false)
+    );
+
+    /** 特征池 11 个分析师维度定义 */
+    private record DimensionDef(String key, String label, String icon, String category) {}
+
+    private static final List<DimensionDef> FEATURE_DIMENSIONS = List.of(
+            new DimensionDef("trend_momentum", "趋势动量", "TrendCharts", "技术面"),
+            new DimensionDef("reversal_mean_reversion", "反转均值回复", "RefreshLeft", "技术面"),
+            new DimensionDef("volatility_risk", "波动风险", "Lightning", "技术面"),
+            new DimensionDef("volume_price", "量价关系", "Histogram", "技术面"),
+            new DimensionDef("microstructure", "微观结构", "View", "技术面"),
+            new DimensionDef("chip_distribution", "筹码分布", "Coin", "技术面"),
+            new DimensionDef("fundamental_value", "基本面估值", "Discount", "基本面"),
+            new DimensionDef("fundamental_quality", "基本面盈利质量", "Medal", "基本面"),
+            new DimensionDef("fundamental_investment", "基本面投资因子", "Wallet", "基本面"),
+            new DimensionDef("fundamental_health", "基本面财务健康", "FirstAidKit", "基本面"),
+            new DimensionDef("fundamental_cashflow", "基本面现金流", "Money", "基本面")
     );
 
     private static final Map<Integer, String> STAGE_LABELS = Map.of(
-            1, "阶段 1：专业分析师团队（7 个并行）",
+            1, "阶段 1：专业分析师团队（11 个并行）",
             2, "阶段 2：首席分析师（整合输出）",
-            3, "阶段 3：因子生成器",
+            3, "阶段 3：因子生产专员",
             4, "阶段 4：因子评审员"
     );
 
-    private record AgentDef(String key, String label, String description, double defaultTemp, int stage) {}
+    private record AgentDef(String key, String label, String description, double defaultTemp, int stage, boolean analyst) {}
 
     @SuppressWarnings("unchecked")
     private StructuredConfigResponse buildLlmTab(Long userId, Long taskId) {
@@ -410,7 +718,6 @@ public class TaskConfigService {
                 .toList();
 
         // 读取已保存的 llm_agents 配置（扁平key格式: llm_agents.trend_momentum.model）
-        // 将扁平key转换为嵌套结构: {trend_momentum: {model: xxx, ...}, ...}
         Map<String, Map<String, Object>> savedAgents = new HashMap<>();
         String agentPrefix = "llm_agents.";
         for (Map.Entry<String, Object> entry : values.entrySet()) {
@@ -424,20 +731,6 @@ public class TaskConfigService {
                             .put(fieldName, entry.getValue());
                 }
             }
-        }
-
-        // 默认全局配置（用于初始化未配置的Agent）
-        String defaultProvider = (String) values.getOrDefault("llm_provider", "");
-        String defaultUrl = (String) values.getOrDefault("llm_base_url", "");
-        String defaultModel = (String) values.getOrDefault("llm_model", "");
-        String defaultApiKey = (String) values.getOrDefault("llm_api_key", "");
-
-        // 如果全局配置为空，尝试从供应商列表自动带出
-        if (defaultUrl.isEmpty() && !defaultProvider.isEmpty()) {
-            defaultUrl = providers.stream()
-                    .filter(p -> p.get("name").equals(defaultProvider))
-                    .map(p -> p.get("base_url"))
-                    .findFirst().orElse("");
         }
 
         // 为每个Agent生成配置组，按阶段插入分隔标题
@@ -456,14 +749,15 @@ public class TaskConfigService {
 
             Map<String, Object> agentConfig = savedAgents.getOrDefault(agent.key(), Map.of());
 
-            // Agent配置优先，否则回退到全局默认
-            String agentProvider = (String) agentConfig.getOrDefault("llm_provider", defaultProvider);
-            String agentUrl = (String) agentConfig.getOrDefault("llm_base_url", defaultUrl);
-            String agentModel = (String) agentConfig.getOrDefault("llm_model", defaultModel);
-            String agentApiKey = (String) agentConfig.getOrDefault("llm_api_key", defaultApiKey);
+            String agentProvider = (String) agentConfig.getOrDefault("llm_provider", "");
+            String agentUrl = (String) agentConfig.getOrDefault("llm_base_url", "");
+            String agentModel = (String) agentConfig.getOrDefault("llm_model", "");
+            String agentApiKey = (String) agentConfig.getOrDefault("llm_api_key", "");
             double agentTemp = toDouble(agentConfig.get("temperature"), agent.defaultTemp());
+            int agentMaxTokens = toInt(agentConfig.get("max_tokens"), 8192);
             double agentTimeout = toDouble(agentConfig.get("timeout_seconds"), agent.stage() == 1 ? 60.0 : 120.0);
             int agentRetries = toInt(agentConfig.get("max_retries"), 2);
+            boolean agentEnabled = (boolean) agentConfig.getOrDefault("enable", true);
 
             // 根据供应商自动带出URL
             if (agentUrl.isEmpty() && !agentProvider.isEmpty()) {
@@ -474,39 +768,55 @@ public class TaskConfigService {
             }
 
             String prefix = "llm_agents." + agent.key();
+            List<ConfigField> fields = new ArrayList<>(List.of(
+                    field(prefix + ".llm_provider", "供应商", "select",
+                            agentProvider, "",
+                            "选择LLM供应商",
+                            providerOptions, "task"),
+                    field(prefix + ".llm_base_url", "API 地址", "text",
+                            agentUrl, "",
+                            "选择供应商后自动填入，也可手动修改", null, "task"),
+                    field(prefix + ".llm_model", "模型名称", "text",
+                            agentModel, "",
+                            "如 gpt-4o, deepseek-chat, qwen-max 等", null, "task"),
+                    field(prefix + ".llm_api_key", "API Key", "password",
+                            agentApiKey, "",
+                            "对应供应商的 API Key", null, "task"),
+                    numField(prefix + ".temperature", "Temperature",
+                            agentTemp, agent.defaultTemp(),
+                            "创意程度，0.2=严谨, 0.6=平衡, 0.9=创意", 0, 2, 0.1, 2, true),
+                    numField(prefix + ".max_tokens", "Max Tokens",
+                            agentMaxTokens, 8192,
+                            "单次请求最大 token 数", 256, 32768, 256, 0, false),
+                    numField(prefix + ".timeout_seconds", "超时时间(秒)",
+                            agentTimeout, agent.stage() == 1 ? 60.0 : 120.0,
+                            "单次请求超时时间", 10, 600, 10, 0, true),
+                    numField(prefix + ".max_retries", "最大重试次数",
+                            agentRetries, 2,
+                            "请求失败后最大重试次数", 0, 10, 1, 0, false)
+            ));
+            if (agent.analyst()) {
+                fields.add(field(prefix + ".enable", "启用", "switch",
+                        agentEnabled, true,
+                        "是否启用该分析师", null, "task"));
+            }
+            // 因子生成器额外显示候选因子数量
+            if ("generator".equals(agent.key())) {
+                fields.add(numField("llm_candidate_count", "候选因子数量",
+                        values.getOrDefault("llm_candidate_count", 10), 10,
+                        "因子生产专员产出的候选因子数", 1, 100, 1, 0, true));
+            }
+
             groups.add(ConfigGroup.builder()
                     .name("agent_" + agent.key()).label(agent.label()).icon("UserFilled")
                     .description(agent.description())
-                    .fields(List.of(
-                            field(prefix + ".llm_provider", "供应商", "select",
-                                    agentProvider, "",
-                                    "选择LLM供应商",
-                                    providerOptions, "task"),
-                            field(prefix + ".llm_base_url", "API 地址", "text",
-                                    agentUrl, "",
-                                    "选择供应商后自动填入，也可手动修改", null, "task"),
-                            field(prefix + ".llm_model", "模型名称", "text",
-                                    agentModel, "",
-                                    "如 gpt-4o, deepseek-chat, qwen-max 等", null, "task"),
-                            field(prefix + ".llm_api_key", "API Key", "password",
-                                    agentApiKey, "",
-                                    "对应供应商的 API Key", null, "task"),
-                            numField(prefix + ".temperature", "Temperature",
-                                    agentTemp, agent.defaultTemp(),
-                                    "创意程度，0.2=严谨, 0.6=平衡, 0.9=创意", 0, 2, 0.1, 2, true),
-                            numField(prefix + ".timeout_seconds", "超时时间(秒)",
-                                    agentTimeout, 60,
-                                    "单次请求超时时间", 10, 600, 10, 0, true),
-                            numField(prefix + ".max_retries", "最大重试次数",
-                                    agentRetries, 2,
-                                    "请求失败后最大重试次数", 0, 10, 1, 0, false)
-                    ))
+                    .fields(fields)
                     .build());
         }
 
         return StructuredConfigResponse.builder()
                 .section(TAB_LLM)
-                .sectionLabel("LLM 参数")
+                .sectionLabel("Agent 参数")
                 .sectionDescription("配置多Agent流水线中每个Agent的LLM供应商和参数")
                 .sectionIcon("ChatDotRound")
                 .groups(groups)
@@ -514,7 +824,7 @@ public class TaskConfigService {
     }
 
     // ========================================================================
-    // Tab 3: 回测策略
+    // Tab 4: 回测策略
     // ========================================================================
     private StructuredConfigResponse buildBacktestTab(Long taskId) {
         Map<String, Object> values = getSectionMap(taskId, TAB_BACKTEST);
@@ -528,7 +838,7 @@ public class TaskConfigService {
                         field("strategy_type", "策略类型", "select",
                                 values.getOrDefault("strategy_type", "TopKDropout"), "TopKDropout",
                                 "当前可用策略",
-                                List.of(opt("TopK-Dropout", "TopKDropout"), opt("SoftTopK", "SoftTopK")), "task")
+                                List.of(opt("TopK-Dropout", "TopKDropout"), opt("指数增强", "EnhancedIndexing"), opt("SoftTopK", "SoftTopK")), "task")
                 ))
                 .build());
 
@@ -559,7 +869,35 @@ public class TaskConfigService {
                 ))
                 .build());
 
-        // 组3: SoftTopK 参数
+        // 组3: EnhancedIndexing 参数
+        groups.add(ConfigGroup.builder()
+                .name("enhanced_indexing").label("指数增强参数").icon("Aim")
+                .description("以指数成分股权重为基底，用因子得分做有约束的倾斜")
+                .fields(List.of(
+                        field("EnhancedIndexing.benchmark", "基准指数",
+                                getNestedValue(values, "EnhancedIndexing", "benchmark") == null ? "text" : "text",
+                                getNestedValue(values, "EnhancedIndexing", "benchmark"), "000300.SH",
+                                "如 000300.SH / 000905.SH", null, "task"),
+                        numField("EnhancedIndexing.active_weight_bound", "主动权重偏离上限",
+                                getNestedValue(values, "EnhancedIndexing", "active_weight_bound"), 0.02,
+                                "单只股票相对基准权重的增减幅度上限", 0, 1, 0.005, 3, true),
+                        numField("EnhancedIndexing.holding_count", "目标持仓数",
+                                getNestedValue(values, "EnhancedIndexing", "holding_count"), 30,
+                                "从指数成分股中选因子得分排名前N只", 1, 500, 5, 0, true),
+                        field("EnhancedIndexing.weight_mode", "权重模式", "select",
+                                getNestedValue(values, "EnhancedIndexing", "weight_mode"), "benchmark_tilt",
+                                "当前仅支持 benchmark_tilt",
+                                List.of(opt("基准倾斜", "benchmark_tilt")), "task"),
+                        numField("EnhancedIndexing.min_score_coverage", "因子分数保有率阈值",
+                                getNestedValue(values, "EnhancedIndexing", "min_score_coverage"), 0.90,
+                                "低于此值本调仓日不操作", 0, 1, 0.05, 2, false),
+                        numField("EnhancedIndexing.min_weight_coverage", "成分权重保有率阈值",
+                                getNestedValue(values, "EnhancedIndexing", "min_weight_coverage"), 0.90,
+                                "入选股票中拥有成分权重数据的最低比例", 0, 1, 0.05, 2, false)
+                ))
+                .build());
+
+        // 组4: SoftTopK 参数
         groups.add(ConfigGroup.builder()
                 .name("soft_topk").label("SoftTopK 参数").icon("MagicStick")
                 .description("按分数连续分配权重，而非简单等权")
@@ -583,7 +921,7 @@ public class TaskConfigService {
                 ))
                 .build());
 
-        // 组4: 择时过滤
+        // 组5: 择时过滤
         groups.add(ConfigGroup.builder()
                 .name("market_timing").label("择时过滤").icon("Sunrise")
                 .description("叠加层：根据市场状态调整仓位")
@@ -614,7 +952,7 @@ public class TaskConfigService {
                 ))
                 .build());
 
-        // 组5: 执行参数
+        // 组6: 执行参数
         groups.add(ConfigGroup.builder()
                 .name("execution").label("执行参数").icon("Money")
                 .description("回测交易执行参数")
@@ -669,29 +1007,41 @@ public class TaskConfigService {
     }
 
     // ========================================================================
-    // Tab 4: 市场环境
+    // Tab 5: 市场环境
     // ========================================================================
     private StructuredConfigResponse buildMarketTab(Long taskId) {
         Map<String, Object> values = getSectionMap(taskId, TAB_MARKET);
         List<ConfigGroup> groups = new ArrayList<>();
 
-        // 组1: 窗口参数
+        // 组1: 窗口参数（顺序与 market_context.yaml 保持一致）
         groups.add(ConfigGroup.builder()
                 .name("windows").label("窗口参数").icon("Timer")
                 .description("程序往前回头看多少个交易日来判断市场状态")
                 .fields(List.of(
+                        numField("windows.warmup_trading_days", "预热天数",
+                                getNestedValue(values, "windows", "warmup_trading_days"), 260,
+                                "程序在训练起点前多读的历史天数", 100, 500, 10, 0, true),
+                        numField("windows.min_rolling_periods", "滚动计算最少天数",
+                                getNestedValue(values, "windows", "min_rolling_periods"), 10,
+                                "至少攒够多少天才开始算滚动指标", 5, 100, 5, 0, true),
                         numField("windows.trend_days", "趋势窗口（天）",
                                 getNestedValue(values, "windows", "trend_days"), 20,
                                 "看最近多少天的市场整体累计表现", 5, 250, 5, 0, true),
+                        numField("windows.min_rank_periods", "分位计算最少天数",
+                                getNestedValue(values, "windows", "min_rank_periods"), 50,
+                                "至少攒够多少天才开始做分位比较", 20, 200, 10, 0, true),
                         numField("windows.volatility_days", "波动窗口（天）",
                                 getNestedValue(values, "windows", "volatility_days"), 20,
                                 "看最近多少天的日涨跌幅波动", 5, 250, 5, 0, true),
-                        numField("windows.dispersion_days", "分化窗口（天）",
-                                getNestedValue(values, "windows", "dispersion_days"), 20,
-                                "看最近多少天的股票间差异", 5, 250, 5, 0, true),
                         numField("windows.rank_lookback_days", "历史分位回看（天）",
                                 getNestedValue(values, "windows", "rank_lookback_days"), 250,
                                 "把当前指标放到过去多少天里算分位", 50, 500, 10, 0, true),
+                        numField("windows.dispersion_days", "分化窗口（天）",
+                                getNestedValue(values, "windows", "dispersion_days"), 20,
+                                "看最近多少天的股票间差异", 5, 250, 5, 0, true),
+                        numField("windows.min_size_style_sample", "风格判断最少股票数",
+                                getNestedValue(values, "windows", "min_size_style_sample"), 20,
+                                "少于这么多只股票时不做大小盘判断", 5, 200, 5, 0, true),
                         numField("windows.northbound_days", "北向资金窗口（天）",
                                 getNestedValue(values, "windows", "northbound_days"), 5,
                                 "看最近几天的北向净流入累计", 1, 30, 1, 0, true),
@@ -701,18 +1051,6 @@ public class TaskConfigService {
                         numField("windows.flow_rank_lookback_days", "资金面分位回看（天）",
                                 getNestedValue(values, "windows", "flow_rank_lookback_days"), 250,
                                 "北向/两融指标与过去多少天比较算分位", 50, 500, 10, 0, true),
-                        numField("windows.min_size_style_sample", "风格判断最少股票数",
-                                getNestedValue(values, "windows", "min_size_style_sample"), 20,
-                                "少于这么多只股票时不做大小盘判断", 5, 200, 5, 0, true),
-                        numField("windows.min_rolling_periods", "滚动计算最少天数",
-                                getNestedValue(values, "windows", "min_rolling_periods"), 10,
-                                "至少攒够多少天才开始算滚动指标", 5, 100, 5, 0, true),
-                        numField("windows.min_rank_periods", "分位计算最少天数",
-                                getNestedValue(values, "windows", "min_rank_periods"), 50,
-                                "至少攒够多少天才开始做分位比较", 20, 200, 10, 0, true),
-                        numField("windows.warmup_trading_days", "预热天数",
-                                getNestedValue(values, "windows", "warmup_trading_days"), 260,
-                                "程序在训练起点前多读的历史天数", 100, 500, 10, 0, true),
                         numField("windows.shibor_trend_days", "Shibor趋势窗口（天）",
                                 getNestedValue(values, "windows", "shibor_trend_days"), 20,
                                 "Shibor利率看最近多少天的趋势变化", 5, 250, 5, 0, true),
@@ -791,7 +1129,88 @@ public class TaskConfigService {
     }
 
     // ========================================================================
-    // Tab 5: 窗口选择
+    // Tab 4: 收益标签
+    // ========================================================================
+    private StructuredConfigResponse buildLabelTab(Long taskId) {
+        Map<String, Object> values = getSectionMap(taskId, TAB_ANALYSIS);
+        List<ConfigGroup> groups = new ArrayList<>();
+
+        groups.add(ConfigGroup.builder()
+                .name("label").label("收益标签").icon("DataLine")
+                .description("LLM挖掘阶段与因子研究阶段共用的收益标签口径")
+                .fields(List.of(
+                        field("label.name", "标签列名", "text",
+                                getNestedValue(values, "label", "name"), "rebalance_period_return",
+                                "标签列名与分析目标名称", null, "task"),
+                        field("label.return_type", "收益类型", "select",
+                                getNestedValue(values, "label", "return_type"), "period_return",
+                                "当前仅支持 period_return",
+                                List.of(opt("区间收益率", "period_return")), "task"),
+                        field("label.price_field", "价格列", "select",
+                                getNestedValue(values, "label", "price_field"), "close",
+                                "使用哪个价格列计算收益标签",
+                                List.of(
+                                        opt("收盘价", "close"),
+                                        opt("开盘价", "open"),
+                                        opt("最高价", "high"),
+                                        opt("最低价", "low"),
+                                        opt("VWAP", "vwap")
+                                ), "task")
+                ))
+                .build());
+
+        // 组2: 调仓节奏
+        groups.add(ConfigGroup.builder()
+                .name("rebalance").label("调仓节奏").icon("Timer")
+                .description("收益标签和回测的调仓频率")
+                .fields(List.of(
+                        field("rebalance", "调仓频率", "select",
+                                values.getOrDefault("rebalance", "weekly"), "weekly",
+                                "daily/weekly/monthly",
+                                List.of(opt("日频", "daily"), opt("周频", "weekly"), opt("月频", "monthly")), "task"),
+                        numField("rebalance_interval", "调仓间隔",
+                                values.getOrDefault("rebalance_interval", 1), 1,
+                                "每隔多少个 frequency 调仓一次", 1, 12, 1, 0, true),
+                        field("rebalance_anchor", "调仓观察日", "select",
+                                values.getOrDefault("rebalance_anchor", "first_trading_day_of_week"), "first_trading_day_of_week",
+                                "按 frequency 选择每周或每月的第一个/最后一个交易日",
+                                List.of(
+                                        opt("每周第一个交易日", "first_trading_day_of_week"),
+                                        opt("每周最后一个交易日", "last_trading_day_of_week"),
+                                        opt("每月第一个交易日", "first_trading_day_of_month"),
+                                        opt("每月最后一个交易日", "last_trading_day_of_month")
+                                ), "task",
+                                "rebalance", List.of("weekly", "monthly"),
+                                "rebalance",
+                                Map.of(
+                                        "weekly", List.of("first_trading_day_of_week", "last_trading_day_of_week"),
+                                        "monthly", List.of("first_trading_day_of_month", "last_trading_day_of_month")
+                                ))
+                ))
+                .build());
+
+        // 组3: 观测质量
+        groups.add(ConfigGroup.builder()
+                .name("quality").label("观测日数据质量").icon("Filter")
+                .description("控制因子计算时允许的最低数据质量")
+                .fields(List.of(
+                        numField("min_valid_ratio_per_observation", "观测日有效数据占比最低比例",
+                                values.getOrDefault("min_valid_ratio_per_observation", 0.8), 0.8,
+                                "单个观测日中有效值数据占比低于此值则本观察日不参与因子IC/IR横截面计算", 0, 1, 0.05, 2, true)
+                ))
+                .build());
+
+        return StructuredConfigResponse.builder()
+                .section(TAB_LABEL)
+                .sectionLabel("收益标签与调仓")
+                .sectionDescription("配置收益标签的列名、收益类型、价格列和观察日参数")
+                .sectionIcon("DataLine")
+                .groups(groups)
+                .build();
+    }
+
+    // ========================================================================
+    // Tab 6: 窗口选择
     // ========================================================================
     private StructuredConfigResponse buildSelectorTab(Long taskId) {
         Map<String, Object> values = getSectionMap(taskId, TAB_SELECTOR);
@@ -812,29 +1231,29 @@ public class TaskConfigService {
                         numField("top_k_similar_months", "Top-K 相似月份数",
                                 values.getOrDefault("top_k_similar_months", 4), 4,
                                 "找出与test状态最相似的前K个月", 1, 20, 1, 0, true),
-                        numField("score_similarity_weight", "相似度权重",
+                        numField("score_similarity_weight", "平均相似度权重",
                                 values.getOrDefault("score_similarity_weight", 0.7), 0.7,
-                                "窗口内平均相似度占总分的权重", 0, 1, 0.05, 2, true),
-                        numField("score_coverage_weight", "覆盖度权重",
+                                "与 score_coverage_weight 之和建议为1", 0, 1, 0.05, 2, true),
+                        numField("score_coverage_weight", "Top-K覆盖度权重",
                                 values.getOrDefault("score_coverage_weight", 0.3), 0.3,
-                                "窗口命中Top-K相似月份的比例占总分的权重", 0, 1, 0.05, 2, true),
-                        field("disable_dynamic_membership", "关闭动态成分股", "switch",
+                                "与 score_similarity_weight 之和建议为1", 0, 1, 0.05, 2, true),
+                        field("disable_dynamic_membership", "临时关闭动态成分股", "switch",
                                 values.getOrDefault("disable_dynamic_membership", true), true,
-                                "开启可减少指数成分回溯请求，加快运行速度", null, "task")
+                                "selector内部关闭dynamic_membership可显著减少回溯请求", null, "task")
                 ))
                 .build());
 
         return StructuredConfigResponse.builder()
                 .section(TAB_SELECTOR)
                 .sectionLabel("窗口选择")
-                .sectionDescription("配置训练窗口选择器参数，为test窗口推荐最佳训练区间")
+                .sectionDescription("为测试窗口推荐最相似的历史训练窗口")
                 .sectionIcon("Aim")
                 .groups(groups)
                 .build();
     }
 
     // ========================================================================
-    // Tab 6: 预筛门槛
+    // Tab 7: 预筛门槛
     // ========================================================================
     private StructuredConfigResponse buildPrescreenTab(Long taskId) {
         Map<String, Object> values = getSectionMap(taskId, TAB_PRESCREEN);
@@ -842,54 +1261,34 @@ public class TaskConfigService {
 
         groups.add(ConfigGroup.builder()
                 .name("prescreen").label("因子预筛门槛").icon("Filter")
-                .description("不满足全部条件的因子将被跳过回测")
+                .description("不满足以下全部条件则跳过回测")
                 .fields(List.of(
-                        numField("min_rank_ic_to_backtest", "Rank IC 绝对值阈值",
+                        numField("min_rank_ic_to_backtest", "Rank IC 绝对值门槛",
                                 values.getOrDefault("min_rank_ic_to_backtest", 0.02), 0.02,
-                                "行业通常0.02-0.03以上算有效", 0, 0.5, 0.005, 3, true),
-                        numField("min_rank_ic_ir_to_backtest", "Rank IC IR 绝对值阈值",
+                                "Rank IC 绝对值低于此值跳过", 0, 0.2, 0.005, 3, true),
+                        numField("min_rank_ic_ir_to_backtest", "Rank IC IR 门槛",
                                 values.getOrDefault("min_rank_ic_ir_to_backtest", 0.2), 0.2,
-                                "代表稳定性，行业通常0.2以上", 0, 5, 0.05, 2, true),
-                        numField("min_positive_ic_ratio", "IC胜率阈值",
+                                "Rank IC IR 低于此值跳过", 0, 2, 0.05, 2, true),
+                        numField("min_positive_ic_ratio", "IC正方向胜率门槛",
                                 values.getOrDefault("min_positive_ic_ratio", 0.4), 0.4,
-                                "IC为正的胜率，要求不偏离50%太多", 0, 1, 0.05, 2, true),
-                        field("enable_direction_filter", "方向过滤", "switch",
+                                "IC为正（或负）的比例低于此值跳过", 0, 1, 0.05, 2, true),
+                        field("enable_direction_filter", "启用方向过滤", "switch",
                                 values.getOrDefault("enable_direction_filter", false), false,
-                                "是否要求LLM猜测方向与样本内经验方向一致", null, "task")
-                ))
-                .build());
-
-        // 特征体检参数
-        groups.add(ConfigGroup.builder()
-                .name("health_check").label("特征体检参数").icon("FirstAidKit")
-                .description("生成健康检查摘要时的参数")
-                .fields(List.of(
-                        numField("summary_top_k", "最强/最弱特征数",
-                                values.getOrDefault("summary_top_k", 3), 3,
-                                "挑选几个最强和最弱的特征给大模型看", 1, 20, 1, 0, true),
-                        numField("unstable_top_k", "最不稳定特征数",
-                                values.getOrDefault("unstable_top_k", 3), 3,
-                                "挑选几个最不稳定的特征给大模型看", 1, 20, 1, 0, true),
-                        numField("high_corr_threshold", "高相关阈值",
-                                values.getOrDefault("high_corr_threshold", 0.5), 0.5,
-                                "相关系数绝对值超过此值视为高度重合", 0, 1, 0.05, 2, true),
-                        numField("max_missing_ratio", "缺失率阈值",
-                                values.getOrDefault("max_missing_ratio", 0.2), 0.2,
-                                "缺失率超过此值的特征标记为review", 0, 1, 0.05, 2, true)
+                                "要求LLM猜测方向与样本内经验方向一致", null, "task")
                 ))
                 .build());
 
         return StructuredConfigResponse.builder()
                 .section(TAB_PRESCREEN)
                 .sectionLabel("预筛门槛")
-                .sectionDescription("配置因子预筛和特征体检的阈值参数")
+                .sectionDescription("配置因子回测前的预筛门槛")
                 .sectionIcon("Filter")
                 .groups(groups)
                 .build();
     }
 
     // ========================================================================
-    // Tab 7: 评分权重
+    // Tab 8: 评分权重
     // ========================================================================
     private StructuredConfigResponse buildScoreTab(Long taskId) {
         Map<String, Object> values = getSectionMap(taskId, TAB_SCORE);
@@ -930,7 +1329,105 @@ public class TaskConfigService {
     }
 
     // ========================================================================
-    // Tab 8: 数据参数
+    // Tab 2: Tushare 数据配置
+    // ========================================================================
+    private StructuredConfigResponse buildTushareTab(Long taskId) {
+        Map<String, Object> values = getSectionMap(taskId, TAB_TUSHARE);
+        List<ConfigGroup> groups = new ArrayList<>();
+
+        groups.add(ConfigGroup.builder()
+                .name("data_source").label("数据源参数").icon("DataLine")
+                .description("Tushare 数据源的基础参数")
+                .fields(List.of(
+                        field("freq", "数据频率", "select",
+                                values.getOrDefault("freq", "day"), "day",
+                                "当前仅支持日线",
+                                List.of(opt("日线", "day")), "task"),
+                        numField("placeholder_expire_days", "占位符过期天数",
+                                values.getOrDefault("placeholder_expire_days", 3), 3,
+                                "Tushare暂时获取不到数据时插入占位符，超过此天数自动过期重新拉取", 1, 30, 1, 0, true)
+                ))
+                .build());
+
+        groups.add(ConfigGroup.builder()
+                .name("price_adjust").label("复权口径").icon("TrendCharts")
+                .description("股票价格复权方式")
+                .fields(List.of(
+                        field("price_adjust", "复权方式", "select",
+                                values.getOrDefault("price_adjust", "none"), "none",
+                                "none=不复权，pre=前复权，post=后复权",
+                                List.of(opt("不复权", "none"), opt("前复权", "pre"), opt("后复权", "post")), "task"),
+                        field("price_adjust_auto", "自动取本次任务的 load_end", "switch",
+                                values.getOrDefault("price_adjust_auto", true), true,
+                                "开启后复权参考日自动为 auto", null, "task"),
+                        ConfigField.builder()
+                                .key("price_adjust_reference_date").label("复权参考日").type("date")
+                                .value(values.getOrDefault("price_adjust_reference_date", "")).defaultValue("")
+                                .description("选择固定复权参考日期")
+                                .source("task")
+                                .showWhenKey("price_adjust_auto").showWhenValue(false)
+                                .build()
+                ))
+                .build());
+
+        groups.add(ConfigGroup.builder()
+                .name("preprocess").label("预处理设置").icon("Operation")
+                .description("因子预处理：异常值、中性化")
+                .fields(List.of(
+                        field("preprocess.outlier_method", "异常值处理", "select",
+                                getNestedValue(values, "preprocess", "outlier_method"), "none",
+                                "none/mad/quantile/sigma",
+                                List.of(opt("不处理", "none"), opt("MAD", "mad"), opt("分位数裁剪", "quantile"), opt("3-Sigma", "sigma")), "task"),
+                        ConfigField.builder()
+                                .key("preprocess.outlier_options.n").label("异常值参数 n").type("number")
+                                .value(getNestedValue(values, "preprocess", "outlier_options.n")).defaultValue(3.0)
+                                .description("MAD/Sigma 的倍数")
+                                .min(0.1).max(10).step(0.1).precision(2)
+                                .source("task")
+                                .showWhenKey("preprocess.outlier_method").showWhenValue(List.of("mad", "sigma"))
+                                .build(),
+                        ConfigField.builder()
+                                .key("preprocess.outlier_options.lower_quantile").label("下分位数").type("number")
+                                .value(getNestedValue(values, "preprocess", "outlier_options.lower_quantile")).defaultValue(0.01)
+                                .description("quantile 方法下界")
+                                .min(0).max(1).step(0.01).precision(2)
+                                .source("task")
+                                .showWhenKey("preprocess.outlier_method").showWhenValue("quantile")
+                                .build(),
+                        ConfigField.builder()
+                                .key("preprocess.outlier_options.upper_quantile").label("上分位数").type("number")
+                                .value(getNestedValue(values, "preprocess", "outlier_options.upper_quantile")).defaultValue(0.99)
+                                .description("quantile 方法上界")
+                                .min(0).max(1).step(0.01).precision(2)
+                                .source("task")
+                                .showWhenKey("preprocess.outlier_method").showWhenValue("quantile")
+                                .build(),
+                        field("preprocess.neutralization", "中性化", "select",
+                                getNestedValue(values, "preprocess", "neutralization"), "none",
+                                "none/industry/market_cap/industry_market_cap",
+                                List.of(opt("不处理", "none"), opt("行业", "industry"), opt("市值", "market_cap"), opt("行业+市值", "industry_market_cap")), "task"),
+                        field("preprocess.neutralization_options.industry_field", "行业字段", "select",
+                                getNestedValue(values, "preprocess", "neutralization_options.industry_field"), "industry",
+                                "行业分类字段名",
+                                List.of(opt("industry", "industry")), "task"),
+                        field("preprocess.neutralization_options.market_cap_field", "市值字段", "select",
+                                getNestedValue(values, "preprocess", "neutralization_options.market_cap_field"), "market_cap",
+                                "市值字段名",
+                                List.of(opt("market_cap", "market_cap")), "task")
+                ))
+                .build());
+
+        return StructuredConfigResponse.builder()
+                .section(TAB_TUSHARE)
+                .sectionLabel("数据配置")
+                .sectionDescription("配置 Tushare 数据源参数、复权口径和预处理设置")
+                .sectionIcon("DataLine")
+                .groups(groups)
+                .build();
+    }
+
+    // ========================================================================
+    // Tab 9: 数据参数
     // ========================================================================
     private StructuredConfigResponse buildDataTab(Long taskId) {
         Map<String, Object> values = getSectionMap(taskId, TAB_DATA);
@@ -938,25 +1435,21 @@ public class TaskConfigService {
 
         groups.add(ConfigGroup.builder()
                 .name("data_params").label("数据参数").icon("Coin")
-                .description("数据缓存和频率相关参数")
+                .description("采样和缓存相关参数")
                 .fields(List.of(
-                        field("enable_meta_reconcile", "启用元数据对齐", "switch",
-                                values.getOrDefault("enable_meta_reconcile", true), true,
-                                "开启后Tushare数据拉取时会做元数据对齐校验", null, "task"),
-                        numField("placeholder_expire_days", "占位符过期天数",
-                                values.getOrDefault("placeholder_expire_days", 3), 3,
-                                "Tushare暂时获取不到数据时插入占位符，超过此天数自动过期重新拉取", 1, 30, 1, 0, true),
-                        field("freq", "数据频率", "select",
-                                values.getOrDefault("freq", "day"), "day",
-                                "当前仅支持日线",
-                                List.of(opt("日线", "day")), "task")
+                        numField("max_instruments", "最大股票数",
+                                values.getOrDefault("max_instruments", 0), 0,
+                                "0=不限制；>0 时按字母顺序取前N只限制股票池", 0, 10000, 100, 0, false),
+                        field("sample_instrument", "样本股票", "text",
+                                values.getOrDefault("sample_instrument", ""), "",
+                                "用于调试的样本股票代码，非空时只加载该股票", null, "task")
                 ))
                 .build());
 
         return StructuredConfigResponse.builder()
                 .section(TAB_DATA)
                 .sectionLabel("数据参数")
-                .sectionDescription("数据缓存策略和频率配置")
+                .sectionDescription("数据缓存策略和采样配置")
                 .sectionIcon("Coin")
                 .groups(groups)
                 .build();
@@ -968,12 +1461,29 @@ public class TaskConfigService {
 
     private ConfigField field(String key, String label, String type, Object value, Object defaultValue,
                               String description, List<SelectOption> options, String source) {
+        return field(key, label, type, value, defaultValue, description, options, source, null, null, null, null);
+    }
+
+    private ConfigField field(String key, String label, String type, Object value, Object defaultValue,
+                              String description, List<SelectOption> options, String source,
+                              String showWhenKey, Object showWhenValue) {
+        return field(key, label, type, value, defaultValue, description, options, source, showWhenKey, showWhenValue, null, null);
+    }
+
+    private ConfigField field(String key, String label, String type, Object value, Object defaultValue,
+                              String description, List<SelectOption> options, String source,
+                              String showWhenKey, Object showWhenValue,
+                              String optionFilterKey, Map<String, List<String>> optionFilterMap) {
         return ConfigField.builder()
                 .key(key).label(label).type(type)
                 .value(value).defaultValue(defaultValue)
                 .description(description)
                 .options(options)
                 .source(source)
+                .showWhenKey(showWhenKey)
+                .showWhenValue(showWhenValue)
+                .optionFilterKey(optionFilterKey)
+                .optionFilterMap(optionFilterMap)
                 .build();
     }
 
@@ -1009,6 +1519,20 @@ public class TaskConfigService {
         try { return Integer.parseInt(val.toString()); } catch (NumberFormatException e) { return defaultVal; }
     }
 
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> getSectionMap(Long taskId, String section) {
+        return taskConfigRepository.findByTaskIdAndSection(taskId, section)
+                .map(config -> {
+                    try {
+                        return (Map<String, Object>) objectMapper.readValue(config.getValue(), new TypeReference<Map<String, Object>>() {});
+                    } catch (Exception e) {
+                        log.warn("解析任务配置失败: taskId={}, section={}", taskId, section, e);
+                        return new HashMap<String, Object>();
+                    }
+                })
+                .orElseGet(HashMap::new);
+    }
+
     /**
      * 从Map中获取嵌套值，同时支持扁平key和嵌套Map两种格式。
      * 例如 getNestedValue(map, "training_workflow", "mode") 会尝试:
@@ -1037,5 +1561,61 @@ public class TaskConfigService {
             }
         }
         return current;
+    }
+
+    /**
+     * 测试 LLM 连接
+     * 使用 OpenAI 兼容格式发送最小请求，验证 model/base_url/api_key 是否可用。
+     */
+    public Map<String, Object> testLlmConnection(Long userId, Map<String, String> params) {
+        String baseUrl = params.getOrDefault("base_url", "").trim();
+        String model = params.getOrDefault("model", "").trim();
+        String apiKey = params.getOrDefault("api_key", "").trim();
+        double temperature = toDouble(params.get("temperature"), 0.2);
+        int maxTokens = toInt(params.get("max_tokens"), 256);
+        int timeoutSeconds = toInt(params.get("timeout_seconds"), 30);
+
+        if (baseUrl.isEmpty() || model.isEmpty() || apiKey.isEmpty()) {
+            return Map.of("success", false, "message", "请先填写 API 地址、模型名称和 API Key");
+        }
+
+        String chatUrl = baseUrl.endsWith("/") ? baseUrl + "chat/completions" : baseUrl + "/chat/completions";
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("model", model);
+        body.put("messages", List.of(Map.of("role", "user", "content", "hello")));
+        body.put("temperature", temperature);
+        body.put("max_tokens", maxTokens);
+        body.put("stream", false);
+
+        String requestBody;
+        try {
+            requestBody = objectMapper.writeValueAsString(body);
+        } catch (JsonProcessingException e) {
+            return Map.of("success", false, "message", "构造请求失败: " + e.getMessage());
+        }
+
+        HttpClient client = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(Math.min(timeoutSeconds, 60)))
+                .build();
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(chatUrl))
+                .header("Content-Type", "application/json")
+                .header("Authorization", "Bearer " + apiKey)
+                .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                .timeout(Duration.ofSeconds(Math.min(timeoutSeconds, 60)))
+                .build();
+
+        try {
+            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            int statusCode = response.statusCode();
+            if (statusCode >= 200 && statusCode < 300) {
+                return Map.of("success", true, "message", "连接成功（HTTP " + statusCode + ")");
+            }
+            String snippet = response.body();
+            if (snippet.length() > 300) snippet = snippet.substring(0, 300);
+            return Map.of("success", false, "message", "HTTP " + statusCode + ": " + snippet);
+        } catch (Exception e) {
+            return Map.of("success", false, "message", "请求异常: " + e.getMessage());
+        }
     }
 }

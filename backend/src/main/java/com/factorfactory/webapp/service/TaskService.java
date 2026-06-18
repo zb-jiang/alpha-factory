@@ -4,9 +4,11 @@ import com.factorfactory.webapp.config.StagingProperties;
 import com.factorfactory.webapp.dto.TaskCreateRequest;
 import com.factorfactory.webapp.dto.TaskResponse;
 import com.factorfactory.webapp.entity.Task;
+import com.factorfactory.webapp.entity.User;
 import com.factorfactory.webapp.exception.BusinessException;
 import com.factorfactory.webapp.repository.TaskConfigRepository;
 import com.factorfactory.webapp.repository.TaskRepository;
+import com.factorfactory.webapp.repository.UserRepository;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
@@ -28,6 +30,7 @@ public class TaskService {
 
     private final TaskRepository taskRepository;
     private final TaskConfigRepository taskConfigRepository;
+    private final UserRepository userRepository;
     private final StagingProperties stagingProperties;
     private final GlobalConfigService globalConfigService;
     private final SystemConfigService systemConfigService;
@@ -50,8 +53,13 @@ public class TaskService {
             throw new BusinessException("任务名称已存在: " + request.getTaskName());
         }
 
+        String username = userRepository.findById(userId)
+                .map(User::getUsername)
+                .orElseThrow(() -> new BusinessException("用户不存在: " + userId));
+        String sanitizedUsername = username.replaceAll("[^a-zA-Z0-9_\\-\\u4e00-\\u9fa5]", "_");
+
         String stagingPath = Paths.get(stagingProperties.getRootDir(),
-                String.valueOf(userId), request.getTaskName()).toString();
+                sanitizedUsername, request.getTaskName()).toString();
 
         Path configDir = Paths.get(stagingPath, "config");
         try {
@@ -64,8 +72,8 @@ public class TaskService {
             Files.createDirectories(Paths.get(stagingPath, "outputs", "train_windows"));
             Files.createDirectories(Paths.get(stagingPath, "joinquant"));
 
-            // 新建任务时从模板复制配置（运行时才从DB merge）
-            copyTemplateConfigs(configDir);
+            // 创建任务时只创建空 config 目录，不复制模板；
+            // 启动任务时由 generateConfigCopy() 从 DB 生成并覆盖全部 YAML。
         } catch (IOException e) {
             throw new BusinessException("创建 staging 目录失败: " + e.getMessage());
         }
@@ -134,16 +142,39 @@ public class TaskService {
 
             // 2. merge analysis_rule.yaml
             Map<String, Object> analysisConfig = mergeAnalysisConfig(taskId);
+            // 补充 Tushare 数据配置中的复权口径和预处理设置
+            Map<String, Object> tushareForAnalysis = taskConfigRepository
+                    .findByTaskIdAndSection(taskId, TaskConfigService.TAB_TUSHARE)
+                    .map(this::parseConfigValue)
+                    .orElseGet(HashMap::new);
+            if (tushareForAnalysis.containsKey("price_adjust")) {
+                analysisConfig.put("price_adjust", tushareForAnalysis.get("price_adjust"));
+            }
+            if (tushareForAnalysis.containsKey("price_adjust_reference_date")) {
+                analysisConfig.put("price_adjust_reference_date", tushareForAnalysis.get("price_adjust_reference_date"));
+            }
+            if (tushareForAnalysis.containsKey("preprocess")) {
+                analysisConfig.put("preprocess", tushareForAnalysis.get("preprocess"));
+            }
+            // 补充股票池配置
+            Map<String, Object> stockPoolForAnalysis = taskConfigRepository
+                    .findByTaskIdAndSection(taskId, TaskConfigService.TAB_STOCK_POOL)
+                    .map(this::parseConfigValue)
+                    .orElseGet(HashMap::new);
+            if (stockPoolForAnalysis.containsKey("stock_pool")) {
+                analysisConfig.put("stock_pool", stockPoolForAnalysis.get("stock_pool"));
+            }
             writeYaml(configDir.resolve("analysis_rule.yaml"), analysisConfig);
 
             // 3. merge backtest_rule.yaml
             Map<String, Object> backtestConfig = mergeBacktestConfig(taskId);
             writeYaml(configDir.resolve("backtest_rule.yaml"), backtestConfig);
 
-            // 4. 复制 feature_pool.yaml（代码级，不从DB读取）
-            copyTemplateConfig(configDir, "feature_pool.yaml");
-            copyTemplateConfig(configDir, "feature_pool_combination.yaml");
-            copyTemplateConfig(configDir, "feature_pool_extended.yaml");
+            // 4. merge feature_pool.yaml
+            Map<String, Object> featurePoolConfig = mergeFeaturePoolConfig(taskId);
+            writeYaml(configDir.resolve("feature_pool.yaml"), featurePoolConfig);
+            copyTemplateConfigOverwrite(configDir, "feature_pool_combination.yaml");
+            copyTemplateConfigOverwrite(configDir, "feature_pool_extended.yaml");
 
             // 5. merge market_context.yaml
             Map<String, Object> marketConfig = mergeMarketConfig(taskId);
@@ -180,40 +211,39 @@ public class TaskService {
         tushare.put("enable_meta_reconcile", true);
         result.put("tushare", tushare);
 
-        // 任务级：数据参数
+        // 任务级：Tushare 数据配置
+        Map<String, Object> tushareParams = taskConfigRepository
+                .findByTaskIdAndSection(taskId, TaskConfigService.TAB_TUSHARE)
+                .map(this::parseConfigValue)
+                .orElseGet(HashMap::new);
+        if (tushareParams.containsKey("placeholder_expire_days")) {
+            tushare.put("placeholder_expire_days", tushareParams.get("placeholder_expire_days"));
+        } else {
+            tushare.put("placeholder_expire_days", 3);
+        }
+        tushare.put("enable_meta_reconcile", tushareParams.getOrDefault("enable_meta_reconcile", true));
+        result.put("freq", tushareParams.getOrDefault("freq", "day"));
+
+        // 任务级：数据参数（采样）
         Map<String, Object> dataParams = taskConfigRepository
                 .findByTaskIdAndSection(taskId, TaskConfigService.TAB_DATA)
                 .map(this::parseConfigValue)
                 .orElseGet(HashMap::new);
-        if (dataParams.containsKey("placeholder_expire_days")) {
-            tushare.put("placeholder_expire_days", dataParams.get("placeholder_expire_days"));
-        } else {
-            tushare.put("placeholder_expire_days", 3);
+        result.put("max_instruments", dataParams.getOrDefault("max_instruments", 0));
+        if (dataParams.containsKey("sample_instrument") && !String.valueOf(dataParams.get("sample_instrument")).isBlank()) {
+            result.put("sample_instrument", dataParams.get("sample_instrument"));
         }
-        result.put("freq", dataParams.getOrDefault("freq", "day"));
 
         // 任务级：LLM 参数
         Map<String, Object> llmParams = taskConfigRepository
                 .findByTaskIdAndSection(taskId, TaskConfigService.TAB_LLM)
                 .map(this::parseConfigValue)
                 .orElseGet(HashMap::new);
-        result.put("enable_multi_agent", true); // Webapp 强制多Agent模式
+        result.put("llm_candidate_count", llmParams.getOrDefault("llm_candidate_count", 10));
 
         // 将扁平的 llm_agents.agent_key.field 结构转换为嵌套的 llm_agents 结构
         Map<String, Object> llmAgents = buildLlmAgentsConfig(llmParams);
         result.put("llm_agents", llmAgents);
-
-        // 兼容：从第一个agent提取全局默认值
-        if (!llmAgents.isEmpty()) {
-            Map<String, Object> firstAgent = (Map<String, Object>) llmAgents.values().iterator().next();
-            result.put("llm_model", firstAgent.getOrDefault("model", ""));
-            result.put("llm_base_url", firstAgent.getOrDefault("base_url", ""));
-            result.put("llm_api_key", firstAgent.getOrDefault("api_key", ""));
-        } else {
-            result.put("llm_model", llmParams.getOrDefault("llm_model", ""));
-            result.put("llm_base_url", llmParams.getOrDefault("llm_base_url", ""));
-            result.put("llm_api_key", llmParams.getOrDefault("llm_api_key", ""));
-        }
 
         // 任务级：预筛门槛
         Map<String, Object> prescreen = taskConfigRepository
@@ -225,11 +255,16 @@ public class TaskService {
         result.put("min_positive_ic_ratio", prescreen.getOrDefault("min_positive_ic_ratio", 0.4));
         result.put("enable_direction_filter", prescreen.getOrDefault("enable_direction_filter", false));
 
-        // 特征体检参数
-        result.put("summary_top_k", prescreen.getOrDefault("summary_top_k", 3));
-        result.put("unstable_top_k", prescreen.getOrDefault("unstable_top_k", 3));
-        result.put("high_corr_threshold", prescreen.getOrDefault("high_corr_threshold", 0.5));
-        result.put("max_missing_ratio", prescreen.getOrDefault("max_missing_ratio", 0.2));
+        // 任务级：特征体检参数（从原始字段与特征值 Tab 读取）
+        Map<String, Object> featurePool = taskConfigRepository
+                .findByTaskIdAndSection(taskId, TaskConfigService.TAB_FEATURE_POOL)
+                .map(this::parseConfigValue)
+                .orElseGet(HashMap::new);
+        result.put("summary_top_k", featurePool.getOrDefault("summary_top_k", 3));
+        result.put("unstable_top_k", featurePool.getOrDefault("unstable_top_k", 3));
+        result.put("high_corr_threshold", featurePool.getOrDefault("high_corr_threshold", 0.5));
+        result.put("max_missing_ratio", featurePool.getOrDefault("max_missing_ratio", 0.2));
+        result.put("fundamental_health_top_k", featurePool.getOrDefault("fundamental_health_top_k", 5));
 
         return result;
     }
@@ -239,6 +274,26 @@ public class TaskService {
                 .findByTaskIdAndSection(taskId, TaskConfigService.TAB_ANALYSIS)
                 .map(this::parseConfigValue)
                 .orElseGet(LinkedHashMap::new);
+    }
+
+    private Map<String, Object> mergeFeaturePoolConfig(Long taskId) {
+        Map<String, Object> dbValues = taskConfigRepository
+                .findByTaskIdAndSection(taskId, TaskConfigService.TAB_FEATURE_POOL)
+                .map(this::parseConfigValue)
+                .orElseGet(LinkedHashMap::new);
+        // 以 runtime/config/feature_pool.yaml 模板为基底，用 DB 中的 enable_chip_features 覆盖
+        Path template = Paths.get(stagingProperties.getConfigTemplateDir(), "feature_pool.yaml");
+        Map<String, Object> result = new LinkedHashMap<>();
+        if (Files.exists(template)) {
+            try {
+                ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory());
+                result = yamlMapper.readValue(template.toFile(), new TypeReference<>() {});
+            } catch (IOException e) {
+                log.warn("读取 feature_pool.yaml 模板失败: {}", e.getMessage());
+            }
+        }
+        result.put("enable_chip_features", dbValues.getOrDefault("enable_chip_features", false));
+        return result;
     }
 
     private Map<String, Object> mergeBacktestConfig(Long taskId) {
@@ -294,7 +349,7 @@ public class TaskService {
                         case "llm_base_url" -> "base_url";
                         case "llm_model" -> "model";
                         case "llm_api_key" -> "api_key";
-                        default -> fieldName; // temperature, timeout_seconds, max_retries
+                        default -> fieldName; // temperature, max_tokens, timeout_seconds, max_retries, enable
                     };
 
                     if (yamlField != null) {
@@ -324,32 +379,12 @@ public class TaskService {
         yamlMapper.writeValue(filePath.toFile(), data);
     }
 
-    private void copyTemplateConfig(Path configDir, String fileName) throws IOException {
+    private void copyTemplateConfigOverwrite(Path configDir, String fileName) throws IOException {
         Path templateDir = Paths.get(stagingProperties.getConfigTemplateDir());
         Path source = templateDir.resolve(fileName);
         Path target = configDir.resolve(fileName);
-        if (Files.exists(source) && !Files.exists(target)) {
-            Files.copy(source, target);
-        }
-    }
-
-    private void copyTemplateConfigs(Path configDir) throws IOException {
-        Path templateDir = Paths.get(stagingProperties.getConfigTemplateDir());
-        if (!Files.exists(templateDir)) {
-            log.warn("Config template directory not found: {}, skipping copy", templateDir);
-            return;
-        }
-        List<String> configFiles = List.of(
-                "env.yaml", "analysis_rule.yaml", "backtest_rule.yaml",
-                "feature_pool.yaml", "feature_pool_combination.yaml", "feature_pool_extended.yaml",
-                "market_context.yaml", "score.yaml", "selector.yaml"
-        );
-        for (String configFile : configFiles) {
-            Path source = templateDir.resolve(configFile);
-            Path target = configDir.resolve(configFile);
-            if (Files.exists(source) && !Files.exists(target)) {
-                Files.copy(source, target);
-            }
+        if (Files.exists(source)) {
+            Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
         }
     }
 

@@ -31,7 +31,7 @@
         <!-- Sidebar Tabs -->
         <div class="config-tabs">
           <div
-            v-for="tab in tabs"
+            v-for="(tab, index) in tabs"
             :key="tab.section"
             :class="['tab-item', { active: activeTab === tab.section }]"
             @click="switchTab(tab.section)"
@@ -40,7 +40,10 @@
               <component :is="tabIcon(tab.sectionIcon)" />
             </el-icon>
             <div class="tab-info">
-              <span class="tab-label">{{ tab.sectionLabel }}</span>
+              <span class="tab-label">
+                <span class="tab-badge">{{ index + 1 }}</span>
+                {{ tab.sectionLabel }}
+              </span>
               <span class="tab-desc">{{ tab.sectionDescription }}</span>
             </div>
             <span v-if="hasChanges(tab.section)" class="tab-dot"></span>
@@ -62,7 +65,7 @@
               </div>
               <!-- 普通配置组 -->
               <div v-else class="form-group">
-                <div class="group-header">
+                <div class="group-header" v-if="group.label">
                   <div class="group-title">
                     <el-icon size="16" v-if="group.icon">
                       <component :is="group.icon" />
@@ -100,16 +103,20 @@
                     :class="['field-item', { 'field-full': isFullWidth(field.type) }]"
                     v-show="isFieldVisible(field)"
                   >
-                  <div class="field-label-row">
+                  <div class="field-label-row" v-if="field.label">
                     <label class="field-label">{{ field.label }}</label>
                     <span v-if="field.required" class="required-mark">*</span>
                     <el-tag v-if="field.source === 'global'" size="small" type="warning" effect="light" class="source-tag">全局</el-tag>
                     <el-tag v-else-if="field.source === 'user'" size="small" type="success" effect="light" class="source-tag">个人</el-tag>
                   </div>
                   <div class="field-control">
+                    <!-- 特征池预览 -->
+                    <div v-if="field.type === 'feature_pool_preview'" class="feature-pool-preview">
+                      <FeaturePoolPreview :data="formValues[field.key]" />
+                    </div>
                     <!-- 开关 -->
                     <el-switch
-                      v-if="field.type === 'switch'"
+                      v-else-if="field.type === 'switch'"
                       v-model="formValues[field.key]"
                       :disabled="!isEditable"
                     />
@@ -148,7 +155,7 @@
                       @change="handleSelectChange(field, $event)"
                     >
                       <el-option
-                        v-for="opt in field.options"
+                        v-for="opt in getFilteredOptions(field)"
                         :key="opt.value"
                         :label="opt.label"
                         :value="opt.value"
@@ -186,6 +193,17 @@
                       size="large"
                       style="width: 100%"
                     />
+                    <!-- 多行文本 -->
+                    <el-input
+                      v-else-if="field.type === 'textarea'"
+                      v-model="formValues[field.key]"
+                      type="textarea"
+                      :rows="4"
+                      :placeholder="field.placeholder"
+                      :disabled="!isEditable"
+                      size="large"
+                      style="width: 100%"
+                    />
                     <!-- 文本 -->
                     <el-input
                       v-else
@@ -212,16 +230,18 @@ import { ref, computed, onMounted, watch, markRaw } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
   ArrowLeft, Check, DataAnalysis, ChatDotRound, TrendCharts, Sunrise, Aim, Filter, Coin, Timer, Flag, UserFilled, DataLine, ScaleToOriginal,
-  Calendar, Operation, Money, MagicStick,
+  Calendar, Operation, Money, MagicStick, Top, FirstAidKit, DataBoard, Scissor,
+  RefreshLeft, Lightning, Histogram, View, Discount, Medal, Wallet,
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { getTask, type TaskResponse } from '../api/task'
 import {
   getTaskConfigTabs, getTaskConfigTab, updateTaskConfigTab, testLlmConnection,
-  type StructuredConfigResponse, type ConfigField,
+  type StructuredConfigResponse, type ConfigField, type SelectOption,
 } from '../api/config'
 import { getSystemConfig } from '../api/config'
 import AppLayout from '../components/AppLayout.vue'
+import FeaturePoolPreview from '../components/FeaturePoolPreview.vue'
 
 const ICON_MAP: Record<string, any> = {
   DataAnalysis: markRaw(DataAnalysis),
@@ -240,6 +260,17 @@ const ICON_MAP: Record<string, any> = {
   Operation: markRaw(Operation),
   Money: markRaw(Money),
   MagicStick: markRaw(MagicStick),
+  Top: markRaw(Top),
+  FirstAidKit: markRaw(FirstAidKit),
+  DataBoard: markRaw(DataBoard),
+  Scissor: markRaw(Scissor),
+  RefreshLeft: markRaw(RefreshLeft),
+  Lightning: markRaw(Lightning),
+  Histogram: markRaw(Histogram),
+  View: markRaw(View),
+  Discount: markRaw(Discount),
+  Medal: markRaw(Medal),
+  Wallet: markRaw(Wallet),
 }
 
 const router = useRouter()
@@ -275,12 +306,26 @@ function tabIcon(iconName?: string) {
 }
 
 function isFullWidth(type: string) {
-  return ['slider', 'tag_select'].includes(type)
+  return ['slider', 'tag_select', 'feature_pool_preview'].includes(type)
 }
 
 function isFieldVisible(field: ConfigField) {
   if (!field.showWhenKey) return true
-  return formValues.value[field.showWhenKey] === field.showWhenValue
+  const val = formValues.value[field.showWhenKey]
+  const when = field.showWhenValue
+  if (Array.isArray(when)) {
+    return when.includes(val)
+  }
+  return val === when
+}
+
+function getFilteredOptions(field: ConfigField): SelectOption[] {
+  if (!field.options) return []
+  if (!field.optionFilterKey || !field.optionFilterMap) return field.options
+  const filterVal = formValues.value[field.optionFilterKey]
+  const allowed = field.optionFilterMap[filterVal]
+  if (!allowed) return field.options
+  return field.options.filter(opt => allowed.includes(String(opt.value)))
 }
 
 function hasChanges(section: string) {
@@ -294,6 +339,21 @@ function handleSelectChange(field: ConfigField, value: any) {
     const url = providerUrlMap.value[value] || ''
     if (url) {
       formValues.value[urlKey] = url
+    }
+  }
+  // 调仓频率与调仓锚点联动
+  if (field.key === 'rebalance') {
+    const anchor = formValues.value['rebalance_anchor']
+    if (value === 'weekly') {
+      const monthlyAnchors = ['first_trading_day_of_month', 'last_trading_day_of_month']
+      if (monthlyAnchors.includes(anchor)) {
+        formValues.value['rebalance_anchor'] = 'first_trading_day_of_week'
+      }
+    } else if (value === 'monthly') {
+      const weeklyAnchors = ['first_trading_day_of_week', 'last_trading_day_of_week']
+      if (weeklyAnchors.includes(anchor)) {
+        formValues.value['rebalance_anchor'] = 'first_trading_day_of_month'
+      }
     }
   }
 }
@@ -346,6 +406,9 @@ async function testAgentConnection(groupName: string) {
   const baseUrl = String(formValues.value[`${prefix}.llm_base_url`] || '').trim()
   const model = String(formValues.value[`${prefix}.llm_model`] || '').trim()
   const apiKey = String(formValues.value[`${prefix}.llm_api_key`] || '').trim()
+  const temperature = Number(formValues.value[`${prefix}.temperature`] ?? 0.2)
+  const maxTokens = Number(formValues.value[`${prefix}.max_tokens`] ?? 8192)
+  const timeoutSeconds = Number(formValues.value[`${prefix}.timeout_seconds`] ?? 60)
 
   if (!baseUrl || !model || !apiKey) {
     testResults.value[groupName] = { success: false, message: '请先填写 API 地址、模型名称和 API Key' }
@@ -356,7 +419,14 @@ async function testAgentConnection(groupName: string) {
   delete testResults.value[groupName]
 
   try {
-    const res = await testLlmConnection(taskId.value, { base_url: baseUrl, model, api_key: apiKey })
+    const res = await testLlmConnection(taskId.value, {
+      base_url: baseUrl,
+      model,
+      api_key: apiKey,
+      temperature,
+      max_tokens: maxTokens,
+      timeout_seconds: timeoutSeconds,
+    })
     testResults.value[groupName] = res.data
   } catch (e: any) {
     testResults.value[groupName] = { success: false, message: e?.response?.data?.message || e?.message || '请求失败' }
@@ -584,6 +654,28 @@ onMounted(async () => {
   font-size: 14px;
   font-weight: 500;
   line-height: 1.3;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tab-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--sb-primary);
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+
+.tab-item.active .tab-badge {
+  background: var(--sb-primary-dark);
 }
 
 .tab-desc {

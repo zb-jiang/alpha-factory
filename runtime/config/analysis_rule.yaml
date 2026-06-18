@@ -117,6 +117,7 @@ label:
   # 当前仅支持 period_return。
   return_type: period_return
   # 收益标签使用的价格列；当前 period_return 会按该价格列计算相邻调仓观测日之间的收益。
+  # 支持：close（收盘价）、open（开盘价）、high（最高价）、low（最低价）、vwap（VWAP）。
   price_field: close
 
 # 【7. 预处理设置（按日期截面执行）】

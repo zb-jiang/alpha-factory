@@ -10,11 +10,6 @@
             </el-button>
             <div>
               <h1>{{ task?.taskName || '加载中...' }}</h1>
-              <div class="header-meta">
-                <el-tag v-if="task" :class="statusClass" size="small" effect="light">{{ statusLabel }}</el-tag>
-                <span v-if="task?.currentStep" class="header-desc">当前 Step {{ task.currentStep }}</span>
-                <span class="header-desc">PID: {{ task?.pid || '-' }}</span>
-              </div>
             </div>
           </div>
           <div class="header-actions">
@@ -31,9 +26,10 @@
                 <el-icon><VideoPlay /></el-icon> 启动
               </el-button>
             </template>
+            <el-divider direction="vertical" class="action-divider" />
             <el-popconfirm title="确定删除此任务？Staging目录将一并删除" @confirm="handleDelete">
               <template #reference>
-                <el-button size="large" text type="danger">
+                <el-button size="large" text type="danger" class="delete-btn">
                   <el-icon><Delete /></el-icon>
                 </el-button>
               </template>
@@ -62,19 +58,7 @@
               <!-- Overview -->
               <div v-if="activeTab === 'overview'" class="tab-content">
                 <div class="info-grid">
-                  <div class="info-item">
-                    <span class="info-label">任务状态</span>
-                    <el-tag :class="statusClass" size="small" effect="light">{{ statusLabel }}</el-tag>
-                  </div>
-                  <div class="info-item">
-                    <span class="info-label">当前 Step</span>
-                    <span class="info-value">{{ task?.currentStep ? `Step ${task.currentStep}` : '-' }}</span>
-                  </div>
-                  <div class="info-item">
-                    <span class="info-label">进程 PID</span>
-                    <span class="info-value">{{ task?.pid || '-' }}</span>
-                  </div>
-                  <div class="info-item">
+                  <div class="info-item" style="grid-column: span 3;">
                     <span class="info-label">创建时间</span>
                     <span class="info-value">{{ formatDateTime(task?.createdAt || null) }}</span>
                   </div>
@@ -352,7 +336,26 @@ onUnmounted(() => {
 
 .header-actions {
   display: flex;
-  gap: 10px;
+  align-items: center;
+  gap: 12px;
+}
+
+.header-actions .el-button {
+  min-width: 88px;
+}
+
+.header-actions .el-button + .el-button {
+  margin-left: 0;
+}
+
+.header-actions .action-divider {
+  height: 24px;
+  margin: 0 4px;
+}
+
+.header-actions .delete-btn {
+  padding: 10px 14px;
+  font-size: 16px;
 }
 
 .detail-tabs {

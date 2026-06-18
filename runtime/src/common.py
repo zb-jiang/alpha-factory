@@ -1933,6 +1933,8 @@ def compute_feature_corr(feature_frame: pd.DataFrame, label_name: str) -> pd.Dat
 
 
 def compute_fundamental_feature_health(feature_frame: pd.DataFrame, label_name: str) -> dict[str, Any]:
+    cfg = env_config()
+    top_k = int(cfg.get("fundamental_health_top_k", 5))
     available = [name for name in FUNDAMENTAL_FEATURE_NAMES if name in feature_frame.columns]
     label = feature_frame[label_name]
     rows: list[dict[str, Any]] = []
@@ -1980,7 +1982,7 @@ def compute_fundamental_feature_health(feature_frame: pd.DataFrame, label_name: 
     return {
         "description": "基本面分析师专用体检：对基本面/风格相关特征单独计算与标签的相关性，以及按日横截面 top20% - bottom20% 的平均标签收益差，避免基本面特征被全局短期相关性排序淹没。",
         "features": rows,
-        "top_long_short_features": [item["feature_name"] for item in rows[:5]],
+        "top_long_short_features": [item["feature_name"] for item in rows[:top_k]],
     }
 
 

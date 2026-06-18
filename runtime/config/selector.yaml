@@ -1,6 +1,11 @@
 # ==============================================================================
 # 训练窗口选择器配置（selector.yaml）
 # 用途：为当前 test 窗口推荐“连续 N 个月”的历史训练窗口（仅出报告，不自动改 analysis_rule.yaml）
+#
+# 市场环境相似度计算目前已对齐 step03_market_context.py，采用 13 个维度：
+#   趋势、波动、流动性、分化、广度、风格、
+#   北向资金、两融情绪、资金结构、
+#   利率方向、宏观流动性、经济周期、通胀方向
 # ==============================================================================
 
 # 回看历史年数。
@@ -31,7 +36,6 @@ score_similarity_weight: 0.7
 # 建议与 score_similarity_weight 之和为 1.0。
 score_coverage_weight: 0.3
 
-# 是否在 selector 运行时临时关闭动态成分股。
-# true: 仅 selector 内部关闭 dynamic_membership，可显著减少指数成分逐日回溯请求，避免长时间等待。
-# false: 保持 analysis_rule.yaml 中的 dynamic_membership 设置，口径更严格但耗时可能明显增加。
+# true: 关闭 dynamic_membership，可显著减少指数成分逐日回溯请求，避免长时间等待。
+# false: 打开 dynamic_membership，口径更严格但耗时可能明显增加。
 disable_dynamic_membership: true

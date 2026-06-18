@@ -88,6 +88,10 @@ public class StructuredConfigResponse {
         /** 条件显示：当指定key的值等于指定值时才显示 */
         private String showWhenKey;
         private Object showWhenValue;
+        /** 选项过滤：用哪个字段的值来过滤当前select的options */
+        private String optionFilterKey;
+        /** 选项过滤映射：字段值 -> 允许显示的option value列表 */
+        private Map<String, List<String>> optionFilterMap;
     }
 
     @Data

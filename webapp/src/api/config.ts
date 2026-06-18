@@ -28,6 +28,8 @@ export interface ConfigField {
   source?: 'global' | 'user' | 'task'
   showWhenKey?: string
   showWhenValue?: any
+  optionFilterKey?: string
+  optionFilterMap?: Record<string, string[]>
 }
 
 export interface ConfigGroup {
