@@ -248,7 +248,6 @@ onUnmounted(() => {
           <template #header>
             <div class="card-header">
               <span class="span-title">{{ span }} 个月窗口</span>
-              <el-tag v-if="windows.some(w => w.isBest)" type="success" effect="dark" size="small">全局最优</el-tag>
             </div>
           </template>
 
@@ -267,7 +266,10 @@ onUnmounted(() => {
                 {{ idx + 1 }}
               </div>
               <div class="window-info">
-                <div class="window-date">{{ win.start }} ~ {{ win.end }}</div>
+                <div class="window-date">
+                  {{ win.start }} ~ {{ win.end }}
+                  <el-tag v-if="win.isBest" type="success" effect="dark" size="small" class="best-tag">全局最优</el-tag>
+                </div>
                 <div class="window-score">
                   <el-progress
                     :percentage="Math.min(Math.round(win.score * 100), 100)"
@@ -280,9 +282,11 @@ onUnmounted(() => {
               </div>
               <el-radio
                 :model-value="selected?.start === win.start && selected?.end === win.end && selected?.span === Number(span)"
-                :label="true"
+                :value="true"
                 class="window-radio"
-              />
+              >
+                <span></span>
+              </el-radio>
             </div>
           </div>
         </el-card>
@@ -469,6 +473,13 @@ onUnmounted(() => {
   font-weight: 500;
   color: #303133;
   margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.best-tag {
+  flex-shrink: 0;
 }
 
 .window-score {

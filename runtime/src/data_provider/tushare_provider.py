@@ -1920,42 +1920,94 @@ class TushareProvider(BaseDataProvider):
             return pd.DataFrame()
     
     def get_industry_stocks(self, industry_code: str, date: str = None) -> List[str]:
-        """获取行业成分股
+        """获取申万一级行业成分股
         
         Args:
-            industry_code: 行业代码
-            date: 查询日期
+            industry_code: 申万一级行业名称（如 "电子"、"银行"）
+            date: 查询日期（YYYY-MM-DD 或 YYYYMMDD），用于历史 as-of 过滤；不传则取当前在册成分
         """
         self.initialize()
-        
+
+        # 1. 通过 index_classify 找到申万一级行业的 index_code
         try:
-            # 通过股票基本信息中的 industry 字段筛选
-            stocks = self._call_pro_api(
-                "stock_basic",
-                exchange='',
-                list_status='L',
-                fields='ts_code,symbol,name,industry',
+            classify_df = self._call_pro_api(
+                "index_classify",
+                level="L1",
+                src="SW2021",
+                fields="index_code,industry_name,level,src",
             )
-            
-            if stocks is None or stocks.empty:
-                return []
-            
-            # 筛选指定行业
-            industry_stocks = stocks[stocks['industry'] == industry_code]
-            
-            # 转换为 Qlib 格式
-            instruments = []
-            for _, row in industry_stocks.iterrows():
-                ts_code = row['ts_code']
-                if '.' in ts_code:
-                    code, exchange = ts_code.split('.')
-                    if exchange == 'SH':
-                        instruments.append(f"SH{code}")
-                    elif exchange == 'SZ':
-                        instruments.append(f"SZ{code}")
-            
-            return instruments
-            
         except Exception as e:
-            print(f"获取行业成分股失败: {e}")
+            print(f"获取申万一级行业分类失败（SW2021）: {e}")
+            classify_df = None
+
+        # 兼容老口径：SW2021 取不到时退回 SW2014
+        if classify_df is None or classify_df.empty:
+            try:
+                classify_df = self._call_pro_api(
+                    "index_classify",
+                    level="L1",
+                    src="SW2014",
+                    fields="index_code,industry_name,level,src",
+                )
+            except Exception as e:
+                print(f"获取申万一级行业分类失败（SW2014）: {e}")
+                return []
+
+        if classify_df is None or classify_df.empty:
+            print("警告: index_classify 返回空，无法定位申万一级行业 index_code")
             return []
+
+        match = classify_df[classify_df["industry_name"] == industry_code]
+        if match.empty:
+            available = sorted(classify_df["industry_name"].dropna().unique().tolist())
+            print(
+                f"警告: 申万一级行业中未找到 '{industry_code}'，"
+                f"可选行业（{len(available)} 个）: {available}"
+            )
+            return []
+        index_code = str(match.iloc[0]["index_code"])
+
+        # 2. 通过 index_member 拉取该行业的成分股历史
+        try:
+            members = self._call_pro_api(
+                "index_member",
+                index_code=index_code,
+                fields="index_code,con_code,in_date,out_date,is_new",
+            )
+        except Exception as e:
+            print(f"获取申万一级行业 {industry_code}({index_code}) 成分股失败: {e}")
+            return []
+
+        if members is None or members.empty:
+            print(f"警告: 申万一级行业 {industry_code}({index_code}) 成分股为空")
+            return []
+
+        # 3. 按日期 as-of 过滤
+        target_date = None
+        if date:
+            text = str(date).replace("-", "").strip()
+            if len(text) == 8 and text.isdigit():
+                target_date = text
+
+        if target_date is not None:
+            in_date = members["in_date"].fillna("").astype(str).str.replace("-", "")
+            out_date = members["out_date"].fillna("").astype(str).str.replace("-", "")
+            mask = (in_date <= target_date) & ((out_date == "") | (out_date > target_date))
+            members = members[mask]
+
+        # 4. 转换为本地 instrument 格式（SHxxxxxx / SZxxxxxx）
+        instruments: List[str] = []
+        for ts_code in members["con_code"].dropna().astype(str).tolist():
+            if "." not in ts_code:
+                continue
+            code, exchange = ts_code.split(".")
+            if exchange == "SH":
+                instruments.append(f"SH{code}")
+            elif exchange == "SZ":
+                instruments.append(f"SZ{code}")
+            elif exchange == "BJ":
+                instruments.append(f"BJ{code}")
+
+        # 去重并按代码排序，结果稳定
+        instruments = sorted(set(instruments))
+        return instruments

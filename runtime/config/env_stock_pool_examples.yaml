@@ -50,7 +50,7 @@ example_3_industry:
   stock_pool:
     type: "industry"
     industry_name: "银行"  # 行业名称
-    industry_level: 1  # 行业级别（只支持一级行业分类）
+    industry_level: 1  # 行业级别（只支持申万一级行业分类）
 
 # ==============================================================================
 # 示例 4: 全市场股票池
