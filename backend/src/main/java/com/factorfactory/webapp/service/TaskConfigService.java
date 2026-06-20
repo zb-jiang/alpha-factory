@@ -1,6 +1,7 @@
 package com.factorfactory.webapp.service;
 
 import com.factorfactory.webapp.config.StagingProperties;
+import com.factorfactory.webapp.dto.SelectorApplyRequest;
 import com.factorfactory.webapp.dto.StructuredConfigResponse;
 import com.factorfactory.webapp.dto.StructuredConfigResponse.*;
 import com.factorfactory.webapp.entity.TaskConfig;
@@ -19,11 +20,15 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
+import java.time.LocalDate;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * 任务级配置服务
@@ -39,6 +44,8 @@ public class TaskConfigService {
     private final GlobalConfigService globalConfigService;
     private final SystemConfigService systemConfigService;
     private final StagingProperties stagingProperties;
+    private final ExecutionService executionService;
+    private final TaskService taskService;
 
     // Tab 分区名
     public static final String TAB_ANALYSIS = "analysis_rule";
@@ -51,29 +58,34 @@ public class TaskConfigService {
     public static final String TAB_SELECTOR = "selector";
     public static final String TAB_PRESCREEN = "prescreen";
     public static final String TAB_SCORE = "score";
-    public static final String TAB_DATA = "data_params";
     public static final String TAB_TUSHARE = "tushare";
 
     public List<StructuredConfigResponse> getAllTabs(Long userId, Long taskId) {
-        return List.of(
+        // 查询该任务已在数据库中保存过的 section
+        Set<String> savedSections = taskConfigRepository.findByTaskId(taskId).stream()
+                .map(TaskConfig::getSection)
+                .collect(Collectors.toSet());
+
+        List<StructuredConfigResponse> tabs = List.of(
                 buildFeaturePoolTab(taskId),
                 buildStockPoolTab(taskId),
                 buildTushareTab(taskId),
                 buildMarketTab(taskId),
                 buildLabelTab(taskId),
-                buildAnalysisTab(taskId),
-                buildLlmTab(userId, taskId),
+                buildPrescreenScoreTab(taskId),
                 buildBacktestTab(taskId),
-                buildSelectorTab(taskId),
-                buildPrescreenTab(taskId),
-                buildScoreTab(taskId),
-                buildDataTab(taskId)
+                buildLlmTab(userId, taskId),
+                buildSelectorTab(taskId)
         );
+
+        for (StructuredConfigResponse tab : tabs) {
+            tab.setSaved(savedSections.contains(tab.getSection()));
+        }
+        return tabs;
     }
 
     public StructuredConfigResponse getTab(Long userId, Long taskId, String tab) {
         return switch (tab) {
-            case TAB_ANALYSIS -> buildAnalysisTab(taskId);
             case TAB_STOCK_POOL -> buildStockPoolTab(taskId);
             case TAB_TUSHARE -> buildTushareTab(taskId);
             case TAB_FEATURE_POOL -> buildFeaturePoolTab(taskId);
@@ -82,9 +94,7 @@ public class TaskConfigService {
             case TAB_MARKET -> buildMarketTab(taskId);
             case TAB_LABEL -> buildLabelTab(taskId);
             case TAB_SELECTOR -> buildSelectorTab(taskId);
-            case TAB_PRESCREEN -> buildPrescreenTab(taskId);
-            case TAB_SCORE -> buildScoreTab(taskId);
-            case TAB_DATA -> buildDataTab(taskId);
+            case TAB_PRESCREEN -> buildPrescreenScoreTab(taskId);
             default -> throw new IllegalArgumentException("无效的配置分区: " + tab);
         };
     }
@@ -108,14 +118,282 @@ public class TaskConfigService {
             validateMarketContext(filtered);
         }
 
+        // 窗口选择 Tab：test 日期与迭代轮数属于 analysis_rule，同步保存到 analysis_rule section
+        if (TAB_SELECTOR.equals(tab)) {
+            validateSelector(filtered);
+            Map<String, Object> analysisValues = getSectionMap(taskId, TAB_ANALYSIS);
+            boolean changed = false;
+            if (filtered.containsKey("test_start_date")) {
+                analysisValues.put("test_start_date", filtered.get("test_start_date"));
+                changed = true;
+            }
+            if (filtered.containsKey("test_end_date")) {
+                analysisValues.put("test_end_date", filtered.get("test_end_date"));
+                changed = true;
+            }
+            if (filtered.containsKey("iteration_count")) {
+                analysisValues.put("iteration_count", filtered.get("iteration_count"));
+                changed = true;
+            }
+            if (filtered.containsKey("manual_train_start_date")) {
+                analysisValues.put("train_start_date", filtered.get("manual_train_start_date"));
+                changed = true;
+            }
+            if (filtered.containsKey("manual_train_end_date")) {
+                analysisValues.put("train_end_date", filtered.get("manual_train_end_date"));
+                changed = true;
+            }
+            // training_workflow 参数同步到 analysis_rule
+            if (filtered.containsKey("training_workflow.mode")) {
+                Object twRaw = analysisValues.get("training_workflow");
+                Map<String, Object> tw = twRaw instanceof Map ? (Map<String, Object>) twRaw : new LinkedHashMap<>();
+                tw.put("mode", filtered.get("training_workflow.mode"));
+                // 同步 static_split / walk_forward 子参数
+                for (Map.Entry<String, Object> entry : filtered.entrySet()) {
+                    String key = entry.getKey();
+                    if (key.startsWith("training_workflow.static_split.")) {
+                        Object ssRaw = tw.get("static_split");
+                        Map<String, Object> ss = ssRaw instanceof Map ? (Map<String, Object>) ssRaw : new LinkedHashMap<>();
+                        ss.put(key.substring("training_workflow.static_split.".length()), entry.getValue());
+                        tw.put("static_split", ss);
+                    }
+                    if (key.startsWith("training_workflow.walk_forward.")) {
+                        Object wfRaw = tw.get("walk_forward");
+                        Map<String, Object> wf = wfRaw instanceof Map ? (Map<String, Object>) wfRaw : new LinkedHashMap<>();
+                        wf.put(key.substring("training_workflow.walk_forward.".length()), entry.getValue());
+                        tw.put("walk_forward", wf);
+                    }
+                }
+                analysisValues.put("training_workflow", tw);
+                changed = true;
+            }
+            if (changed) {
+                saveSection(taskId, TAB_ANALYSIS, analysisValues);
+            }
+            // 以下字段不属于 selector 算法配置，不应保存到 selector section
+            filtered.remove("test_start_date");
+            filtered.remove("test_end_date");
+            filtered.remove("iteration_count");
+            filtered.remove("train_window_source");
+            filtered.remove("manual_train_start_date");
+            filtered.remove("manual_train_end_date");
+            // training_workflow 已经同步到 analysis_rule，不应保留在 selector
+            filtered.entrySet().removeIf(entry -> entry.getKey().startsWith("training_workflow."));
+        }
+
+        // 因子初筛与打分规则 Tab：拆分保存到 prescreen 和 score 两个 section
+        if (TAB_PRESCREEN.equals(tab)) {
+            validateScoreWeights(filtered);
+            Map<String, Object> prescreenValues = new LinkedHashMap<>();
+            Map<String, Object> scoreValues = new LinkedHashMap<>();
+            for (Map.Entry<String, Object> entry : filtered.entrySet()) {
+                String key = entry.getKey();
+                if (key.startsWith("weights.") || key.equals("negative_return_penalty")) {
+                    scoreValues.put(key, entry.getValue());
+                } else {
+                    prescreenValues.put(key, entry.getValue());
+                }
+            }
+            saveSection(taskId, TAB_PRESCREEN, prescreenValues);
+            saveSection(taskId, TAB_SCORE, scoreValues);
+            return;
+        }
+
         TaskConfig config = taskConfigRepository.findByTaskIdAndSection(taskId, tab)
                 .orElseGet(() -> TaskConfig.builder().taskId(taskId).section(tab).build());
         try {
-            config.setValue(objectMapper.writeValueAsString(filtered));
+            config.setValue(objectMapper.writeValueAsString(sanitizeDoubles(filtered)));
         } catch (JsonProcessingException e) {
             throw new RuntimeException("配置序列化失败", e);
         }
         taskConfigRepository.save(config);
+    }
+
+    private void saveSection(Long taskId, String section, Map<String, Object> values) {
+        TaskConfig config = taskConfigRepository.findByTaskIdAndSection(taskId, section)
+                .orElseGet(() -> TaskConfig.builder().taskId(taskId).section(section).build());
+        try {
+            config.setValue(objectMapper.writeValueAsString(sanitizeDoubles(values)));
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("配置序列化失败", e);
+        }
+        taskConfigRepository.save(config);
+    }
+
+    /**
+     * 把 Map / List 中的 Double / Float 转换为 BigDecimal，避免 Jackson 序列化时输出科学计数法（如 5.0E-4）。
+     */
+    @SuppressWarnings("unchecked")
+    private Object sanitizeDoubles(Object value) {
+        if (value instanceof Double) {
+            return new java.math.BigDecimal(value.toString());
+        } else if (value instanceof Float) {
+            return new java.math.BigDecimal(value.toString());
+        } else if (value instanceof Map) {
+            Map<String, Object> result = new LinkedHashMap<>();
+            for (Map.Entry<String, Object> entry : ((Map<String, Object>) value).entrySet()) {
+                result.put(entry.getKey(), sanitizeDoubles(entry.getValue()));
+            }
+            return result;
+        } else if (value instanceof List) {
+            List<Object> result = new ArrayList<>();
+            for (Object item : (List<?>) value) {
+                result.add(sanitizeDoubles(item));
+            }
+            return result;
+        }
+        return value;
+    }
+
+    // ========================================================================
+    // Selector 相关方法
+    // ========================================================================
+
+    @Transactional
+    public void runSelector(Long userId, Long taskId) {
+        taskService.findTaskBelongsToUser(userId, taskId);
+        // 硬编码 run_mode 为 train，保存到数据库
+        Map<String, Object> analysisValues = getSectionMap(taskId, TAB_ANALYSIS);
+        analysisValues.put("run_mode", "train");
+        saveSection(taskId, TAB_ANALYSIS, analysisValues);
+        taskService.refreshConfigCopy(userId, taskId);
+        executionService.runSelectorScript(taskId);
+    }
+
+    public Map<String, Object> getSelectorResult(Long userId, Long taskId) {
+        var task = taskService.findTaskBelongsToUser(userId, taskId);
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("running", executionService.isSelectorRunning(taskId));
+        response.put("progress_logs", executionService.getSelectorProgressLogs(taskId, 120));
+        Path selectorDir = Paths.get(task.getStagingPath(), "outputs", "selector");
+        Path resultPath = selectorDir.resolve("recommended_train_window.json");
+        Path testContextPath = selectorDir.resolve("test_market_context.json");
+
+        if (!Files.exists(resultPath)) {
+            response.put("ready", false);
+            return response;
+        }
+
+        try {
+            String json = Files.readString(resultPath, StandardCharsets.UTF_8);
+            Map<String, Object> result = objectMapper.readValue(json, new TypeReference<>() {});
+            response.putAll(toSelectorUiResult(result));
+            response.put("ready", true);
+
+            if (Files.exists(testContextPath)) {
+                Map<String, Object> testContext = objectMapper.readValue(
+                        Files.readString(testContextPath, StandardCharsets.UTF_8), new TypeReference<>() {});
+                Object context = testContext.get("test_context");
+                if (context instanceof Map<?, ?> contextMap) {
+                    response.put("test_summary", contextMap.get("summary_text"));
+                    response.put("test_labels", contextMap.get("labels"));
+                }
+            }
+            return response;
+        } catch (IOException e) {
+            log.error("读取选择器结果失败: taskId={}", taskId, e);
+            response.put("ready", false);
+            response.put("error", "读取结果失败");
+            return response;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> toSelectorUiResult(Map<String, Object> result) {
+        Map<String, Object> ui = new LinkedHashMap<>(result);
+
+        Object recommendedRaw = result.get("recommended_train_window");
+        if (recommendedRaw instanceof Map<?, ?> recommended) {
+            Map<String, Object> bestWindow = new LinkedHashMap<>();
+            bestWindow.put("start", recommended.get("train_start_date"));
+            bestWindow.put("end", recommended.get("train_end_date"));
+            bestWindow.put("span", recommended.get("recommend_span_months"));
+            bestWindow.put("score", recommended.get("total_score"));
+            bestWindow.put("meanSimilarity", recommended.get("mean_similarity_score"));
+            bestWindow.put("topHitCount", recommended.get("top_similar_hit_count"));
+            bestWindow.put("topCoverage", recommended.get("top_similar_coverage_score"));
+            ui.put("best_window", bestWindow);
+        }
+
+        Map<String, Object> spanWindow = new LinkedHashMap<>();
+        Object spanReportsRaw = result.get("span_reports");
+        if (spanReportsRaw instanceof List<?> spanReports) {
+            for (Object reportRaw : spanReports) {
+                if (!(reportRaw instanceof Map<?, ?> report)) {
+                    continue;
+                }
+                Object span = report.get("recommend_span_months");
+                Object topWindowsRaw = report.get("top_windows");
+                List<Map<String, Object>> windows = new ArrayList<>();
+                if (topWindowsRaw instanceof List<?> topWindows) {
+                    for (Object windowRaw : topWindows) {
+                        if (windowRaw instanceof Map<?, ?> window) {
+                            Map<String, Object> item = new LinkedHashMap<>();
+                            item.put("start", window.get("train_start_date"));
+                            item.put("end", window.get("train_end_date"));
+                            item.put("score", window.get("total_score"));
+                            item.put("meanSimilarity", window.get("mean_similarity_score"));
+                            item.put("topHitCount", window.get("top_similar_hit_count"));
+                            item.put("topCoverage", window.get("top_similar_coverage_score"));
+                            windows.add(item);
+                        }
+                    }
+                }
+                if (span != null) {
+                    spanWindow.put(String.valueOf(span), windows);
+                }
+            }
+        }
+        ui.put("span_window", spanWindow);
+        return ui;
+    }
+
+    @Transactional
+    public void applySelectorResult(Long userId, Long taskId, SelectorApplyRequest request) {
+        taskService.findTaskBelongsToUser(userId, taskId);
+        // 1. 保存 selector section 的 training_workflow.mode 和 window_applied 标志
+        Map<String, Object> selectorValues = getSectionMap(taskId, TAB_SELECTOR);
+        selectorValues.put("training_workflow.mode", request.getMode());
+        selectorValues.put("window_applied", true);
+        saveSection(taskId, TAB_SELECTOR, selectorValues);
+
+        // 2. 更新 analysis_rule section 的 training_workflow 和 train 时间
+        Map<String, Object> analysisValues = getSectionMap(taskId, TAB_ANALYSIS);
+        analysisValues.put("train_start_date", request.getTrainStartDate());
+        analysisValues.put("train_end_date", request.getTrainEndDate());
+
+        Map<String, Object> trainingWorkflow = new LinkedHashMap<>();
+        trainingWorkflow.put("mode", request.getMode());
+
+        if ("static_split".equals(request.getMode())) {
+            LocalDate trainStart = LocalDate.parse(request.getTrainStartDate());
+            LocalDate trainEnd = LocalDate.parse(request.getTrainEndDate());
+            long totalDays = ChronoUnit.DAYS.between(trainStart, trainEnd) + 1;
+            long discoveryDays = Math.round(totalDays * 0.7);
+            LocalDate discoveryEnd = trainStart.plusDays(discoveryDays - 1);
+            LocalDate validationStart = discoveryEnd.plusDays(1);
+
+            Map<String, Object> staticSplit = new LinkedHashMap<>();
+            staticSplit.put("discovery_start_date", request.getTrainStartDate());
+            staticSplit.put("discovery_end_date", discoveryEnd.toString());
+            staticSplit.put("validation_start_date", validationStart.toString());
+            staticSplit.put("validation_end_date", request.getTrainEndDate());
+            trainingWorkflow.put("static_split", staticSplit);
+        } else {
+            int spanMonths = request.getRecommendSpanMonths() != null ? request.getRecommendSpanMonths() : 24;
+            int discoveryMonths = Math.max(1, (int) Math.round(spanMonths * 0.7));
+            int validationMonths = Math.max(1, spanMonths - discoveryMonths);
+
+            Map<String, Object> walkForward = new LinkedHashMap<>();
+            walkForward.put("discovery_window_months", discoveryMonths);
+            walkForward.put("validation_window_months", validationMonths);
+            walkForward.put("step_months", validationMonths);
+            walkForward.put("max_windows", 2);
+            trainingWorkflow.put("walk_forward", walkForward);
+        }
+
+        analysisValues.put("training_workflow", trainingWorkflow);
+        saveSection(taskId, TAB_ANALYSIS, analysisValues);
     }
 
     /**
@@ -125,6 +403,9 @@ public class TaskConfigService {
     private void validateMarketContext(Map<String, Object> values) {
         double trendUp = nestedDouble(values, "thresholds", "trend_up");
         double trendDown = nestedDouble(values, "thresholds", "trend_down");
+        if (trendDown >= 0) {
+            throw new BusinessException("趋势下行阈值必须小于 0");
+        }
         if (trendUp <= trendDown) {
             throw new BusinessException("趋势上行阈值必须大于趋势下行阈值");
         }
@@ -198,6 +479,64 @@ public class TaskConfigService {
         }
         if (minRolling > dispDays) {
             throw new BusinessException("滚动计算最少天数不能大于分化窗口天数");
+        }
+    }
+
+    /**
+     * 校验因子评分权重之和是否为 1.0。
+     */
+    private void validateScoreWeights(Map<String, Object> values) {
+        double icStability = toDouble(values.get("weights.ic_stability"), 0.35);
+        double annualReturn = toDouble(values.get("weights.annual_return"), 0.50);
+        double drawdown = toDouble(values.get("weights.drawdown"), 0.05);
+        double turnover = toDouble(values.get("weights.turnover"), 0.05);
+        double instability = toDouble(values.get("weights.instability"), 0.05);
+        double sum = icStability + annualReturn + drawdown + turnover + instability;
+        if (Math.abs(sum - 1.0) > 0.001) {
+            throw new BusinessException("因子评分权重之和必须等于 1.0，当前为 " + String.format("%.3f", sum));
+        }
+    }
+
+    /**
+     * 校验窗口选择参数。
+     */
+    private void validateSelector(Map<String, Object> values) {
+        String testEndDate = (String) values.get("test_end_date");
+        if (testEndDate != null && !testEndDate.isBlank()) {
+            LocalDate end = LocalDate.parse(testEndDate);
+            if (end.isAfter(LocalDate.now())) {
+                throw new BusinessException("Test 结束日期不能超过当天");
+            }
+        }
+
+        // 自行设定训练窗口时校验训练窗口日期
+        String trainWindowSource = (String) values.get("train_window_source");
+        if ("manual".equals(trainWindowSource)) {
+            String manualStart = (String) values.get("manual_train_start_date");
+            String manualEnd = (String) values.get("manual_train_end_date");
+            if (manualStart == null || manualStart.isBlank() || manualEnd == null || manualEnd.isBlank()) {
+                throw new BusinessException("自行设定训练窗口时，训练开始日期和训练结束日期必须填写");
+            }
+            LocalDate start = LocalDate.parse(manualStart);
+            LocalDate end = LocalDate.parse(manualEnd);
+            if (end.isBefore(start)) {
+                throw new BusinessException("训练结束日期不能早于训练开始日期");
+            }
+            if (end.isAfter(LocalDate.now())) {
+                throw new BusinessException("训练结束日期不能超过当天");
+            }
+        }
+
+        int lookbackYears = toInt(values.get("lookback_years"), 10);
+        if (lookbackYears > 10) {
+            throw new BusinessException("回看历史年数最多 10 年");
+        }
+
+        double simWeight = toDouble(values.get("score_similarity_weight"), 0.7);
+        double covWeight = toDouble(values.get("score_coverage_weight"), 0.3);
+        if (Math.abs(simWeight + covWeight - 1.0) > 0.001) {
+            throw new BusinessException("平均相似度权重与 Top-K 覆盖度权重之和必须等于 1.0，当前为 "
+                    + String.format("%.3f", simWeight + covWeight));
         }
     }
 
@@ -431,7 +770,7 @@ public class TaskConfigService {
                         numField("max_missing_ratio", "最大缺失率阈值",
                                 values.getOrDefault("max_missing_ratio", 0.2), 0.2,
                                 "特征值缺失占比超过此值标记为数据质量低", 0, 1, 0.05, 2, true),
-                        numField("fundamental_health_top_k", "按多空收益差排名列出的特征数量",
+                        numField("fundamental_health_top_k", "基本面分析师专用体检中按多空收益差排名列出的特征数量",
                                 values.getOrDefault("fundamental_health_top_k", 5), 5,
                                 "基本面分析师专用体检中按多空收益差排名列出的特征数量", 1, 20, 1, 0, true)
                 ))
@@ -711,6 +1050,10 @@ public class TaskConfigService {
         Map<String, Object> values = getSectionMap(taskId, TAB_LLM);
         List<ConfigGroup> groups = new ArrayList<>();
 
+        // 读取 feature_pool 的筹码特征开关，用于控制筹码分布分析师的启用状态
+        Map<String, Object> featurePoolValues = getSectionMap(taskId, TAB_FEATURE_POOL);
+        boolean enableChipFeatures = (boolean) featurePoolValues.getOrDefault("enable_chip_features", false);
+
         // 合并供应商列表：默认(yml) + 自定义(DB)
         List<Map<String, String>> providers = systemConfigService.getMergedProviders(userId);
         List<SelectOption> providerOptions = providers.stream()
@@ -772,33 +1115,34 @@ public class TaskConfigService {
                     field(prefix + ".llm_provider", "供应商", "select",
                             agentProvider, "",
                             "选择LLM供应商",
-                            providerOptions, "task"),
+                            providerOptions, "task", true, false),
                     field(prefix + ".llm_base_url", "API 地址", "text",
                             agentUrl, "",
-                            "选择供应商后自动填入，也可手动修改", null, "task"),
+                            "选择供应商后自动填入，也可手动修改", null, "task", true, false),
                     field(prefix + ".llm_model", "模型名称", "text",
                             agentModel, "",
-                            "如 gpt-4o, deepseek-chat, qwen-max 等", null, "task"),
+                            "如 gpt-4o, deepseek-chat, qwen-max 等", null, "task", true, false),
                     field(prefix + ".llm_api_key", "API Key", "password",
                             agentApiKey, "",
-                            "对应供应商的 API Key", null, "task"),
+                            "对应供应商的 API Key", null, "task", true, false),
                     numField(prefix + ".temperature", "Temperature",
                             agentTemp, agent.defaultTemp(),
                             "创意程度，0.2=严谨, 0.6=平衡, 0.9=创意", 0, 2, 0.1, 2, true),
                     numField(prefix + ".max_tokens", "Max Tokens",
                             agentMaxTokens, 8192,
-                            "单次请求最大 token 数", 256, 32768, 256, 0, false),
+                            "单次请求最大 token 数", 256, 32768, 256, 0, true),
                     numField(prefix + ".timeout_seconds", "超时时间(秒)",
                             agentTimeout, agent.stage() == 1 ? 60.0 : 120.0,
                             "单次请求超时时间", 10, 600, 10, 0, true),
                     numField(prefix + ".max_retries", "最大重试次数",
                             agentRetries, 2,
-                            "请求失败后最大重试次数", 0, 10, 1, 0, false)
+                            "请求失败后最大重试次数", 0, 10, 1, 0, true)
             ));
             if (agent.analyst()) {
+                boolean chipDisabled = "chip_distribution".equals(agent.key()) && !enableChipFeatures;
                 fields.add(field(prefix + ".enable", "启用", "switch",
-                        agentEnabled, true,
-                        "是否启用该分析师", null, "task"));
+                        chipDisabled ? false : agentEnabled, true,
+                        "是否启用该分析师", null, "task", chipDisabled));
             }
             // 因子生成器额外显示候选因子数量
             if ("generator".equals(agent.key())) {
@@ -838,7 +1182,7 @@ public class TaskConfigService {
                         field("strategy_type", "策略类型", "select",
                                 values.getOrDefault("strategy_type", "TopKDropout"), "TopKDropout",
                                 "当前可用策略",
-                                List.of(opt("TopK-Dropout", "TopKDropout"), opt("指数增强", "EnhancedIndexing"), opt("SoftTopK", "SoftTopK")), "task")
+                                List.of(opt("TopK-Dropout", "TopKDropout"), opt("SoftTopK", "SoftTopK")), "task")
                 ))
                 .build());
 
@@ -849,55 +1193,33 @@ public class TaskConfigService {
                 .fields(List.of(
                         numField("TopKDropout.buy_top_n", "买入排名前N",
                                 getNestedValue(values, "TopKDropout", "buy_top_n"), 40,
-                                "因子得分排名前N的股票进入买入候选", 1, 500, 5, 0, true),
+                                "因子得分排名前N的股票进入买入候选", 1, 500, 5, 0, true,
+                                "strategy_type", "TopKDropout"),
                         numField("TopKDropout.sell_drop_to", "跌出前M名则卖出",
                                 getNestedValue(values, "TopKDropout", "sell_drop_to"), 200,
-                                "持仓股票跌出前M名则卖出（宽幅缓冲降低换手）", 1, 1000, 10, 0, true),
+                                "持仓股票跌出前M名则卖出（宽幅缓冲降低换手）", 1, 1000, 10, 0, true,
+                                "strategy_type", "TopKDropout"),
                         numField("TopKDropout.holding_count", "目标持仓数",
                                 getNestedValue(values, "TopKDropout", "holding_count"), 20,
-                                "最终目标持仓股票数量", 1, 500, 5, 0, true),
+                                "最终目标持仓股票数量", 1, 500, 5, 0, true,
+                                "strategy_type", "TopKDropout"),
                         field("TopKDropout.weight_mode", "权重模式", "select",
                                 getNestedValue(values, "TopKDropout", "weight_mode"), "equal_weight",
                                 "持仓权重分配方式",
-                                List.of(opt("等权持仓", "equal_weight"), opt("因子分加权", "score_weight")), "task"),
+                                List.of(opt("等权持仓", "equal_weight")), "task",
+                                "strategy_type", "TopKDropout"),
                         numField("TopKDropout.max_drop_per_day", "每日最大换出数",
                                 getNestedValue(values, "TopKDropout", "max_drop_per_day"), 5,
-                                "每次调仓最多换出数量，控制换手率", 0, 100, 1, 0, false),
-                        numField("TopKDropout.min_score_coverage", "因子分数保有率阈值",
+                                "每次调仓最多换出数量，控制换手率", 0, 100, 1, 0, false,
+                                "strategy_type", "TopKDropout"),
+                        numField("TopKDropout.min_score_coverage", "调仓日因子分数保有率阈值",
                                 getNestedValue(values, "TopKDropout", "min_score_coverage"), 0.90,
-                                "低于此值本调仓日不操作", 0, 1, 0.05, 2, false)
+                                "调仓日因子分数保有率低于此值本调仓日不操作", 0, 1, 0.05, 2, false,
+                                "strategy_type", "TopKDropout")
                 ))
                 .build());
 
-        // 组3: EnhancedIndexing 参数
-        groups.add(ConfigGroup.builder()
-                .name("enhanced_indexing").label("指数增强参数").icon("Aim")
-                .description("以指数成分股权重为基底，用因子得分做有约束的倾斜")
-                .fields(List.of(
-                        field("EnhancedIndexing.benchmark", "基准指数",
-                                getNestedValue(values, "EnhancedIndexing", "benchmark") == null ? "text" : "text",
-                                getNestedValue(values, "EnhancedIndexing", "benchmark"), "000300.SH",
-                                "如 000300.SH / 000905.SH", null, "task"),
-                        numField("EnhancedIndexing.active_weight_bound", "主动权重偏离上限",
-                                getNestedValue(values, "EnhancedIndexing", "active_weight_bound"), 0.02,
-                                "单只股票相对基准权重的增减幅度上限", 0, 1, 0.005, 3, true),
-                        numField("EnhancedIndexing.holding_count", "目标持仓数",
-                                getNestedValue(values, "EnhancedIndexing", "holding_count"), 30,
-                                "从指数成分股中选因子得分排名前N只", 1, 500, 5, 0, true),
-                        field("EnhancedIndexing.weight_mode", "权重模式", "select",
-                                getNestedValue(values, "EnhancedIndexing", "weight_mode"), "benchmark_tilt",
-                                "当前仅支持 benchmark_tilt",
-                                List.of(opt("基准倾斜", "benchmark_tilt")), "task"),
-                        numField("EnhancedIndexing.min_score_coverage", "因子分数保有率阈值",
-                                getNestedValue(values, "EnhancedIndexing", "min_score_coverage"), 0.90,
-                                "低于此值本调仓日不操作", 0, 1, 0.05, 2, false),
-                        numField("EnhancedIndexing.min_weight_coverage", "成分权重保有率阈值",
-                                getNestedValue(values, "EnhancedIndexing", "min_weight_coverage"), 0.90,
-                                "入选股票中拥有成分权重数据的最低比例", 0, 1, 0.05, 2, false)
-                ))
-                .build());
-
-        // 组4: SoftTopK 参数
+        // 组3: SoftTopK 参数
         groups.add(ConfigGroup.builder()
                 .name("soft_topk").label("SoftTopK 参数").icon("MagicStick")
                 .description("按分数连续分配权重，而非简单等权")
@@ -905,54 +1227,68 @@ public class TaskConfigService {
                         field("SoftTopK.weight_func", "权重函数", "select",
                                 getNestedValue(values, "SoftTopK", "weight_func"), "softmax",
                                 "softmax=对高分更敏感, rank_power=按排名幂律衰减",
-                                List.of(opt("Softmax", "softmax"), opt("Rank Power", "rank_power")), "task"),
+                                List.of(opt("Softmax", "softmax"), opt("Rank Power", "rank_power")), "task",
+                                "strategy_type", "SoftTopK"),
                         numField("SoftTopK.holding_count", "持仓股票数",
                                 getNestedValue(values, "SoftTopK", "holding_count"), 30,
-                                "按因子分从高到低选前N只", 1, 500, 5, 0, true),
+                                "按因子分从高到低选前N只", 1, 500, 5, 0, true,
+                                "strategy_type", "SoftTopK"),
                         numField("SoftTopK.softmax_temperature", "Softmax 温度",
                                 getNestedValue(values, "SoftTopK", "softmax_temperature"), 0.7,
-                                "T越小集中度越高，T越大越接近等权", 0.01, 10, 0.1, 2, true),
+                                "T越小集中度越高，T越大越接近等权", 0.01, 10, 0.1, 2, true,
+                                "strategy_type", "SoftTopK"),
                         numField("SoftTopK.rank_power_alpha", "Rank Power 衰减参数",
                                 getNestedValue(values, "SoftTopK", "rank_power_alpha"), 1.0,
-                                "α越大头部越集中，α越小越接近等权", 0.1, 10, 0.1, 2, true),
-                        numField("SoftTopK.min_score_coverage", "因子分数保有率阈值",
+                                "α越大头部越集中，α越小越接近等权", 0.1, 10, 0.1, 2, true,
+                                "strategy_type", "SoftTopK"),
+                        numField("SoftTopK.min_score_coverage", "调仓日因子分数保有率阈值",
                                 getNestedValue(values, "SoftTopK", "min_score_coverage"), 0.90,
-                                "低于此值本调仓日不操作", 0, 1, 0.05, 2, false)
+                                "调仓日因子分数保有率低于此值本调仓日不操作", 0, 1, 0.05, 2, false,
+                                "strategy_type", "SoftTopK")
                 ))
                 .build());
 
-        // 组5: 择时过滤
+        // 组4: 择时过滤
         groups.add(ConfigGroup.builder()
                 .name("market_timing").label("择时过滤").icon("Sunrise")
                 .description("叠加层：根据市场状态调整仓位")
                 .fields(List.of(
                         field("MarketTiming.enabled", "启用择时", "switch",
-                                getNestedValue(values, "MarketTiming", "enabled"), true,
+                                getNestedValue(values, "MarketTiming", "enabled"), false,
                                 "关闭则按主策略满仓执行", null, "task"),
                         field("MarketTiming.market_indicator", "市场指标", "select",
                                 getNestedValue(values, "MarketTiming", "market_indicator"), "EMA_60",
                                 "当前仅支持 EMA_60",
-                                List.of(opt("EMA 60日", "EMA_60")), "task"),
+                                List.of(opt("EMA 60日", "EMA_60")), "task",
+                                "MarketTiming.enabled", true),
                         numField("MarketTiming.reduce_to", "风险状态目标仓位",
                                 getNestedValue(values, "MarketTiming", "reduce_to"), 0.6,
-                                "择时触发后的目标暴露比例(0~1)", 0, 1, 0.05, 2, true),
+                                "择时触发后的目标暴露比例(0~1)", 0, 1, 0.05, 2, true,
+                                "MarketTiming.enabled", true),
                         field("MarketTiming.stock_open_filter", "个股开仓过滤", "select",
                                 getNestedValue(values, "MarketTiming", "stock_open_filter"), "rsi",
                                 "仅对新开仓生效，老持仓不受影响",
-                                List.of(opt("不开启", "none"), opt("EMA过滤", "ema"), opt("RSI过滤", "rsi")), "task"),
+                                List.of(opt("不开启", "none"), opt("EMA过滤", "ema"), opt("RSI过滤", "rsi")), "task",
+                                "MarketTiming.enabled", true),
                         numField("MarketTiming.stock_ema_period", "个股EMA周期",
                                 getNestedValue(values, "MarketTiming", "stock_ema_period"), 60,
-                                "仅 stock_open_filter=ema 时生效", 5, 250, 5, 0, false),
+                                "仅 stock_open_filter=ema 时生效", 5, 250, 5, 0, false,
+                                "MarketTiming.enabled", true,
+                                "MarketTiming.stock_open_filter", "ema"),
                         numField("MarketTiming.rsi_period", "RSI计算窗口",
                                 getNestedValue(values, "MarketTiming", "rsi_period"), 14,
-                                "仅 stock_open_filter=rsi 时生效", 5, 100, 1, 0, false),
+                                "仅 stock_open_filter=rsi 时生效", 5, 100, 1, 0, false,
+                                "MarketTiming.enabled", true,
+                                "MarketTiming.stock_open_filter", "rsi"),
                         numField("MarketTiming.rsi_buy_max", "RSI开仓上限",
                                 getNestedValue(values, "MarketTiming", "rsi_buy_max"), 70.0,
-                                "RSI>此值禁止新开仓", 50, 100, 1, 0, false)
+                                "RSI>此值禁止新开仓", 50, 100, 1, 0, false,
+                                "MarketTiming.enabled", true,
+                                "MarketTiming.stock_open_filter", "rsi")
                 ))
                 .build());
 
-        // 组6: 执行参数
+        // 组5: 执行参数
         groups.add(ConfigGroup.builder()
                 .name("execution").label("执行参数").icon("Money")
                 .description("回测交易执行参数")
@@ -963,7 +1299,7 @@ public class TaskConfigService {
                         field("Execution.trade_price", "交易价格", "select",
                                 getNestedValue(values, "Execution", "trade_price"), "next_open",
                                 "信号后使用哪个价格成交",
-                                List.of(opt("下一交易日开盘价", "next_open"), opt("下一交易日收盘价", "next_close")), "task"),
+                                List.of(opt("下一交易日开盘价", "next_open")), "task"),
                         numField("Execution.buy_cost", "买入费率",
                                 getNestedValue(values, "Execution", "buy_cost"), 0.0015,
                                 "包含佣金、过户费等，0.0015=千分之1.5", 0, 0.01, 0.0005, 4, true),
@@ -999,8 +1335,8 @@ public class TaskConfigService {
 
         return StructuredConfigResponse.builder()
                 .section(TAB_BACKTEST)
-                .sectionLabel("回测策略")
-                .sectionDescription("配置回测策略类型、参数、择时过滤和执行参数")
+                .sectionLabel("因子回测参数")
+                .sectionDescription("配置因子回测策略类型、参数、择时过滤和执行参数")
                 .sectionIcon("TrendCharts")
                 .groups(groups)
                 .build();
@@ -1013,7 +1349,31 @@ public class TaskConfigService {
         Map<String, Object> values = getSectionMap(taskId, TAB_MARKET);
         List<ConfigGroup> groups = new ArrayList<>();
 
-        // 组1: 窗口参数（顺序与 market_context.yaml 保持一致）
+        // 组1: 字段映射（对应 market_context.yaml 中的 fields）
+        groups.add(ConfigGroup.builder()
+                .name("fields").label("字段映射").icon("Connection")
+                .description("市场环境计算所依赖的原始字段名映射")
+                .fields(List.of(
+                        field("fields.close", "收盘价字段", "select",
+                                getNestedValue(values, "fields", "close"), "close",
+                                "用于计算市场日收益率的字段名",
+                                List.of(opt("close", "close")), "task"),
+                        field("fields.turnover", "换手字段", "select",
+                                getNestedValue(values, "fields", "turnover"), "turnover",
+                                "用于计算换手率历史分位的字段名",
+                                List.of(opt("turnover", "turnover")), "task"),
+                        field("fields.amount", "成交额字段", "select",
+                                getNestedValue(values, "fields", "amount"), "amount",
+                                "用于加总市场成交额的字段名",
+                                List.of(opt("amount", "amount")), "task"),
+                        field("fields.market_cap", "市值字段", "select",
+                                getNestedValue(values, "fields", "market_cap"), "market_cap",
+                                "用于区分大小盘风格的字段名",
+                                List.of(opt("market_cap", "market_cap")), "task")
+                ))
+                .build());
+
+        // 组2: 窗口参数（顺序与 market_context.yaml 保持一致）
         groups.add(ConfigGroup.builder()
                 .name("windows").label("窗口参数").icon("Timer")
                 .description("程序往前回头看多少个交易日来判断市场状态")
@@ -1076,7 +1436,7 @@ public class TaskConfigService {
                                 "累计涨幅>=此值记为上行（如0.03=3%）", -1, 1, 0.01, 2, true),
                         numField("thresholds.trend_down", "趋势下行阈值",
                                 getNestedValue(values, "thresholds", "trend_down"), -0.03,
-                                "累计涨幅<=此值记为下行", -1, 1, 0.01, 2, true),
+                                "累计涨幅<=此值记为下行（必须小于 0）", -1, -0.01, 0.01, 2, true),
                         numField("thresholds.rank_high", "分位高阈值",
                                 getNestedValue(values, "thresholds", "rank_high"), 0.67,
                                 "历史分位>=此值记为高", 0.5, 1, 0.01, 2, true),
@@ -1214,116 +1574,207 @@ public class TaskConfigService {
     // ========================================================================
     private StructuredConfigResponse buildSelectorTab(Long taskId) {
         Map<String, Object> values = getSectionMap(taskId, TAB_SELECTOR);
+        Map<String, Object> analysisValues = getSectionMap(taskId, TAB_ANALYSIS);
         List<ConfigGroup> groups = new ArrayList<>();
 
+        // 组1: Test 时间窗口与迭代轮数
+        groups.add(ConfigGroup.builder()
+                .name("test_window").label("回测时间窗口").icon("Calendar")
+                .description("样本外测试时间段，修改后会同步更新到分析口径")
+                .fields(List.of(
+                        field("test_start_date", "回测开始日期", "date",
+                                analysisValues.get("test_start_date"), "",
+                                "样本外测试开始日期", null, "task"),
+                        field("test_end_date", "回测结束日期", "date",
+                                analysisValues.get("test_end_date"), "",
+                                "样本外测试结束日期", null, "task")
+                ))
+                .build());
+
+        // 组2: 训练窗口设定方式
+        String trainWindowSource = String.valueOf(values.getOrDefault("train_window_source", "recommend"));
+        groups.add(ConfigGroup.builder()
+                .name("train_window_source").label("训练窗口设定方式").icon("Select")
+                .description("选择手动填写训练窗口，或基于回测时间窗口自动推荐")
+                .fields(List.of(
+                        field("train_window_source", "设定方式", "select",
+                                trainWindowSource, "recommend",
+                                "选择自行设定时，不显示训练窗口选择器推荐参数",
+                                List.of(opt("自行设定训练窗口", "manual"), opt("基于回测时间窗口推荐", "recommend")), "task")
+                ))
+                .build());
+
+        // 组3: 选择器参数（推荐模式时显示，先于"训练窗口"，让选择器+启动推荐按钮在训练窗口之上）
         groups.add(ConfigGroup.builder()
                 .name("selector").label("训练窗口选择器").icon("Aim")
                 .description("为当前test窗口推荐最相似的历史训练窗口")
                 .fields(List.of(
                         numField("lookback_years", "回看历史年数",
                                 values.getOrDefault("lookback_years", 10), 10,
-                                "以test_start_date为锚点向前回看多少年", 1, 30, 1, 0, true),
+                                "以test_start_date为锚点向前回看多少年", 1, 10, 1, 0, true,
+                                "train_window_source", "recommend"),
                         field("recommend_span_months", "推荐窗口长度（月）", "tag_select",
                                 values.getOrDefault("recommend_span_months", List.of(12, 18, 24)),
                                 List.of(12, 18, 24),
                                 "候选训练窗口的长度，支持多种长度同时评估",
-                                List.of(opt("12个月", "12"), opt("18个月", "18"), opt("24个月", "24"), opt("36个月", "36")), "task"),
+                                List.of(opt("12个月", "12"), opt("18个月", "18"), opt("24个月", "24"), opt("36个月", "36")), "task",
+                                "train_window_source", "recommend"),
                         numField("top_k_similar_months", "Top-K 相似月份数",
                                 values.getOrDefault("top_k_similar_months", 4), 4,
-                                "找出与test状态最相似的前K个月", 1, 20, 1, 0, true),
+                                "找出与test状态最相似的前K个月", 1, 20, 1, 0, true,
+                                "train_window_source", "recommend"),
                         numField("score_similarity_weight", "平均相似度权重",
                                 values.getOrDefault("score_similarity_weight", 0.7), 0.7,
-                                "与 score_coverage_weight 之和建议为1", 0, 1, 0.05, 2, true),
+                                "与 score_coverage_weight 之和建议为1", 0, 1, 0.05, 2, true,
+                                "train_window_source", "recommend"),
                         numField("score_coverage_weight", "Top-K覆盖度权重",
                                 values.getOrDefault("score_coverage_weight", 0.3), 0.3,
-                                "与 score_similarity_weight 之和建议为1", 0, 1, 0.05, 2, true),
+                                "与 score_similarity_weight 之和建议为1", 0, 1, 0.05, 2, true,
+                                "train_window_source", "recommend"),
                         field("disable_dynamic_membership", "临时关闭动态成分股", "switch",
                                 values.getOrDefault("disable_dynamic_membership", true), true,
-                                "selector内部关闭dynamic_membership可显著减少回溯请求", null, "task")
+                                "selector内部关闭dynamic_membership可显著减少回溯请求", null, "task",
+                                "train_window_source", "recommend")
                 ))
                 .build());
 
+        groups.add(ConfigGroup.builder()
+                .name("manual_train_window").label("训练窗口").icon("Calendar")
+                .description("设定样本内训练区间。推荐模式下也可点击推荐结果的“应用此窗口”自动填入")
+                .fields(List.of(
+                        field("manual_train_start_date", "训练开始日期", "date",
+                                analysisValues.get("train_start_date"), "",
+                                "样本内训练开始日期", null, "task"),
+                        field("manual_train_end_date", "训练结束日期", "date",
+                                analysisValues.get("train_end_date"), "",
+                                "样本内训练结束日期", null, "task")
+                ))
+                .build());
+
+        // 组3: 训练工作流模式（始终显示，不受推荐窗口是否应用影响）
+        {
+            Object trainingWorkflowRaw = analysisValues.get("training_workflow");
+            Map<String, Object> trainingWorkflow = trainingWorkflowRaw instanceof Map
+                    ? (Map<String, Object>) trainingWorkflowRaw
+                    : new LinkedHashMap<>();
+            String mode = (String) trainingWorkflow.getOrDefault("mode", "static_split");
+
+            groups.add(ConfigGroup.builder()
+                    .name("training_workflow").label("训练工作流模式").icon("Operation")
+                    .description("选择训练窗口切分方式与迭代轮数")
+                    .fields(List.of(
+                            field("training_workflow.mode", "模式", "select",
+                                    mode, "static_split",
+                                    "static_split=固定两段切分，walk_forward=滚动窗口",
+                                    List.of(opt("固定两段切分", "static_split"), opt("滚动窗口", "walk_forward")), "task"),
+                            field("training_workflow.static_split.discovery_start_date", "发现期开始", "date",
+                                    getNestedValue(trainingWorkflow, "static_split", "discovery_start_date"), "",
+                                    "静态切分：因子发现阶段开始", null, "task",
+                                    "training_workflow.mode", "static_split"),
+                            field("training_workflow.static_split.discovery_end_date", "发现期结束", "date",
+                                    getNestedValue(trainingWorkflow, "static_split", "discovery_end_date"), "",
+                                    "静态切分：因子发现阶段结束", null, "task",
+                                    "training_workflow.mode", "static_split"),
+                            field("training_workflow.static_split.validation_start_date", "验证期开始", "date",
+                                    getNestedValue(trainingWorkflow, "static_split", "validation_start_date"), "",
+                                    "静态切分：因子验证阶段开始", null, "task",
+                                    "training_workflow.mode", "static_split"),
+                            field("training_workflow.static_split.validation_end_date", "验证期结束", "date",
+                                    getNestedValue(trainingWorkflow, "static_split", "validation_end_date"), "",
+                                    "静态切分：因子验证阶段结束", null, "task",
+                                    "training_workflow.mode", "static_split"),
+                            numField("training_workflow.walk_forward.discovery_window_months", "发现窗口（月）",
+                                    getNestedValue(trainingWorkflow, "walk_forward", "discovery_window_months"), 24,
+                                    "滚动窗口：每次发现期长度", 1, 60, 1, 0, false,
+                                    "training_workflow.mode", "walk_forward"),
+                            numField("training_workflow.walk_forward.validation_window_months", "验证窗口（月）",
+                                    getNestedValue(trainingWorkflow, "walk_forward", "validation_window_months"), 6,
+                                    "滚动窗口：每次验证期长度", 1, 24, 1, 0, false,
+                                    "training_workflow.mode", "walk_forward"),
+                            numField("training_workflow.walk_forward.step_months", "滚动步长（月）",
+                                    getNestedValue(trainingWorkflow, "walk_forward", "step_months"), 6,
+                                    "滚动窗口：窗口滚动步长", 1, 24, 1, 0, false,
+                                    "training_workflow.mode", "walk_forward"),
+                            numField("training_workflow.walk_forward.max_windows", "最大窗口数",
+                                    getNestedValue(trainingWorkflow, "walk_forward", "max_windows"), 0,
+                                    "0=不限制", 0, 50, 1, 0, false,
+                                    "training_workflow.mode", "walk_forward"),
+                            field("iteration_count", "迭代轮数", "select",
+                                    analysisValues.getOrDefault("iteration_count", 1), 1,
+                                    "多轮迭代会基于前一轮反馈继续挖掘",
+                                    List.of(opt("1轮", "1"), opt("2轮", "2"), opt("3轮", "3"), opt("5轮", "5")), "task")
+                    ))
+                    .build());
+        }
+
         return StructuredConfigResponse.builder()
                 .section(TAB_SELECTOR)
-                .sectionLabel("窗口选择")
-                .sectionDescription("为测试窗口推荐最相似的历史训练窗口")
+                .sectionLabel("训练窗口与回测窗口")
+                .sectionDescription("配置回测窗口并推荐最相似的历史训练窗口")
                 .sectionIcon("Aim")
                 .groups(groups)
                 .build();
     }
 
     // ========================================================================
-    // Tab 7: 预筛门槛
+    // Tab 6: 因子初筛与打分规则
     // ========================================================================
-    private StructuredConfigResponse buildPrescreenTab(Long taskId) {
-        Map<String, Object> values = getSectionMap(taskId, TAB_PRESCREEN);
+    private StructuredConfigResponse buildPrescreenScoreTab(Long taskId) {
+        Map<String, Object> prescreenValues = getSectionMap(taskId, TAB_PRESCREEN);
+        Map<String, Object> scoreValues = getSectionMap(taskId, TAB_SCORE);
         List<ConfigGroup> groups = new ArrayList<>();
 
+        // 组1: 因子预筛门槛
         groups.add(ConfigGroup.builder()
                 .name("prescreen").label("因子预筛门槛").icon("Filter")
                 .description("不满足以下全部条件则跳过回测")
                 .fields(List.of(
                         numField("min_rank_ic_to_backtest", "Rank IC 绝对值门槛",
-                                values.getOrDefault("min_rank_ic_to_backtest", 0.02), 0.02,
+                                prescreenValues.getOrDefault("min_rank_ic_to_backtest", 0.02), 0.02,
                                 "Rank IC 绝对值低于此值跳过", 0, 0.2, 0.005, 3, true),
                         numField("min_rank_ic_ir_to_backtest", "Rank IC IR 门槛",
-                                values.getOrDefault("min_rank_ic_ir_to_backtest", 0.2), 0.2,
+                                prescreenValues.getOrDefault("min_rank_ic_ir_to_backtest", 0.2), 0.2,
                                 "Rank IC IR 低于此值跳过", 0, 2, 0.05, 2, true),
                         numField("min_positive_ic_ratio", "IC正方向胜率门槛",
-                                values.getOrDefault("min_positive_ic_ratio", 0.4), 0.4,
+                                prescreenValues.getOrDefault("min_positive_ic_ratio", 0.4), 0.4,
                                 "IC为正（或负）的比例低于此值跳过", 0, 1, 0.05, 2, true),
                         field("enable_direction_filter", "启用方向过滤", "switch",
-                                values.getOrDefault("enable_direction_filter", false), false,
+                                prescreenValues.getOrDefault("enable_direction_filter", false), false,
                                 "要求LLM猜测方向与样本内经验方向一致", null, "task")
                 ))
                 .build());
 
-        return StructuredConfigResponse.builder()
-                .section(TAB_PRESCREEN)
-                .sectionLabel("预筛门槛")
-                .sectionDescription("配置因子回测前的预筛门槛")
-                .sectionIcon("Filter")
-                .groups(groups)
-                .build();
-    }
-
-    // ========================================================================
-    // Tab 8: 评分权重
-    // ========================================================================
-    private StructuredConfigResponse buildScoreTab(Long taskId) {
-        Map<String, Object> values = getSectionMap(taskId, TAB_SCORE);
-        List<ConfigGroup> groups = new ArrayList<>();
-
+        // 组2: 因子评分权重
         groups.add(ConfigGroup.builder()
                 .name("score_weights").label("因子评分权重").icon("TrendCharts")
                 .description("所有正权重之和 - 负权重之和 = 1.0")
                 .fields(List.of(
                         numField("weights.ic_stability", "IC 稳定性权重",
-                                getNestedValue(values, "weights", "ic_stability"), 0.35,
+                                getNestedValue(scoreValues, "weights", "ic_stability"), 0.35,
                                 "Rank IC IR的归一化值，衡量因子预测能力的稳定性", 0, 1, 0.05, 2, true),
                         numField("weights.annual_return", "年化收益权重",
-                                getNestedValue(values, "weights", "annual_return"), 0.50,
+                                getNestedValue(scoreValues, "weights", "annual_return"), 0.50,
                                 "年化收益率的归一化值，衡量因子实际盈利能力", 0, 1, 0.05, 2, true),
                         numField("weights.drawdown", "回撤惩罚权重",
-                                getNestedValue(values, "weights", "drawdown"), 0.05,
+                                getNestedValue(scoreValues, "weights", "drawdown"), 0.05,
                                 "最大回撤绝对值的归一化值，惩罚高风险因子", 0, 1, 0.05, 2, true),
                         numField("weights.turnover", "换手率惩罚权重",
-                                getNestedValue(values, "weights", "turnover"), 0.05,
+                                getNestedValue(scoreValues, "weights", "turnover"), 0.05,
                                 "换手率的归一化值，惩罚过度交易", 0, 1, 0.05, 2, true),
                         numField("weights.instability", "IC方向不稳定惩罚权重",
-                                getNestedValue(values, "weights", "instability"), 0.05,
+                                getNestedValue(scoreValues, "weights", "instability"), 0.05,
                                 "(1-positive_ic_ratio)的归一化值，惩罚IC方向不稳定", 0, 1, 0.05, 2, true),
                         numField("negative_return_penalty", "负收益惩罚",
-                                values.getOrDefault("negative_return_penalty", 0.5), 0.5,
+                                scoreValues.getOrDefault("negative_return_penalty", 0.5), 0.5,
                                 "当年化收益率<0时，total_score额外减去此值", 0, 2, 0.1, 2, true)
                 ))
                 .build());
 
         return StructuredConfigResponse.builder()
-                .section(TAB_SCORE)
-                .sectionLabel("评分权重")
-                .sectionDescription("配置因子评分公式中各分项的权重")
-                .sectionIcon("TrendCharts")
+                .section(TAB_PRESCREEN)
+                .sectionLabel("因子初筛与打分规则")
+                .sectionDescription("配置因子回测前的预筛门槛和评分权重")
+                .sectionIcon("Filter")
                 .groups(groups)
                 .build();
     }
@@ -1380,9 +1831,9 @@ public class TaskConfigService {
                                 List.of(opt("不处理", "none"), opt("MAD", "mad"), opt("分位数裁剪", "quantile"), opt("3-Sigma", "sigma")), "task"),
                         ConfigField.builder()
                                 .key("preprocess.outlier_options.n").label("异常值参数 n").type("number")
-                                .value(getNestedValue(values, "preprocess", "outlier_options.n")).defaultValue(3.0)
-                                .description("MAD/Sigma 的倍数")
-                                .min(0.1).max(10).step(0.1).precision(2)
+                                .value(getNestedValue(values, "preprocess", "outlier_options.n")).defaultValue(3)
+                                .description("MAD/Sigma 的倍数（正整数）")
+                                .min(1).max(10).step(1).precision(0)
                                 .source("task")
                                 .showWhenKey("preprocess.outlier_method").showWhenValue(List.of("mad", "sigma"))
                                 .build(),
@@ -1427,34 +1878,6 @@ public class TaskConfigService {
     }
 
     // ========================================================================
-    // Tab 9: 数据参数
-    // ========================================================================
-    private StructuredConfigResponse buildDataTab(Long taskId) {
-        Map<String, Object> values = getSectionMap(taskId, TAB_DATA);
-        List<ConfigGroup> groups = new ArrayList<>();
-
-        groups.add(ConfigGroup.builder()
-                .name("data_params").label("数据参数").icon("Coin")
-                .description("采样和缓存相关参数")
-                .fields(List.of(
-                        numField("max_instruments", "最大股票数",
-                                values.getOrDefault("max_instruments", 0), 0,
-                                "0=不限制；>0 时按字母顺序取前N只限制股票池", 0, 10000, 100, 0, false),
-                        field("sample_instrument", "样本股票", "text",
-                                values.getOrDefault("sample_instrument", ""), "",
-                                "用于调试的样本股票代码，非空时只加载该股票", null, "task")
-                ))
-                .build());
-
-        return StructuredConfigResponse.builder()
-                .section(TAB_DATA)
-                .sectionLabel("数据参数")
-                .sectionDescription("数据缓存策略和采样配置")
-                .sectionIcon("Coin")
-                .groups(groups)
-                .build();
-    }
-
     // ========================================================================
     // 工具方法
     // ========================================================================
@@ -1487,10 +1910,50 @@ public class TaskConfigService {
                 .build();
     }
 
+    private ConfigField field(String key, String label, String type, Object value, Object defaultValue,
+                              String description, List<SelectOption> options, String source,
+                              boolean readonly) {
+        return ConfigField.builder()
+                .key(key).label(label).type(type)
+                .value(value).defaultValue(defaultValue)
+                .description(description)
+                .options(options)
+                .source(source)
+                .readonly(readonly)
+                .build();
+    }
+
+    private ConfigField field(String key, String label, String type, Object value, Object defaultValue,
+                              String description, List<SelectOption> options, String source,
+                              boolean required, boolean readonly) {
+        return ConfigField.builder()
+                .key(key).label(label).type(type)
+                .value(value).defaultValue(defaultValue)
+                .description(description)
+                .options(options)
+                .source(source)
+                .required(required)
+                .readonly(readonly)
+                .build();
+    }
+
     /** 带数值约束的字段构造 */
     private ConfigField numField(String key, String label, Object value, Object defaultValue,
                                  String description, Number min, Number max, Number step, Integer precision,
                                  boolean required) {
+        return numField(key, label, value, defaultValue, description, min, max, step, precision, required, null, null);
+    }
+
+    private ConfigField numField(String key, String label, Object value, Object defaultValue,
+                                 String description, Number min, Number max, Number step, Integer precision,
+                                 boolean required, String showWhenKey, Object showWhenValue) {
+        return numField(key, label, value, defaultValue, description, min, max, step, precision, required, showWhenKey, showWhenValue, null, null);
+    }
+
+    private ConfigField numField(String key, String label, Object value, Object defaultValue,
+                                 String description, Number min, Number max, Number step, Integer precision,
+                                 boolean required, String showWhenKey, Object showWhenValue,
+                                 String showWhenKey2, Object showWhenValue2) {
         return ConfigField.builder()
                 .key(key).label(label).type("number")
                 .value(value).defaultValue(defaultValue)
@@ -1498,6 +1961,10 @@ public class TaskConfigService {
                 .min(min).max(max).step(step).precision(precision)
                 .required(required)
                 .source("task")
+                .showWhenKey(showWhenKey)
+                .showWhenValue(showWhenValue)
+                .showWhenKey2(showWhenKey2)
+                .showWhenValue2(showWhenValue2)
                 .build();
     }
 

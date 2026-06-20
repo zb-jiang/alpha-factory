@@ -28,6 +28,8 @@ export interface ConfigField {
   source?: 'global' | 'user' | 'task'
   showWhenKey?: string
   showWhenValue?: any
+  showWhenKey2?: string
+  showWhenValue2?: any
   optionFilterKey?: string
   optionFilterMap?: Record<string, string[]>
 }
@@ -46,6 +48,7 @@ export interface StructuredConfigResponse {
   sectionDescription?: string
   sectionIcon?: string
   groups: ConfigGroup[]
+  saved?: boolean
 }
 
 // ============================================================
@@ -78,4 +81,21 @@ export function updateTaskConfigTab(taskId: number, tab: string, values: Record<
 
 export function testLlmConnection(taskId: number, params: { base_url: string; model: string; api_key: string }) {
   return api.post<any, { data: { success: boolean; message: string } }>(`/tasks/${taskId}/config/llm-test`, params)
+}
+
+export function runSelector(taskId: number) {
+  return api.post(`/tasks/${taskId}/config/selector/run`)
+}
+
+export function getSelectorResult(taskId: number) {
+  return api.get<any, { data: { ready: boolean; running?: boolean; progress_logs?: string[]; error?: string; [key: string]: any } }>(`/tasks/${taskId}/config/selector/result`)
+}
+
+export function applySelectorResult(taskId: number, params: {
+  trainStartDate: string
+  trainEndDate: string
+  recommendSpanMonths: number
+  mode: string
+}) {
+  return api.post(`/tasks/${taskId}/config/selector/apply`, params)
 }

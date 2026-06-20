@@ -346,6 +346,7 @@ CONFIG_OWNERSHIP: dict[str, set[str]] = {
         "unstable_top_k",
         "high_corr_threshold",
         "max_missing_ratio",
+        "fundamental_health_top_k",
         "min_rank_ic_to_backtest",
         "min_rank_ic_ir_to_backtest",
         "min_positive_ic_ratio",

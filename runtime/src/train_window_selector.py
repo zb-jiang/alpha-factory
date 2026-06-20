@@ -173,7 +173,7 @@ def _build_monthly_regime_vectors(
     )
     total_months = len(months)
     _log(
-        "开始构建历史月度状态向量: "
+        "开始逐月汇总历史市场状态（趋势/波动/资金/宏观等）："
         f"{history_start.strftime('%Y-%m-%d')} ~ {history_end.strftime('%Y-%m-%d')}，"
         f"共 {total_months} 个月"
     )
@@ -231,13 +231,22 @@ def _build_monthly_regime_vectors(
 
         rows.append(row)
         if idx % 12 == 0 or idx == total_months:
-            _log(f"历史月度状态向量进度: {idx}/{total_months}")
+            _log(f"历史月份汇总进度：{idx}/{total_months}")
     frame = pd.DataFrame(rows)
     if frame.empty:
-        _log("历史月度状态向量为空")
+        _log("历史月份汇总结果为空")
         return frame
-    frame = frame.dropna(subset=REGIME_FEATURE_KEYS).sort_values("month_start").reset_index(drop=True)
-    _log(f"历史月度状态向量构建完成: 有效 {len(frame)} 个月")
+    # 与 test 窗口处理逻辑一致：宏观指标缺失的月份用中性值 0.0 填充，而非直接丢弃
+    missing_before = frame[REGIME_FEATURE_KEYS].isna().any(axis=1).sum()
+    if missing_before > 0:
+        _log(
+            f"历史月份中有 {int(missing_before)} 个月宏观指标缺失，"
+            f"已用中性值 0.0 填充（与待预测期处理方式一致）"
+        )
+    for key in REGIME_FEATURE_KEYS:
+        frame[key] = frame[key].fillna(0.0)
+    frame = frame.sort_values("month_start").reset_index(drop=True)
+    _log(f"历史月份汇总完成：共 {len(frame)} 个月可用")
     return frame
 
 
@@ -309,7 +318,7 @@ def run() -> None:
 
     test_start = pd.Timestamp(str(base_cfg.get("test_start_date"))).normalize()
     test_end = pd.Timestamp(str(base_cfg.get("test_end_date"))).normalize()
-    _log(f"启动训练窗口选择: test={test_start.strftime('%Y-%m-%d')} ~ {test_end.strftime('%Y-%m-%d')}")
+    _log(f"开始为待预测期 {test_start.strftime('%Y-%m-%d')} ~ {test_end.strftime('%Y-%m-%d')} 寻找最相似的历史训练窗口")
     if test_end < test_start:
         raise ValueError("test_end_date 必须晚于或等于 test_start_date")
 
@@ -318,20 +327,21 @@ def run() -> None:
     fetch_start = history_start
     fetch_end = test_end
     _log(
-        f"历史回看区间: {history_start.strftime('%Y-%m-%d')} ~ {history_end.strftime('%Y-%m-%d')}"
-        f"（lookback_years={selector_cfg.lookback_years}）"
+        f"历史参考区间为过去 {selector_cfg.lookback_years} 年："
+        f"{history_start.strftime('%Y-%m-%d')} ~ {history_end.strftime('%Y-%m-%d')}"
+        f"（即待预测期开始前 {selector_cfg.lookback_years} 年）"
     )
-    _log(f"目标 test 区间: {test_start.strftime('%Y-%m-%d')} ~ {test_end.strftime('%Y-%m-%d')}")
-    _log(f"实际数据拉取区间(含 test 计算): {fetch_start.strftime('%Y-%m-%d')} ~ {fetch_end.strftime('%Y-%m-%d')}")
+    _log(f"待预测期：{test_start.strftime('%Y-%m-%d')} ~ {test_end.strftime('%Y-%m-%d')}")
+    _log(
+        "为完成相似度计算，需拉取 "
+        f"{fetch_start.strftime('%Y-%m-%d')} ~ {fetch_end.strftime('%Y-%m-%d')} 的行情数据"
+        "（含待预测期）"
+    )
     if history_end < history_start:
         raise ValueError("历史回看区间非法，请检查 test_start_date")
 
     raw_fields = _prepare_required_raw_fields(feature_cfg, fields)
-    _log(
-        "开始加载原始行情数据: "
-        f"fields={raw_fields}, warmup_trading_days={warmup_days}, "
-        f"recommend_span_months={selector_cfg.recommend_span_months_options}"
-    )
+    _log("开始加载行情数据（含日线行情、财务指标、行业分类等）...")
     load_cfg = dict(base_cfg)
     # selector 直接按“test字段语义”组织加载窗口，避免混淆 train/test 口径。
     load_cfg["run_mode"] = "test"
@@ -341,17 +351,14 @@ def run() -> None:
     stock_pool_cfg["dynamic_membership"] = not selector_cfg.disable_dynamic_membership
     load_cfg["stock_pool"] = stock_pool_cfg
     if selector_cfg.disable_dynamic_membership:
-        _log(
-            "selector 已关闭 dynamic_membership，"
-            "避免历史逐观测日成分回溯导致长时间 Tushare 频控等待"
-        )
+        _log("已关闭指数成分股动态回溯（可显著减少数据请求、加速加载）")
     else:
-        _log("selector 已启用 dynamic_membership")
+        _log("已开启指数成分股动态回溯（口径更严格，但耗时更长）")
     raw_frame = load_raw_data(load_cfg, raw_fields=raw_fields, warmup_trading_days=warmup_days)
     instrument_count = (
         int(raw_frame.index.get_level_values(0).nunique()) if isinstance(raw_frame.index, pd.MultiIndex) else 1
     )
-    _log(f"原始行情加载完成: rows={len(raw_frame)}, instruments={instrument_count}")
+    _log(f"行情数据加载完成：共 {len(raw_frame):,} 条记录，覆盖 {instrument_count} 只股票")
 
     provider = get_data_provider(load_cfg)
     provider.initialize()
@@ -368,39 +375,61 @@ def run() -> None:
             end_date=str(pd.Timestamp(raw_dates.max()).date()),
         )
     except Exception as e:
-        _log(f"警告: 获取宏观经济指标失败: {e}")
+        _log(f"警告：获取宏观经济指标（Shibor/M2/PMI/CPI/PPI）失败，宏观维度将以'未知'降级：{e}")
 
-    _log("开始计算日级市场状态向量")
+    _log("开始计算每日市场状态（趋势、波动、流动性、资金流向等）...")
     daily_market = compute_daily_market(
         raw_frame,
         fields=fields,
         windows=windows,
         external_market_data=market_indicator_frame,
     )
-    _log(f"日级市场状态计算完成: {len(daily_market)} 个交易日")
+    _log(f"每日市场状态计算完成：共 {len(daily_market)} 个交易日")
 
     test_window = daily_market.loc[(daily_market.index >= test_start) & (daily_market.index <= test_end)]
     if test_window.empty:
-        raise RuntimeError("test 窗口没有可用市场状态数据，无法进行训练窗口推荐")
-    _log(f"test 窗口交易日: {len(test_window)}")
+        raise RuntimeError("待预测期没有可用市场状态数据，无法进行训练窗口推荐")
+    _log(f"待预测期包含 {len(test_window)} 个交易日")
 
     test_end_month_str = test_end.strftime("%Y%m")
     test_macro = macro_frame[macro_frame["month"] <= test_end_month_str].copy() if not macro_frame.empty else None
     test_context = build_window_context(test_window, thresholds, macro_data=test_macro, windows=windows)
+    test_summary = str(test_context.get("summary_text", "")).strip()
+    if test_summary:
+        _log(f"待预测期市场状态摘要：{test_summary}")
     test_stats = dict(test_context.get("stats", {}))
+    test_labels = dict(test_context.get("labels", {}))
+    # 补充合成/编码特征（与 _build_monthly_regime_vectors 逻辑一致）
+    margin_flow = test_stats.get("margin_flow_rank_mean")
+    margin_balance = test_stats.get("margin_balance_rank_mean")
+    if margin_flow is not None and margin_balance is not None:
+        test_stats["leverage_composite_mean"] = (margin_flow + margin_balance) / 2.0
+    test_stats["capital_structure_score"] = _encode_capital_structure(test_labels.get("capital_structure", "未知"))
+    cpi_change = test_stats.get("cpi_yoy_change")
+    ppi_change = test_stats.get("ppi_yoy_change")
+    if cpi_change is not None and ppi_change is not None:
+        test_stats["inflation_composite_mean"] = (cpi_change + ppi_change) / 2.0
+    missing_keys: list[str] = []
     for key in REGIME_FEATURE_KEYS:
         value = test_stats.get(key)
-        if value is None or pd.isna(value):
-            raise RuntimeError(f"test 窗口状态向量存在缺失: {key}")
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            missing_keys.append(key)
+    if missing_keys:
+        _log(
+            "待预测期部分宏观指标暂未发布，将用中性值替代，不影响相似度排名："
+            f"{missing_keys}"
+        )
+        for key in missing_keys:
+            test_stats[key] = 0.0
 
     monthly_vectors = _build_monthly_regime_vectors(
         daily_market, thresholds, history_start, history_end,
         macro_data=macro_frame, windows=windows,
     )
     if monthly_vectors.empty:
-        raise RuntimeError("历史月度状态向量为空，无法进行相似性推荐")
+        raise RuntimeError("历史月份汇总结果为空，无法进行相似度推荐")
 
-    _log("开始计算历史月度相似度")
+    _log("开始计算每个月份与待预测期的市场相似度...")
     scale_mean = monthly_vectors[REGIME_FEATURE_KEYS].mean()
     scale_std = monthly_vectors[REGIME_FEATURE_KEYS].std(ddof=0).replace(0, 1.0).fillna(1.0)
     monthly_scaled = monthly_vectors.copy()
@@ -415,20 +444,35 @@ def run() -> None:
     )
     monthly_scaled["similarity_score"] = 1.0 / (1.0 + monthly_scaled["distance_score"])
     monthly_scaled = monthly_scaled.sort_values("distance_score", ascending=True).reset_index(drop=True)
-    _log(f"历史月度相似度计算完成: {len(monthly_scaled)} 个月")
+    _log(f"相似度计算完成：共 {len(monthly_scaled)} 个月参与比较")
+    top_preview = monthly_scaled.head(selector_cfg.top_k_similar_months)
+    if not top_preview.empty:
+        top_text = "；".join(
+            f"{row['month']}（相似度 {float(row['similarity_score']):.4f}，"
+            f"趋势{row.get('trend_label', '未知')}，波动{row.get('volatility_label', '未知')}，"
+            f"资金结构{row.get('capital_structure_label', '未知')}）"
+            for _, row in top_preview.iterrows()
+        )
+        _log(f"最相似的 Top-{selector_cfg.top_k_similar_months} 历史月份：{top_text}")
 
     all_scored_frames: list[pd.DataFrame] = []
     span_reports: list[dict[str, Any]] = []
     for span_months in selector_cfg.recommend_span_months_options:
-        _log(f"开始打分连续{span_months}个月候选训练窗口")
+        _log(f"开始评估候选训练窗口（窗口长度 {span_months} 个月）...")
         scored_windows = _score_candidate_windows(monthly_scaled, test_start, span_months, selector_cfg)
         if scored_windows.empty:
-            _log(f"连续{span_months}个月候选训练窗口为空，跳过")
+            _log(f"窗口长度 {span_months} 个月：无可用候选窗口，跳过")
             continue
         scored_windows = scored_windows.copy()
         scored_windows["recommend_span_months"] = span_months
         all_scored_frames.append(scored_windows)
-        _log(f"连续{span_months}个月候选训练窗口打分完成: {len(scored_windows)} 个窗口")
+        _log(
+            f"窗口长度 {span_months} 个月：共 {len(scored_windows)} 个候选窗口，"
+            f"最优 = "
+            f"{scored_windows.iloc[0]['train_start_date'].strftime('%Y-%m-%d')} ~ "
+            f"{scored_windows.iloc[0]['train_end_date'].strftime('%Y-%m-%d')}"
+            f"（综合得分 {scored_windows.iloc[0]['total_score']:.4f}）"
+        )
         span_top = scored_windows.head(3).copy()
         span_top_records = [_serialize_window_record(row) for _, row in span_top.iterrows()]
         span_reports.append(
@@ -442,7 +486,10 @@ def run() -> None:
         raise RuntimeError("没有生成任何可用的候选训练窗口")
     scored_windows = pd.concat(all_scored_frames, ignore_index=True)
     scored_windows = scored_windows.sort_values("total_score", ascending=False).reset_index(drop=True)
-    _log(f"候选训练窗口总打分完成: {len(scored_windows)} 个窗口")
+    _log(
+        f"所有候选窗口评估完成：共 {len(scored_windows)} 个窗口"
+        f"（{len(selector_cfg.recommend_span_months_options)} 种长度合计）"
+    )
 
     selector_dir = OUTPUT_DIR / "selector"
     selector_dir.mkdir(parents=True, exist_ok=True)
@@ -451,7 +498,7 @@ def run() -> None:
     monthly_output["month_start"] = monthly_output["month_start"].dt.strftime("%Y-%m-%d")
     monthly_output["month_end"] = monthly_output["month_end"].dt.strftime("%Y-%m-%d")
     monthly_output.to_csv(selector_dir / "historical_month_similarity.csv", index=False, encoding="utf-8-sig")
-    _log(f"已写出 historical_month_similarity.csv -> {selector_dir}")
+    _log(f"已保存历史月份相似度明细：{selector_dir / 'historical_month_similarity.csv'}")
 
     write_json(
         selector_dir / "test_market_context.json",
@@ -465,7 +512,7 @@ def run() -> None:
             "regime_vector_keys": REGIME_FEATURE_KEYS,
         },
     )
-    _log(f"已写出 test_market_context.json -> {selector_dir}")
+    _log(f"已保存待预测期市场状态报告：{selector_dir / 'test_market_context.json'}")
 
     best = scored_windows.iloc[0]
     top_months = monthly_scaled.head(selector_cfg.top_k_similar_months)
@@ -510,14 +557,20 @@ def run() -> None:
             "alternative_windows": alternatives_records,
             "summary": (
                 "已基于 test 窗口市场状态与历史月度状态相似度完成多种连续训练窗口长度推荐，"
-                "报告仅供人工决策参考，不会自动修改 analysis_rule.yaml。"
+                "报告仅供人工决策参考。"
             ),
         },
     )
     _log(
-        "训练窗口推荐完成: "
-        f"{int(best['recommend_span_months'])}个月 / "
+        "推荐训练窗口（与待预测期市场状态最相似）："
         f"{best['train_start_date'].strftime('%Y-%m-%d')} ~ {best['train_end_date'].strftime('%Y-%m-%d')}"
+        f"（长度 {int(best['recommend_span_months'])} 个月，"
+        f"综合得分 {float(best['total_score']):.4f}）"
+    )
+    _log(
+        f"共评估 {len(selector_cfg.recommend_span_months_options)} 种窗口长度："
+        f"{selector_cfg.recommend_span_months_options} 个月，"
+        "完整报告已保存，供人工决策参考。"
     )
 
 

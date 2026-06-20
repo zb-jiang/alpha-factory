@@ -1,6 +1,7 @@
 package com.factorfactory.webapp.controller;
 
 import com.factorfactory.webapp.dto.ApiResponse;
+import com.factorfactory.webapp.dto.SelectorApplyRequest;
 import com.factorfactory.webapp.dto.StructuredConfigResponse;
 import com.factorfactory.webapp.service.TaskConfigService;
 import lombok.RequiredArgsConstructor;
@@ -62,5 +63,32 @@ public class TaskConfigController {
     public ApiResponse<Map<String, Object>> debugFeaturePoolPreview(Authentication authentication,
                                                                       @PathVariable Long taskId) {
         return ApiResponse.ok(taskConfigService.debugFeaturePoolPreview());
+    }
+
+    /** 启动训练窗口选择器计算 */
+    @PostMapping("/selector/run")
+    public ApiResponse<Void> runSelector(Authentication authentication,
+                                          @PathVariable Long taskId) {
+        Long userId = (Long) authentication.getPrincipal();
+        taskConfigService.runSelector(userId, taskId);
+        return ApiResponse.ok();
+    }
+
+    /** 获取训练窗口选择器结果 */
+    @GetMapping("/selector/result")
+    public ApiResponse<Map<String, Object>> getSelectorResult(Authentication authentication,
+                                                               @PathVariable Long taskId) {
+        Long userId = (Long) authentication.getPrincipal();
+        return ApiResponse.ok(taskConfigService.getSelectorResult(userId, taskId));
+    }
+
+    /** 应用选中的训练窗口到 analysis_rule */
+    @PostMapping("/selector/apply")
+    public ApiResponse<Void> applySelectorResult(Authentication authentication,
+                                                  @PathVariable Long taskId,
+                                                  @RequestBody SelectorApplyRequest request) {
+        Long userId = (Long) authentication.getPrincipal();
+        taskConfigService.applySelectorResult(userId, taskId, request);
+        return ApiResponse.ok();
     }
 }

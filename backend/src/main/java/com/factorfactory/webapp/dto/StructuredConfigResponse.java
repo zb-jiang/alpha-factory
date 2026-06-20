@@ -33,6 +33,9 @@ public class StructuredConfigResponse {
     /** 分组列表，每个组包含多个配置字段 */
     private List<ConfigGroup> groups;
 
+    /** 该分区是否已在数据库中保存过 */
+    private Boolean saved;
+
     @Data
     @Builder
     @NoArgsConstructor
@@ -88,6 +91,9 @@ public class StructuredConfigResponse {
         /** 条件显示：当指定key的值等于指定值时才显示 */
         private String showWhenKey;
         private Object showWhenValue;
+        /** 第二重条件显示（与第一重为 AND 关系） */
+        private String showWhenKey2;
+        private Object showWhenValue2;
         /** 选项过滤：用哪个字段的值来过滤当前select的options */
         private String optionFilterKey;
         /** 选项过滤映射：字段值 -> 允许显示的option value列表 */

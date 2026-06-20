@@ -16,13 +16,7 @@
               </div>
             </div>
           </div>
-          <div class="header-actions" v-if="isEditable">
-            <el-button @click="resetTab" size="large">重置</el-button>
-            <el-button type="primary" size="large" :loading="saving" @click="saveTab">
-              <el-icon><Check /></el-icon> 保存
-            </el-button>
-          </div>
-          <el-tag v-else type="info" size="large" effect="light">任务运行中，配置不可修改</el-tag>
+          <el-tag v-if="!isEditable" type="info" size="large" effect="light">任务运行中，配置不可修改</el-tag>
         </div>
       </div>
 
@@ -33,8 +27,8 @@
           <div
             v-for="(tab, index) in tabs"
             :key="tab.section"
-            :class="['tab-item', { active: activeTab === tab.section }]"
-            @click="switchTab(tab.section)"
+            :class="['tab-item', { active: activeTab === tab.section, disabled: isTabDisabled(index) }]"
+            @click="!isTabDisabled(index) && switchTab(tab.section)"
           >
             <el-icon size="18">
               <component :is="tabIcon(tab.sectionIcon)" />
@@ -64,7 +58,7 @@
                 <h3 class="stage-title">{{ group.label }}</h3>
               </div>
               <!-- 普通配置组 -->
-              <div v-else class="form-group">
+              <div v-else-if="isGroupVisible(group)" class="form-group">
                 <div class="group-header" v-if="group.label">
                   <div class="group-title">
                     <el-icon size="16" v-if="group.icon">
@@ -100,7 +94,7 @@
                   <div
                     v-for="field in group.fields"
                     :key="field.key"
-                    :class="['field-item', { 'field-full': isFullWidth(field.type) }]"
+                    :class="['field-item', { 'field-full': isFullWidth(field.type) || isFullWidthKey(field.key) }]"
                     v-show="isFieldVisible(field)"
                   >
                   <div class="field-label-row" v-if="field.label">
@@ -118,7 +112,7 @@
                     <el-switch
                       v-else-if="field.type === 'switch'"
                       v-model="formValues[field.key]"
-                      :disabled="!isEditable"
+                      :disabled="!isEditable || field.readonly"
                     />
                     <!-- 数字输入 -->
                     <el-input-number
@@ -209,7 +203,7 @@
                       v-else
                       v-model="formValues[field.key]"
                       :placeholder="field.placeholder"
-                      :disabled="!isEditable"
+                      :disabled="!isEditable || field.readonly"
                       size="large"
                     />
                   </div>
@@ -217,7 +211,25 @@
                 </div>
               </div>
             </div>
+            <!-- 在“训练窗口选择器”组渲染完后，紧接着插入启动推荐+推荐结果面板 -->
+            <SelectorPanel
+              v-if="group.name === 'selector' && activeTab === 'selector' && taskId && formValues['train_window_source'] === 'recommend'"
+              :task-id="taskId"
+              :mode="formValues['training_workflow.mode'] || 'static_split'"
+              :config-values="formValues"
+              class="selector-panel-wrapper"
+              @applied="onSelectorApplied"
+              @apply-window="onApplySelectorWindow"
+            />
             </template>
+          </div>
+
+          <!-- Tab 级保存/重置按钮 -->
+          <div v-if="isEditable && currentTabData" class="tab-actions">
+            <el-button @click="resetTab" size="large">重置</el-button>
+            <el-button type="primary" size="large" :loading="saving" @click="saveTab">
+              <el-icon><Check /></el-icon> 保存
+            </el-button>
           </div>
         </div>
       </div>
@@ -233,7 +245,7 @@ import {
   Calendar, Operation, Money, MagicStick, Top, FirstAidKit, DataBoard, Scissor,
   RefreshLeft, Lightning, Histogram, View, Discount, Medal, Wallet,
 } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { getTask, type TaskResponse } from '../api/task'
 import {
   getTaskConfigTabs, getTaskConfigTab, updateTaskConfigTab, testLlmConnection,
@@ -242,6 +254,7 @@ import {
 import { getSystemConfig } from '../api/config'
 import AppLayout from '../components/AppLayout.vue'
 import FeaturePoolPreview from '../components/FeaturePoolPreview.vue'
+import SelectorPanel from '../components/SelectorPanel.vue'
 
 const ICON_MAP: Record<string, any> = {
   DataAnalysis: markRaw(DataAnalysis),
@@ -291,7 +304,7 @@ const statusLabel = computed(() => {
   const map: Record<string, string> = { NEW: '新建', RUNNING: '运行中', STOPPED: '已终止', COMPLETED: '已完成', ERROR: '错误' }
   return map[task.value?.status || 'NEW']
 })
-const isEditable = computed(() => task.value?.status === 'NEW')
+const isEditable = computed(() => task.value?.status !== 'RUNNING')
 
 const tabs = ref<StructuredConfigResponse[]>([])
 const activeTab = ref('')
@@ -309,14 +322,29 @@ function isFullWidth(type: string) {
   return ['slider', 'tag_select', 'feature_pool_preview'].includes(type)
 }
 
+// 这些 key 单独占满整行，避免破坏后续字段两两成行的显示
+const FULL_WIDTH_KEYS = new Set([
+  'training_workflow.mode',
+])
+
+function isFullWidthKey(key: string) {
+  return FULL_WIDTH_KEYS.has(key)
+}
+
 function isFieldVisible(field: ConfigField) {
-  if (!field.showWhenKey) return true
-  const val = formValues.value[field.showWhenKey]
-  const when = field.showWhenValue
-  if (Array.isArray(when)) {
-    return when.includes(val)
+  function check(key?: string, value?: any): boolean {
+    if (!key) return true
+    const val = formValues.value[key]
+    if (Array.isArray(value)) {
+      return value.includes(val)
+    }
+    return val === value
   }
-  return val === when
+  return check(field.showWhenKey, field.showWhenValue) && check(field.showWhenKey2, field.showWhenValue2)
+}
+
+function isGroupVisible(group: ConfigGroup) {
+  return !group.fields || group.fields.length === 0 || group.fields.some(isFieldVisible)
 }
 
 function getFilteredOptions(field: ConfigField): SelectOption[] {
@@ -330,6 +358,18 @@ function getFilteredOptions(field: ConfigField): SelectOption[] {
 
 function hasChanges(section: string) {
   return changedTabs.value.has(section)
+}
+
+function isTabDisabled(index: number): boolean {
+  // 第一个 Tab 始终可点击
+  if (index === 0) return false
+  // 如果前面有任何 Tab 未保存过，则当前 Tab 禁用
+  for (let i = 0; i < index; i++) {
+    if (!tabs.value[i]?.saved) {
+      return true
+    }
+  }
+  return false
 }
 
 function handleSelectChange(field: ConfigField, value: any) {
@@ -479,6 +519,33 @@ async function loadTab(section: string) {
 
 async function switchTab(section: string) {
   if (activeTab.value === section) return
+
+  // 检查当前 Tab 是否有未保存的修改
+  if (changedTabs.value.has(activeTab.value)) {
+    try {
+      await ElMessageBox.confirm(
+        '当前标签页的参数已经被修改，保存修改还是放弃修改？',
+        '未保存的修改',
+        {
+          confirmButtonText: '保存',
+          cancelButtonText: '放弃',
+          distinguishCancelAndClose: true,
+          type: 'warning',
+        }
+      )
+      // 用户点击"保存"
+      await saveTab()
+    } catch (action: any) {
+      if (action === 'cancel') {
+        // 用户点击"放弃"，重置当前 Tab
+        resetTab()
+      } else {
+        // 用户点击关闭或按 ESC，取消切换
+        return
+      }
+    }
+  }
+
   activeTab.value = section
   await loadTab(section)
 }
@@ -523,12 +590,23 @@ async function saveTab() {
     return
   }
 
+  // selector tab 额外的日期校验
+  if (currentTabData.value.section === 'selector') {
+    const selectorError = validateSelectorDates()
+    if (selectorError) {
+      ElMessage.warning(selectorError)
+      return
+    }
+  }
+
   saving.value = true
   try {
     await updateTaskConfigTab(taskId.value, currentTabData.value.section, formValues.value)
     originalValues.value = { ...formValues.value }
     changedTabs.value.delete(currentTabData.value.section)
     ElMessage.success('配置已保存')
+    // 刷新 Tab 元数据，更新 saved 状态使后续 Tab 解锁
+    await fetchTabs()
   } catch {
     ElMessage.error('保存失败')
   } finally {
@@ -540,6 +618,85 @@ async function resetTab() {
   formValues.value = { ...originalValues.value }
   changedTabs.value.delete(activeTab.value)
   ElMessage.info('已重置为上次保存的值')
+}
+
+async function onSelectorApplied() {
+  await loadTab('selector')
+}
+
+function onApplySelectorWindow(payload: { start: string; end: string; span: number }) {
+  formValues.value['manual_train_start_date'] = payload.start
+  formValues.value['manual_train_end_date'] = payload.end
+}
+
+function validateSelectorDates(): string | null {
+  const v = formValues.value
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+
+  const testStart = v['test_start_date']
+  const testEnd = v['test_end_date']
+  if (!testStart || !testEnd) {
+    return 'Test 开始日期与 Test 结束日期必填'
+  }
+  if (new Date(testEnd) < new Date(testStart)) {
+    return 'Test 结束日期不能早于 Test 开始日期'
+  }
+  if (new Date(testEnd) > today) {
+    return 'Test 结束日期不能超过今天'
+  }
+
+  // 训练窗口（两种模式都必须填）
+  const trainStart = v['manual_train_start_date']
+  const trainEnd = v['manual_train_end_date']
+  if (!trainStart || !trainEnd) {
+    return '训练开始日期与训练结束日期必填'
+  }
+  if (new Date(trainEnd) < new Date(trainStart)) {
+    return '训练结束日期不能早于训练开始日期'
+  }
+  if (new Date(trainEnd) > today) {
+    return '训练结束日期不能超过今天'
+  }
+  if (new Date(trainEnd) >= new Date(testStart)) {
+    return '训练结束日期必须早于 Test 开始日期'
+  }
+
+  // 训练工作流校验
+  const mode = v['training_workflow.mode'] || 'static_split'
+  if (mode === 'static_split') {
+    const ds = v['training_workflow.static_split.discovery_start_date']
+    const de = v['training_workflow.static_split.discovery_end_date']
+    const vs = v['training_workflow.static_split.validation_start_date']
+    const ve = v['training_workflow.static_split.validation_end_date']
+    if (!ds || !de || !vs || !ve) {
+      return '固定两段切分模式下，发现期与验证期的开始/结束日期必填'
+    }
+    if (new Date(de) < new Date(ds)) {
+      return '发现期结束日期不能早于发现期开始日期'
+    }
+    if (new Date(ve) < new Date(vs)) {
+      return '验证期结束日期不能早于验证期开始日期'
+    }
+    if (new Date(de) >= new Date(vs)) {
+      return '验证期开始日期必须晚于发现期结束日期'
+    }
+    if (new Date(ds) < new Date(trainStart) || new Date(ve) > new Date(trainEnd)) {
+      return '发现期与验证期必须在训练窗口范围内'
+    }
+  } else if (mode === 'walk_forward') {
+    const dwm = Number(v['training_workflow.walk_forward.discovery_window_months'] ?? 0)
+    const vwm = Number(v['training_workflow.walk_forward.validation_window_months'] ?? 0)
+    const sm = Number(v['training_workflow.walk_forward.step_months'] ?? 0)
+    if (dwm <= 0 || vwm <= 0 || sm <= 0) {
+      return '滚动窗口模式下，发现窗口/验证窗口/滚动步长必须大于 0'
+    }
+    if (vwm > dwm) {
+      return '验证窗口（月）不能大于发现窗口（月）'
+    }
+  }
+
+  return null
 }
 
 watch(formValues, () => {
@@ -676,6 +833,12 @@ onMounted(async () => {
 
 .tab-item.active .tab-badge {
   background: var(--sb-primary-dark);
+}
+
+.tab-item.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
 }
 
 .tab-desc {
@@ -835,6 +998,15 @@ onMounted(async () => {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.tab-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px solid var(--sb-border-light);
 }
 
 @media (max-width: 768px) {

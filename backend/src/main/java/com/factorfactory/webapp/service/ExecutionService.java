@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.io.*;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.time.LocalDateTime;
 import java.util.*;
@@ -192,6 +193,113 @@ public class ExecutionService {
             return process.pid();
         } catch (Exception e) {
             return null;
+        }
+    }
+
+    private final Map<Long, Process> runningSelectors = new ConcurrentHashMap<>();
+    private final Map<Long, Path> selectorLogPaths = new ConcurrentHashMap<>();
+
+    public void runSelectorScript(Long taskId) {
+        Task task = taskRepository.findById(taskId)
+                .orElseThrow(() -> new BusinessException("任务不存在"));
+
+        Path srcDir = Paths.get(executionProperties.getSrcDir());
+        Path scriptPath = srcDir.resolve("train_window_selector.py");
+
+        if (!Files.exists(scriptPath)) {
+            throw new BusinessException("脚本文件不存在: " + scriptPath);
+        }
+
+        Process existing = runningSelectors.get(taskId);
+        if (existing != null && existing.isAlive()) {
+            existing.destroyForcibly();
+        }
+
+        Path logPath = Paths.get(task.getStagingPath(), "outputs", "_runtime",
+                "selector_" + System.currentTimeMillis() + ".log");
+
+        try {
+            Files.createDirectories(logPath.getParent());
+
+            ProcessBuilder pb = new ProcessBuilder(
+                    executionProperties.getPythonExecutable(),
+                    scriptPath.toString(),
+                    "--staging", task.getStagingPath()
+            );
+            pb.directory(srcDir.toFile());
+            pb.environment().put("PYTHONIOENCODING", "utf-8");
+            pb.redirectErrorStream(true);
+
+            Process process = pb.start();
+            runningSelectors.put(taskId, process);
+            selectorLogPaths.put(taskId, logPath);
+
+            Thread logThread = new Thread(() -> {
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(process.getInputStream(), "UTF-8"));
+                     BufferedWriter writer = Files.newBufferedWriter(logPath,
+                             StandardOpenOption.CREATE, StandardOpenOption.APPEND)) {
+
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        writer.write(line);
+                        writer.newLine();
+                        writer.flush();
+                        logWebSocketHandler.broadcastLog(taskId, "[selector] " + line);
+                    }
+                } catch (IOException e) {
+                    log.error("Selector log streaming error for task {}", taskId, e);
+                }
+
+                try {
+                    int exitCode = process.waitFor();
+                    log.info("Selector process exited: taskId={}, exitCode={}", taskId, exitCode);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    runningSelectors.remove(taskId);
+                }
+            }, "selector-stream-" + taskId);
+
+            logThread.setDaemon(true);
+            logThread.start();
+
+        } catch (IOException e) {
+            throw new BusinessException("启动选择器失败: " + e.getMessage());
+        }
+    }
+
+    public boolean isSelectorRunning(Long taskId) {
+        Process process = runningSelectors.get(taskId);
+        return process != null && process.isAlive();
+    }
+
+    public List<String> getSelectorProgressLogs(Long taskId, int maxLines) {
+        Path logPath = selectorLogPaths.get(taskId);
+        if (logPath == null) {
+            Task task = taskRepository.findById(taskId).orElse(null);
+            if (task != null) {
+                Path runtimeDir = Paths.get(task.getStagingPath(), "outputs", "_runtime");
+                try (var stream = Files.list(runtimeDir)) {
+                    logPath = stream
+                            .filter(path -> path.getFileName().toString().startsWith("selector_"))
+                            .filter(path -> path.getFileName().toString().endsWith(".log"))
+                            .max(Comparator.comparingLong(path -> path.toFile().lastModified()))
+                            .orElse(null);
+                } catch (IOException ignored) {
+                    logPath = null;
+                }
+            }
+        }
+        if (logPath == null || !Files.exists(logPath)) {
+            return List.of();
+        }
+        try {
+            List<String> lines = Files.readAllLines(logPath);
+            int from = Math.max(0, lines.size() - maxLines);
+            return lines.subList(from, lines.size());
+        } catch (IOException e) {
+            return List.of();
         }
     }
 }
