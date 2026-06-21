@@ -11,6 +11,7 @@
  * 注意：step11 不执行 step02/step03，因此**没有** OOS 区间的特征体检 / 市场环境数据。
  */
 import { computed } from 'vue'
+import CopyableCell from './CopyableCell.vue'
 
 const props = defineProps<{
   artifacts: {
@@ -128,11 +129,13 @@ function fmtDirection(v: any): { label: string; cls: string } {
           <span class="ft-col-reason">来源 / 说明</span>
         </div>
         <div v-for="(f, idx) in inputFactors" :key="'inp-' + idx" class="ft-row ft-row-narrow">
-          <span class="ft-col-name"><span class="ft-rank">{{ idx + 1 }}.</span> {{ fmtStr(f.factor_name) }}</span>
-          <span class="ft-col-formula mono">{{ fmtStr(f.formula) }}</span>
+          <CopyableCell class="ft-col-name" :value="fmtStr(f.factor_name)">
+            <span class="ft-rank">{{ idx + 1 }}.</span> {{ fmtStr(f.factor_name) }}
+          </CopyableCell>
+          <CopyableCell class="ft-col-formula mono" :value="fmtStr(f.formula)" />
           <span class="ft-col-tag"><span class="dir-tag" :class="fmtDirection(f.llm_direction).cls">{{ fmtDirection(f.llm_direction).label }}</span></span>
           <span class="ft-col-tag"><span class="dir-tag" :class="fmtDirection(f.empirical_direction).cls">{{ fmtDirection(f.empirical_direction).label }}</span></span>
-          <span class="ft-col-reason">{{ fmtStr(f.reason || f.risk) }}</span>
+          <span class="ft-col-reason" :title="fmtStr(f.reason || f.risk)">{{ fmtStr(f.reason || f.risk) }}</span>
         </div>
       </div>
       <div v-else class="empty-tip">尚未生成 factors_validated.json</div>
@@ -143,7 +146,7 @@ function fmtDirection(v: any): { label: string; cls: string } {
       <div class="sub-title">
         <span class="sub-num">02</span>
         <span>OOS 因子指标</span>
-        <span class="sub-meta">{{ factors.length }} 个通过 step08 回测筛选</span>
+        <span class="sub-meta">{{ factors.length }} 个通过回测筛选</span>
       </div>
       <div v-if="factors.length" class="factor-table">
         <div class="ft-head ft-head-9">
@@ -158,8 +161,10 @@ function fmtDirection(v: any): { label: string; cls: string } {
           <span class="ft-col-tag">实证</span>
         </div>
         <div v-for="(f, idx) in factors" :key="'oos-' + idx" class="ft-row ft-row-9">
-          <span class="ft-col-name"><span class="ft-rank">{{ idx + 1 }}.</span> {{ fmtStr(f.factor_name) }}</span>
-          <span class="ft-col-formula mono">{{ fmtStr(f.formula) }}</span>
+          <CopyableCell class="ft-col-name" :value="fmtStr(f.factor_name)">
+            <span class="ft-rank">{{ idx + 1 }}.</span> {{ fmtStr(f.factor_name) }}
+          </CopyableCell>
+          <CopyableCell class="ft-col-formula mono" :value="fmtStr(f.formula)" />
           <span class="ft-col-num">{{ fmtNum(f.mean_rank_ic, 4) }}</span>
           <span class="ft-col-num">{{ fmtNum(f.rank_ic_ir, 3) }}</span>
           <span class="ft-col-num">{{ fmtInt(f.observation_count) }}</span>
@@ -192,8 +197,8 @@ function fmtDirection(v: any): { label: string; cls: string } {
         </div>
         <div v-for="(f, idx) in top3" :key="'top-' + idx" class="ct-row" :class="{ 'ct-top': idx < 1 }">
           <span class="ct-col-rank">{{ idx + 1 }}</span>
-          <span class="ct-col-name">{{ fmtStr(f.factor_name) }}</span>
-          <span class="ct-col-formula mono">{{ fmtStr(f.formula) }}</span>
+          <CopyableCell class="ct-col-name" :value="fmtStr(f.factor_name)" dark />
+          <CopyableCell class="ct-col-formula mono" :value="fmtStr(f.formula)" dark />
           <span class="ct-col-num">{{ fmtNum(f.mean_rank_ic, 4) }}</span>
           <span class="ct-col-num">{{ fmtNum(f.rank_ic_ir, 3) }}</span>
           <span class="ct-col-num">{{ fmtPercent(f.annualized_return, 2) }}</span>
@@ -339,12 +344,24 @@ function fmtDirection(v: any): { label: string; cls: string } {
 .factor-table {
   border: 1px solid #e4e7ed;
   border-radius: 8px;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
+.factor-table::-webkit-scrollbar { height: 8px; }
+.factor-table::-webkit-scrollbar-track { background: #f8fafc; }
+.factor-table::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+.factor-table::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
 .ft-head, .ft-row {
   display: grid;
   /* 输入清单：因子 | 公式 | LLM | 实证 | 来源说明 */
-  grid-template-columns: 1.5fr 2.5fr 0.7fr 0.7fr 2fr;
+  grid-template-columns:
+    minmax(180px, 1.4fr)
+    minmax(280px, 2.4fr)
+    minmax(70px, 0.5fr)
+    minmax(70px, 0.5fr)
+    minmax(180px, 1.6fr);
+  min-width: 880px;
   gap: 10px;
   align-items: center;
   padding: 9px 14px;
@@ -352,7 +369,17 @@ function fmtDirection(v: any): { label: string; cls: string } {
 }
 .ft-head-9, .ft-row-9 {
   /* OOS 因子指标表：因子 | 公式 | rankIC | rankIR | obs | annRet | total | LLM | 实证 */
-  grid-template-columns: 1.5fr 2.3fr 0.7fr 0.7fr 0.7fr 0.8fr 0.7fr 0.7fr 0.7fr;
+  grid-template-columns:
+    minmax(180px, 1.4fr)
+    minmax(260px, 2.2fr)
+    minmax(70px, 0.6fr)
+    minmax(70px, 0.6fr)
+    minmax(60px, 0.5fr)
+    minmax(80px, 0.6fr)
+    minmax(70px, 0.5fr)
+    minmax(70px, 0.5fr)
+    minmax(70px, 0.5fr);
+  min-width: 1020px;
 }
 .ft-head {
   background: #f8fafc;
@@ -362,6 +389,9 @@ function fmtDirection(v: any): { label: string; cls: string } {
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 .ft-row {
   border-bottom: 1px solid #f1f5f9;
@@ -373,10 +403,14 @@ function fmtDirection(v: any): { label: string; cls: string } {
   text-align: right;
   font-feature-settings: "tnum";
   color: #1f2937;
+  white-space: nowrap;
 }
 .ft-col-name {
   font-weight: 600;
   color: #0f172a;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .ft-rank {
   color: #94a3b8;
@@ -384,14 +418,22 @@ function fmtDirection(v: any): { label: string; cls: string } {
   font-size: 11px;
   margin-right: 4px;
 }
-.ft-col-formula { color: #475569; font-size: 11px; word-break: break-all; }
+.ft-col-formula {
+  color: #475569;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: "SF Mono", "JetBrains Mono", monospace;
+}
 .mono { font-family: "SF Mono", "JetBrains Mono", monospace; }
-.ft-col-tag { text-align: center; }
+.ft-col-tag { text-align: center; white-space: nowrap; }
 .ft-col-reason {
   font-size: 11px;
   color: #64748b;
-  line-height: 1.5;
-  word-break: break-word;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ========= Direction tags ========= */
@@ -439,10 +481,25 @@ function fmtDirection(v: any): { label: string; cls: string } {
 }
 .cross-table {
   padding: 8px 0;
+  overflow-x: auto;
 }
+.cross-table::-webkit-scrollbar { height: 8px; }
+.cross-table::-webkit-scrollbar-track { background: #1e293b; }
+.cross-table::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+.cross-table::-webkit-scrollbar-thumb:hover { background: #64748b; }
+
 .ct-head, .ct-row {
   display: grid;
-  grid-template-columns: 0.4fr 1.6fr 2.5fr 0.8fr 0.8fr 0.9fr 0.6fr 0.8fr;
+  grid-template-columns:
+    minmax(40px, 0.3fr)
+    minmax(180px, 1.4fr)
+    minmax(280px, 2.2fr)
+    minmax(80px, 0.6fr)
+    minmax(80px, 0.6fr)
+    minmax(80px, 0.6fr)
+    minmax(60px, 0.5fr)
+    minmax(70px, 0.6fr);
+  min-width: 980px;
   gap: 10px;
   align-items: center;
   padding: 9px 26px;
@@ -465,17 +522,27 @@ function fmtDirection(v: any): { label: string; cls: string } {
   font-family: "SF Mono", "JetBrains Mono", monospace;
   color: #fbbf24;
   font-weight: 700;
+  white-space: nowrap;
 }
-.ct-col-name { font-weight: 600; }
+.ct-col-name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .ct-col-formula {
   color: #94a3b8;
   font-size: 11px;
-  word-break: break-all;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: "SF Mono", "JetBrains Mono", monospace;
 }
 .ct-col-num {
   font-family: "SF Mono", "JetBrains Mono", monospace;
   text-align: right;
   font-feature-settings: "tnum";
+  white-space: nowrap;
 }
 
 /* ========= Misc ========= */

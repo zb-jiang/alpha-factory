@@ -10,6 +10,7 @@
  *  - 末尾跨窗口排名
  */
 import { computed, ref } from 'vue'
+import CopyableCell from './CopyableCell.vue'
 
 const props = defineProps<{
   artifacts: {
@@ -275,9 +276,11 @@ const summaryStats = computed(() => {
                 <span class="ft-col-tag">实证</span>
               </div>
               <div v-for="(f, idx) in w.discovery.candidates" :key="'cand-' + idx" class="ft-row">
-                <span class="ft-col-name"><span class="ft-rank">{{ idx + 1 }}.</span> {{ fmtStr(f.factor_name) }}</span>
+                <CopyableCell class="ft-col-name" :value="fmtStr(f.factor_name)">
+                  <span class="ft-rank">{{ idx + 1 }}.</span> {{ fmtStr(f.factor_name) }}
+                </CopyableCell>
                 <span class="ft-col-source"><span class="src-chip">{{ shortIter(f.source_iteration) }}</span></span>
-                <span class="ft-col-formula mono">{{ fmtStr(f.formula) }}</span>
+                <CopyableCell class="ft-col-formula mono" :value="fmtStr(f.formula)" />
                 <span class="ft-col-num">{{ fmtNum(f.mean_rank_ic, 4) }}</span>
                 <span class="ft-col-num">{{ fmtNum(f.rank_ic_ir, 3) }}</span>
                 <span class="ft-col-num">{{ fmtInt(f.observation_count) }}</span>
@@ -309,9 +312,11 @@ const summaryStats = computed(() => {
                 <span class="ft-col-tag">实证</span>
               </div>
               <div v-for="(f, idx) in w.validation.factors" :key="'val-' + idx" class="ft-row">
-                <span class="ft-col-name"><span class="ft-rank">{{ idx + 1 }}.</span> {{ fmtStr(f.factor_name) }}</span>
+                <CopyableCell class="ft-col-name" :value="fmtStr(f.factor_name)">
+                  <span class="ft-rank">{{ idx + 1 }}.</span> {{ fmtStr(f.factor_name) }}
+                </CopyableCell>
                 <span class="ft-col-source"><span class="src-chip">{{ shortIter(f.source_iteration) }}</span></span>
-                <span class="ft-col-formula mono">{{ fmtStr(f.formula) }}</span>
+                <CopyableCell class="ft-col-formula mono" :value="fmtStr(f.formula)" />
                 <span class="ft-col-num">{{ fmtNum(f.mean_rank_ic, 4) }}</span>
                 <span class="ft-col-num">{{ fmtNum(f.rank_ic_ir, 3) }}</span>
                 <span class="ft-col-num">{{ fmtInt(f.observation_count) }}</span>
@@ -346,8 +351,8 @@ const summaryStats = computed(() => {
         </div>
         <div v-for="(f, idx) in crossWindow.ranking" :key="'cross-' + idx" class="ct-row" :class="{ 'ct-top': idx < 3 }">
           <span class="ct-col-rank">{{ idx + 1 }}</span>
-          <span class="ct-col-name">{{ fmtStr(f.factor_name) }}</span>
-          <span class="ct-col-formula mono">{{ fmtStr(f.formula) }}</span>
+          <CopyableCell class="ct-col-name" :value="fmtStr(f.factor_name)" dark />
+          <CopyableCell class="ct-col-formula mono" :value="fmtStr(f.formula)" dark />
           <span class="ct-col-num">{{ fmtPercent(f.window_pass_ratio, 1) }}</span>
           <span class="ct-col-num">{{ fmtNum(f.mean_validation_total_score, 3) }}</span>
           <span class="ct-col-num">{{ fmtNum(f.mean_rank_ic, 4) }}</span>
@@ -757,11 +762,29 @@ const summaryStats = computed(() => {
 .factor-table {
   border: 1px solid #e4e7ed;
   border-radius: 8px;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
+/* 自定义滑动条样式 */
+.factor-table::-webkit-scrollbar { height: 8px; }
+.factor-table::-webkit-scrollbar-track { background: #f8fafc; }
+.factor-table::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+.factor-table::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
 .ft-head, .ft-row {
   display: grid;
-  grid-template-columns: 1.5fr 0.7fr 2.3fr 0.7fr 0.7fr 0.7fr 0.8fr 0.7fr 0.7fr;
+  /* 固定列宽（minmax），保证多行间严格对齐；总宽不够时由 .factor-table 横向滚动 */
+  grid-template-columns:
+    minmax(180px, 1.4fr)   /* 因子名 */
+    minmax(72px, 0.5fr)    /* 来源 */
+    minmax(280px, 2.4fr)   /* 公式（最重要的可读列） */
+    minmax(70px, 0.6fr)    /* rankIC */
+    minmax(70px, 0.6fr)    /* rankIR */
+    minmax(60px, 0.5fr)    /* obs */
+    minmax(80px, 0.6fr)    /* annRet */
+    minmax(70px, 0.5fr)    /* LLM */
+    minmax(70px, 0.5fr);   /* 实证 */
+  min-width: 980px;
   gap: 10px;
   align-items: center;
   padding: 9px 14px;
@@ -775,24 +798,33 @@ const summaryStats = computed(() => {
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 .ft-row {
   border-bottom: 1px solid #f1f5f9;
 }
 .ft-row:last-child { border-bottom: none; }
 .ft-row:hover { background: #fafbfc; }
+
 .ft-col-num {
   font-family: "SF Mono", "JetBrains Mono", monospace;
   text-align: right;
   font-feature-settings: "tnum";
   color: #1f2937;
+  white-space: nowrap;
 }
 .ft-col-name {
   font-weight: 600;
   color: #0f172a;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .ft-col-source {
   font-size: 11px;
+  white-space: nowrap;
 }
 .src-chip {
   display: inline-block;
@@ -811,9 +843,17 @@ const summaryStats = computed(() => {
   font-size: 11px;
   margin-right: 4px;
 }
-.ft-col-formula { color: #475569; font-size: 11px; word-break: break-all; }
+/* 公式列：单行省略，hover/title 看完整 */
+.ft-col-formula {
+  color: #475569;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: "SF Mono", "JetBrains Mono", monospace;
+}
 .mono { font-family: "SF Mono", "JetBrains Mono", monospace; }
-.ft-col-tag { text-align: center; }
+.ft-col-tag { text-align: center; white-space: nowrap; }
 
 /* ========= Cross window ========= */
 .cross-section {
@@ -846,10 +886,25 @@ const summaryStats = computed(() => {
 }
 .cross-table {
   padding: 8px 0;
+  overflow-x: auto;
 }
+.cross-table::-webkit-scrollbar { height: 8px; }
+.cross-table::-webkit-scrollbar-track { background: #1e293b; }
+.cross-table::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+.cross-table::-webkit-scrollbar-thumb:hover { background: #64748b; }
+
 .ct-head, .ct-row {
   display: grid;
-  grid-template-columns: 0.4fr 1.6fr 2.5fr 0.8fr 0.9fr 0.9fr 0.9fr 0.6fr;
+  grid-template-columns:
+    minmax(40px, 0.3fr)     /* # */
+    minmax(180px, 1.4fr)    /* 因子名 */
+    minmax(280px, 2.2fr)    /* 公式 */
+    minmax(80px, 0.7fr)     /* 通过率 */
+    minmax(90px, 0.7fr)     /* 平均score */
+    minmax(90px, 0.7fr)     /* 平均rankIC */
+    minmax(90px, 0.7fr)     /* 平均annRet */
+    minmax(60px, 0.4fr);    /* 窗口 */
+  min-width: 980px;
   gap: 10px;
   align-items: center;
   padding: 9px 26px;
@@ -872,17 +927,27 @@ const summaryStats = computed(() => {
   font-family: "SF Mono", "JetBrains Mono", monospace;
   color: #fbbf24;
   font-weight: 700;
+  white-space: nowrap;
 }
-.ct-col-name { font-weight: 600; }
+.ct-col-name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .ct-col-formula {
   color: #94a3b8;
   font-size: 11px;
-  word-break: break-all;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: "SF Mono", "JetBrains Mono", monospace;
 }
 .ct-col-num {
   font-family: "SF Mono", "JetBrains Mono", monospace;
   text-align: right;
   font-feature-settings: "tnum";
+  white-space: nowrap;
 }
 
 /* ========= Misc ========= */
