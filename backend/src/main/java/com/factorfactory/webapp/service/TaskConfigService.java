@@ -84,6 +84,18 @@ public class TaskConfigService {
         return tabs;
     }
 
+    /**
+     * 获取该任务在 task_config 表中已经存在的全部 section 名集合。
+     * 前端用来判断"任务是否已完成配置"——只要必需的 section 都在这个列表里就视为已配置。
+     */
+    public List<String> getSavedSections(Long userId, Long taskId) {
+        taskService.findTaskBelongsToUser(userId, taskId);
+        return taskConfigRepository.findByTaskId(taskId).stream()
+                .map(TaskConfig::getSection)
+                .distinct()
+                .collect(Collectors.toList());
+    }
+
     public StructuredConfigResponse getTab(Long userId, Long taskId, String tab) {
         return switch (tab) {
             case TAB_STOCK_POOL -> buildStockPoolTab(taskId);
@@ -252,12 +264,21 @@ public class TaskConfigService {
     @Transactional
     public void runSelector(Long userId, Long taskId) {
         taskService.findTaskBelongsToUser(userId, taskId);
-        // 硬编码 run_mode 为 train，保存到数据库
+        prepareRunMode(userId, taskId, "train");
+        executionService.runSelectorScript(taskId);
+    }
+
+    /**
+     * 启动流水线脚本前的预处理：把 analysis_rule.run_mode 硬编码为指定值，
+     * 然后把数据库中的最新配置全量刷新到 staging 目录的 YAML 副本中。
+     * 由 ExecutionService.startTask 与 TaskConfigService.runSelector 共同调用。
+     */
+    @Transactional
+    public void prepareRunMode(Long userId, Long taskId, String runMode) {
         Map<String, Object> analysisValues = getSectionMap(taskId, TAB_ANALYSIS);
-        analysisValues.put("run_mode", "train");
+        analysisValues.put("run_mode", runMode);
         saveSection(taskId, TAB_ANALYSIS, analysisValues);
         taskService.refreshConfigCopy(userId, taskId);
-        executionService.runSelectorScript(taskId);
     }
 
     public Map<String, Object> getSelectorResult(Long userId, Long taskId) {

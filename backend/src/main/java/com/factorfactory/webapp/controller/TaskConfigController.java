@@ -30,6 +30,14 @@ public class TaskConfigController {
         return ApiResponse.ok(taskConfigService.getAllTabs(userId, taskId));
     }
 
+    /** 获取任务在 task_config 表中已存在的全部 section 名集合（前端用来判断"配置完成度"） */
+    @GetMapping("/saved-sections")
+    public ApiResponse<List<String>> getSavedSections(Authentication authentication,
+                                                       @PathVariable Long taskId) {
+        Long userId = (Long) authentication.getPrincipal();
+        return ApiResponse.ok(taskConfigService.getSavedSections(userId, taskId));
+    }
+
     /** 获取任务某个配置Tab */
     @GetMapping("/{tab}")
     public ApiResponse<StructuredConfigResponse> getTab(Authentication authentication,

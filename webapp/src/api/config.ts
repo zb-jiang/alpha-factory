@@ -71,6 +71,10 @@ export function getTaskConfigTabs(taskId: number) {
   return api.get<any, { data: StructuredConfigResponse[] }>(`/tasks/${taskId}/config`)
 }
 
+export function getTaskSavedSections(taskId: number) {
+  return api.get<any, { data: string[] }>(`/tasks/${taskId}/config/saved-sections`)
+}
+
 export function getTaskConfigTab(taskId: number, tab: string) {
   return api.get<any, { data: StructuredConfigResponse }>(`/tasks/${taskId}/config/${tab}`)
 }

@@ -154,6 +154,8 @@ OUTPUT_ARTIFACTS = [
     Path("health") / "feature_corr.csv",
     Path("health") / "llm_summary.json",
     Path("health") / "market_context.json",
+    Path("health") / "health_summary.json",
+    Path("health") / "fundamental_feature_health.json",
     Path("llm") / "raw_response.json",
     Path("llm") / "factors_validated.json",
     Path("llm") / "factors_rejected.json",

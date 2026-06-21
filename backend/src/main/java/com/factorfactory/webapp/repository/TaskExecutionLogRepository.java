@@ -9,4 +9,5 @@ import java.util.Optional;
 public interface TaskExecutionLogRepository extends JpaRepository<TaskExecutionLog, Long> {
     List<TaskExecutionLog> findByTaskIdOrderByStartTimeDesc(Long taskId);
     Optional<TaskExecutionLog> findTopByTaskIdOrderByStartTimeDesc(Long taskId);
+    void deleteByTaskId(Long taskId);
 }

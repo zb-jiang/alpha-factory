@@ -19,7 +19,6 @@ export const STEP_LABELS: Record<string, string> = {
 export const STATUS_MAP: Record<string, { label: string; type: string; cssClass: string }> = {
   NEW: { label: '新建', type: 'info', cssClass: 'sb-status-new' },
   RUNNING: { label: '运行中', type: 'success', cssClass: 'sb-status-running' },
-  STOPPED: { label: '已终止', type: 'danger', cssClass: 'sb-status-stopped' },
-  COMPLETED: { label: '已完成', type: 'success', cssClass: 'sb-status-completed' },
-  ERROR: { label: '错误', type: 'warning', cssClass: 'sb-status-error' },
+  TRAINING_FINISHED: { label: '因子挖掘完成', type: 'warning', cssClass: 'sb-status-training-finished' },
+  TESTING_FINISHED: { label: '回测完成', type: 'success', cssClass: 'sb-status-testing-finished' },
 }

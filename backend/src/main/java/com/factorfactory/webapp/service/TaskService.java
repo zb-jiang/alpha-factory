@@ -6,6 +6,8 @@ import com.factorfactory.webapp.dto.TaskResponse;
 import com.factorfactory.webapp.entity.Task;
 import com.factorfactory.webapp.entity.User;
 import com.factorfactory.webapp.exception.BusinessException;
+import com.factorfactory.webapp.repository.TaskConfigRepository;
+import com.factorfactory.webapp.repository.TaskExecutionLogRepository;
 import com.factorfactory.webapp.repository.TaskRepository;
 import com.factorfactory.webapp.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
@@ -29,6 +31,8 @@ public class TaskService {
     private final UserRepository userRepository;
     private final StagingProperties stagingProperties;
     private final StagingConfigService stagingConfigService;
+    private final TaskConfigRepository taskConfigRepository;
+    private final TaskExecutionLogRepository taskExecutionLogRepository;
 
     public List<TaskResponse> listTasks(Long userId) {
         return taskRepository.findByUserIdOrderByCreatedAtDesc(userId).stream()
@@ -103,6 +107,12 @@ public class TaskService {
                 log.warn("Failed to delete staging directory: {}", e.getMessage());
             }
         }
+
+        // 级联删除该任务在 task_config 表中的所有配置分区
+        taskConfigRepository.deleteByTaskId(taskId);
+
+        // 级联删除该任务在 task_execution_log 表中的所有执行记录
+        taskExecutionLogRepository.deleteByTaskId(taskId);
 
         taskRepository.delete(task);
         log.info("Task deleted: id={}", taskId);

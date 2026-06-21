@@ -23,7 +23,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from common import log_step_end, log_step_start
+from common import OUTPUT_DIR, log_step_end, log_step_start
 
 
 def get_project_root() -> Path:
@@ -52,7 +52,7 @@ def clean_outputs(
         统计信息字典，包含删除的文件和目录数量
     """
     project_root = get_project_root()
-    outputs_dir = project_root / "outputs"
+    outputs_dir = OUTPUT_DIR
     
     if not outputs_dir.exists():
         print(f"outputs 目录不存在，创建空目录结构")
@@ -93,15 +93,17 @@ def clean_outputs(
     
     for pattern, item_type in items_to_clean:
         full_pattern = outputs_dir / pattern
-        
+        # 日志显示路径以 outputs_dir 为锚点，避免在 staging 模式下计算相对路径报错
+        display_root = outputs_dir.parent
+
         if item_type == "directories":
             # 匹配目录
             for item in outputs_dir.glob(pattern.replace("/*", "")):
                 if item.is_dir():
                     if dry_run:
-                        print(f"[将删除目录] {item.relative_to(project_root)}")
+                        print(f"[将删除目录] {item.relative_to(display_root)}")
                     else:
-                        print(f"[删除目录] {item.relative_to(project_root)}")
+                        print(f"[删除目录] {item.relative_to(display_root)}")
                         shutil.rmtree(item)
                     stats["directories"] += 1
         else:
@@ -118,12 +120,18 @@ def clean_outputs(
                             and item.name in {"top3_factors.json", "skipped_factors.json"}
                         ):
                             continue
+                        # 保护 _runtime/ 下当前正在写入的 step/selector 执行日志，
+                        # 否则会导致后端进程仍持有句柄但目录扫描丢失，前端 UI 看不到任何输出。
+                        if parent_dir == outputs_dir / "_runtime" and (
+                            item.name.startswith("step") or item.name.startswith("selector_")
+                        ) and item.name.endswith(".log"):
+                            continue
                         if dry_run:
-                            print(f"[将删除文件] {item.relative_to(project_root)}")
+                            print(f"[将删除文件] {item.relative_to(display_root)}")
                             stats["files"] += 1
                         else:
                             try:
-                                print(f"[删除文件] {item.relative_to(project_root)}")
+                                print(f"[删除文件] {item.relative_to(display_root)}")
                                 item.unlink()
                                 stats["files"] += 1
                             except PermissionError:

@@ -156,7 +156,7 @@ class TushareProvider(BaseDataProvider):
         self._api_key = None
         self._request_interval_seconds = max(float(self.ts_config.get("request_interval_seconds", 0.35) or 0.35), 0.0)
         self._rate_limit_retry_seconds = max(float(self.ts_config.get("rate_limit_retry_seconds", 65.0) or 65.0), 0.0)
-        self._rate_limit_retries = max(int(self.ts_config.get("rate_limit_retries", 1) or 1), 0)
+        self._rate_limit_retries = max(int(self.ts_config.get("rate_limit_retries", 3) or 3), 0)
         self._api_call_timeout_seconds = max(float(self.ts_config.get("api_call_timeout_seconds", 30.0) or 30.0), 0.0)
         self._enable_meta_reconcile = bool(self.ts_config.get("enable_meta_reconcile", False))
         self._latest_trade_lag_days = max(int(self.ts_config.get("latest_trade_lag_days", 1) or 1), 0)
@@ -600,7 +600,18 @@ class TushareProvider(BaseDataProvider):
 
     def _is_rate_limit_error(self, error: Exception) -> bool:
         message = str(error)
-        return "每分钟最多访问该接口" in message or "频次" in message or "rate limit" in message.lower()
+        markers = [
+            "每分钟最多访问该接口",
+            "频次",
+            "频率超限",
+            "访问频次",
+            "次/分钟",
+            "次/秒",
+            "rate limit",
+            "too many requests",
+        ]
+        message_lower = message.lower()
+        return any(m in message or m in message_lower for m in markers)
 
     def _call_pro_api(self, method_name: str, **kwargs) -> Any:
         if self._pro is None:
@@ -614,8 +625,12 @@ class TushareProvider(BaseDataProvider):
             except Exception as error:
                 if attempt >= self._rate_limit_retries or not self._is_rate_limit_error(error):
                     raise
-                wait_seconds = max(self._rate_limit_retry_seconds, self._request_interval_seconds)
-                print(f"  Tushare 接口触发频率限制，{wait_seconds:.1f} 秒后重试 {method_name}")
+                # 指数退避：每次失败把等待时间放大 (attempt+1) 倍，累计跨越多个限流窗口
+                wait_seconds = max(self._rate_limit_retry_seconds, self._request_interval_seconds) * (attempt + 1)
+                print(
+                    f"  Tushare 接口触发频率限制（第 {attempt + 1}/{self._rate_limit_retries + 1} 次），"
+                    f"{wait_seconds:.1f} 秒后重试 {method_name}"
+                )
                 time.sleep(wait_seconds)
         raise RuntimeError(f"Tushare 接口调用失败: {method_name}")
 

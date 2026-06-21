@@ -19,40 +19,46 @@
       <div class="sb-content">
         <!-- Stats Row -->
         <el-row :gutter="16" class="stats-row">
-          <el-col :span="6">
-            <div class="stat-card">
+          <el-col :span="24 / 5">
+            <div class="stat-card" :class="{ active: filterStatus === '' }" @click="filterStatus = ''">
               <div class="stat-value">{{ tasks.length }}</div>
               <div class="stat-label">总任务数</div>
             </div>
           </el-col>
-          <el-col :span="6">
-            <div class="stat-card">
+          <el-col :span="24 / 5">
+            <div class="stat-card" :class="{ active: filterStatus === 'NEW' }" @click="filterStatus = 'NEW'">
+              <div class="stat-value stat-new">{{ newCount }}</div>
+              <div class="stat-label">新建</div>
+            </div>
+          </el-col>
+          <el-col :span="24 / 5">
+            <div class="stat-card" :class="{ active: filterStatus === 'RUNNING' }" @click="filterStatus = 'RUNNING'">
               <div class="stat-value stat-running">{{ runningCount }}</div>
               <div class="stat-label">运行中</div>
             </div>
           </el-col>
-          <el-col :span="6">
-            <div class="stat-card">
-              <div class="stat-value stat-completed">{{ completedCount }}</div>
-              <div class="stat-label">已完成</div>
+          <el-col :span="24 / 5">
+            <div class="stat-card" :class="{ active: filterStatus === 'TRAINING_FINISHED' }" @click="filterStatus = 'TRAINING_FINISHED'">
+              <div class="stat-value stat-training-finished">{{ trainingFinishedCount }}</div>
+              <div class="stat-label">因子挖掘完成</div>
             </div>
           </el-col>
-          <el-col :span="6">
-            <div class="stat-card">
-              <div class="stat-value stat-new">{{ newCount }}</div>
-              <div class="stat-label">待启动</div>
+          <el-col :span="24 / 5">
+            <div class="stat-card" :class="{ active: filterStatus === 'TESTING_FINISHED' }" @click="filterStatus = 'TESTING_FINISHED'">
+              <div class="stat-value stat-testing-finished">{{ testingFinishedCount }}</div>
+              <div class="stat-label">回测完成</div>
             </div>
           </el-col>
         </el-row>
 
         <!-- Task Grid -->
         <div class="section-title-row">
-          <h2>全部任务</h2>
-          <span class="section-count">{{ tasks.length }} 个任务</span>
+          <h2>{{ filterStatus ? statusMap[filterStatus]?.label + '任务' : '全部任务' }}</h2>
+          <span class="section-count">{{ filteredTasks.length }} 个任务</span>
         </div>
 
         <el-row :gutter="16">
-          <el-col v-for="task in tasks" :key="task.id" :xs="24" :sm="12" :md="8" :lg="6" :xl="6">
+          <el-col v-for="task in filteredTasks" :key="task.id" :xs="24" :sm="12" :md="8" :lg="6" :xl="6">
             <div class="task-card sb-card">
               <div class="task-card-header">
                 <div class="task-name">{{ task.taskName }}</div>
@@ -74,8 +80,12 @@
                   <el-icon><View /></el-icon> 详情
                 </el-button>
                 <el-button size="small" text type="primary" @click="goToConfig(task.id)"
-                  :disabled="task.status !== 'NEW'">
+                  :disabled="task.status === 'RUNNING'">
                   <el-icon><Setting /></el-icon> 配置
+                </el-button>
+                <el-button size="small" text type="danger" @click="onDeleteTask(task)"
+                  :disabled="task.status === 'RUNNING'">
+                  <el-icon><Delete /></el-icon> 删除
                 </el-button>
               </div>
             </div>
@@ -107,11 +117,11 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
-import { Plus, View, Setting } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { Plus, View, Setting, Delete } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import type { FormInstance } from 'element-plus'
 import { useAuthStore } from '../stores/auth'
-import { listTasks, createTask, type TaskResponse } from '../api/task'
+import { listTasks, createTask, deleteTask, type TaskResponse } from '../api/task'
 import { formatDateTime, STATUS_MAP } from '../utils/constants'
 import AppLayout from '../components/AppLayout.vue'
 
@@ -124,9 +134,18 @@ const showCreateDialog = ref(false)
 const createFormRef = ref<FormInstance>()
 const statusMap = STATUS_MAP
 
+// 任务列表筛选：'' 表示全部，否则按 status 字段过滤
+const filterStatus = ref<string>('')
+
 const runningCount = computed(() => tasks.value.filter(t => t.status === 'RUNNING').length)
-const completedCount = computed(() => tasks.value.filter(t => t.status === 'COMPLETED').length)
 const newCount = computed(() => tasks.value.filter(t => t.status === 'NEW').length)
+const trainingFinishedCount = computed(() => tasks.value.filter(t => t.status === 'TRAINING_FINISHED').length)
+const testingFinishedCount = computed(() => tasks.value.filter(t => t.status === 'TESTING_FINISHED').length)
+
+const filteredTasks = computed(() => {
+  if (!filterStatus.value) return tasks.value
+  return tasks.value.filter(t => t.status === filterStatus.value)
+})
 
 const createForm = reactive({
   taskName: '',
@@ -170,6 +189,29 @@ function goToConfig(taskId: number) {
   router.push({ name: 'TaskConfig', params: { taskId } })
 }
 
+async function onDeleteTask(task: TaskResponse) {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除任务“${task.name}”吗？此操作会同时清除该任务的所有配置、执行日志，以及 staging 目录下的产物文件。`,
+      '删除任务',
+      {
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+        type: 'warning',
+      }
+    )
+  } catch {
+    return
+  }
+  try {
+    await deleteTask(task.id)
+    ElMessage.success('任务已删除')
+    await fetchTasks()
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.message || '删除失败')
+  }
+}
+
 onMounted(() => {
   fetchTasks()
 })
@@ -193,6 +235,26 @@ onMounted(() => {
   padding: 24px;
   text-align: center;
   transition: var(--sb-transition);
+  cursor: pointer;
+  user-select: none;
+}
+
+.stat-card:hover {
+  border-color: var(--sb-primary);
+  transform: translateY(-1px);
+}
+
+.stat-card.active {
+  border-color: var(--sb-primary);
+  box-shadow: 0 0 0 2px var(--sb-primary-light);
+}
+
+.stat-training-finished {
+  color: #b88230;
+}
+
+.stat-testing-finished {
+  color: #67c23a;
 }
 
 .stat-card:hover {

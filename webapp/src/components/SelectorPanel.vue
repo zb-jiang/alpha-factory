@@ -41,6 +41,64 @@ const selected = ref<{ start: string; end: string; span: number } | null>(null)
 const hasResult = computed(() => result.value?.ready === true)
 const progressLogs = computed<string[]>(() => result.value?.progress_logs || [])
 
+// 进度日志折叠 + 截断（方案 A + D）：
+// 1) 识别"进度行"（同一 prefix 的连续刷新），同 prefix 后续行原地替换前一行
+// 2) 整体只保留最近 MAX_LINES 行，避免日志列表无限增长
+const MAX_DISPLAY_LINES = 200
+
+// 提取进度行的"分组键"。命中则该行被视为进度行，相同 key 的后续行替换前一行；返回 null 表示普通日志，独立显示
+function extractProgressKey(line: string): string | null {
+  // 去掉前缀 "[selector HH:MM:SS]" 和左侧空白
+  const stripped = line
+    .replace(/^\[selector \d{1,2}:\d{2}:\d{2}\]\s*/, '')
+    .replace(/^\s+/, '')
+  // 形如 "[SQLite] daily ████ 30/297 (10%)"
+  let m = stripped.match(/^(\[SQLite\]\s+\S+)/)
+  if (m) return `sqlite:${m[1]}`
+  // 形如 "[SQLite] 从 Tushare 获取缺失的 daily 数据..."（按接口名归并）
+  m = stripped.match(/^\[SQLite\]\s+从\s+Tushare\s+获取缺失的\s+(\S+)\s+数据/)
+  if (m) return `fetch:${m[1]}`
+  // 形如 "审计 daily ████ 30/120 (25%)"（step01 预缓存的进度）
+  m = stripped.match(/^(审计\s+\S+)\s+[█░]/)
+  if (m) return `audit:${m[1]}`
+  // 形如 "历史月份汇总进度：30/120"（市场状态聚合阶段的进度）
+  if (/进度[:：]\s*\d+\s*\/\s*\d+/.test(stripped)) return 'aggregate_progress'
+  // 兜底：只要包含 "n/m (xx%)" 模式且含有进度条字符 █/░ 就视为进度行
+  if (/[█░]+/.test(stripped) && /\d+\s*\/\s*\d+\s*\(\d+%\)/.test(stripped)) {
+    const head = stripped.split(/[█░]/, 1)[0].trim()
+    return `bar:${head}`
+  }
+  return null
+}
+
+const displayLogs = computed<string[]>(() => {
+  const lines = progressLogs.value
+  const result: string[] = []
+  // key -> result 数组中的下标
+  const keyToIndex = new Map<string, number>()
+
+  for (const line of lines) {
+    const key = extractProgressKey(line)
+    if (key !== null) {
+      const existed = keyToIndex.get(key)
+      if (existed !== undefined) {
+        result[existed] = line
+        continue
+      }
+      keyToIndex.set(key, result.length)
+      result.push(line)
+    } else {
+      result.push(line)
+    }
+  }
+
+  // 整体最多保留 MAX_DISPLAY_LINES 行
+  if (result.length > MAX_DISPLAY_LINES) {
+    return result.slice(result.length - MAX_DISPLAY_LINES)
+  }
+  return result
+})
+
 const spanWindows = computed(() => {
   const map: Record<string, { start: string; end: string; score: number; isBest: boolean }[]> = {}
   const raw = result.value?.span_window
@@ -211,14 +269,14 @@ onUnmounted(() => {
         </el-button>
         <el-text v-if="running" type="info" class="running-hint">
           <el-icon class="is-loading"><Loading /></el-icon>
-          后台正在根据 Test 时间窗口寻找相似历史训练窗口…
+          后台正在根据回测时间窗口寻找相似历史训练窗口…
         </el-text>
       </div>
 
       <div v-if="showProgressLogs && (running || progressLogs.length)" class="progress-panel">
         <div class="progress-title">后台执行进度</div>
         <div class="progress-log-list">
-          <div v-for="(line, idx) in progressLogs" :key="idx" class="progress-log-line">{{ line }}</div>
+          <div v-for="(line, idx) in displayLogs" :key="idx" class="progress-log-line">{{ line }}</div>
         </div>
       </div>
 

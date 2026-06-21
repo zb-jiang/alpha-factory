@@ -28,4 +28,4 @@
    - 因为成分股权重数据的ready程度不同而引起本地和joinquant平台的交易股票的交易量差异，如果是这个原因需要找到详细的数据证据
    - 本地交易是按照“手”（100股/200股）向下取整进行交易的，而joinquant平台order_target_value可能不会向下取整，导致交易量差异（因为是聚宽内部的机制，所以不确定，但是从交易日志中看到的现象）
 11. 当你发现原因是joinquant平台的交易行为和本地不一致时，不要停止，需要查看交易行为为什么和本地不同？joinquant的交易脚本也是step14生成的呀，所以需要看看是不是step14的代码有问题
-12. backend 和 webapp两个目录下的代码是通过web UI的方式实现多用户和多租户的因子挖掘流水线。每个用户可以启动多个流水线实例（step10-step14），实例间互不干涉。每个流水线实例的代码逻辑都follow runtime/src中的逻辑。通过staging来进行实例隔离。所有的实例都有自己的配置项copy(符合runtime/config中的内容和格式，注意backend 和 webapp中配置的single truth of data是数据库，不是runtime/config中的YAML)。
+12. backend 和 webapp两个目录下的代码是通过web UI的方式实现多用户和多租户的因子挖掘流水线。每个用户可以启动多个流水线实例（step10-step14），实例间互不干涉。每个流水线实例的代码逻辑都follow runtime/src中的逻辑。通过staging(staging目录在当前工程的staging下)来进行实例隔离。所有的实例都有自己的配置项copy(符合runtime/config中的内容和格式，注意backend 和 webapp中配置的single truth of data是数据库，不是runtime/config中的YAML)。

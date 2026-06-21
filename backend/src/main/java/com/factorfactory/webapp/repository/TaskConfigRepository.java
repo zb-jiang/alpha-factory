@@ -10,4 +10,5 @@ public interface TaskConfigRepository extends JpaRepository<TaskConfig, Long> {
     List<TaskConfig> findByTaskId(Long taskId);
     Optional<TaskConfig> findByTaskIdAndSection(Long taskId, String section);
     void deleteByTaskIdAndSection(Long taskId, String section);
+    void deleteByTaskId(Long taskId);
 }

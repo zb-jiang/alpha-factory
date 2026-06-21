@@ -33,7 +33,7 @@ public class Task {
     private String stagingPath;
 
     @Enumerated(EnumType.STRING)
-    @Column(nullable = false, length = 16)
+    @Column(nullable = false, length = 32)
     @Builder.Default
     private TaskStatus status = TaskStatus.NEW;
 
@@ -49,7 +49,14 @@ public class Task {
     private LocalDateTime updatedAt;
 
     public enum TaskStatus {
-        NEW, RUNNING, STOPPED, COMPLETED, ERROR
+        /** 新建：刚创建未启动过 */
+        NEW,
+        /** 运行中：当前有 step 在执行 */
+        RUNNING,
+        /** 因子挖掘完成：step10 成功跑完 */
+        TRAINING_FINISHED,
+        /** 样本外回测完成：step11 成功跑完 */
+        TESTING_FINISHED
     }
 
     @PrePersist

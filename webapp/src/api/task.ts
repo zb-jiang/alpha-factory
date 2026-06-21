@@ -5,7 +5,7 @@ export interface TaskResponse {
   taskName: string
   taskDesc: string
   stagingPath: string
-  status: 'NEW' | 'RUNNING' | 'STOPPED' | 'COMPLETED' | 'ERROR'
+  status: 'NEW' | 'RUNNING' | 'TRAINING_FINISHED' | 'TESTING_FINISHED'
   currentStep: string | null
   pid: number | null
   createdAt: string
@@ -47,6 +47,61 @@ export function stopTask(taskId: number) {
 
 export function getTaskStatus(taskId: number) {
   return api.get<any, { data: { status: string; currentStep: string; pid: number } }>(`/tasks/${taskId}/status`)
+}
+
+export interface StepProgressResponse {
+  status: string
+  currentStep: string
+  running: boolean
+  progress_logs: string[]
+  active_context: {
+    run_mode?: string
+    workflow_state?: {
+      window_id?: string
+      stage?: string  // 'discovery' | 'validation'
+      iteration?: number
+      window_config?: Record<string, any>
+    }
+    [key: string]: any
+  } | null
+}
+
+export function getStepProgress(taskId: number, step: string, maxLines = 500) {
+  return api.get<any, { data: StepProgressResponse }>(
+    `/tasks/${taskId}/step-progress`,
+    { params: { step, maxLines } }
+  )
+}
+
+export interface TrainingArtifactsResponse {
+  status: string
+  windows: Array<Record<string, any>>
+  cross_window: Record<string, any>
+  readiness?: {
+    oos_factors_ready?: boolean
+  }
+}
+
+export function getTrainingArtifacts(taskId: number) {
+  return api.get<any, { data: TrainingArtifactsResponse }>(`/tasks/${taskId}/training-artifacts`)
+}
+
+export interface OosArtifactsResponse {
+  status: string
+  factors: Array<Record<string, any>>
+  top3: Array<Record<string, any>>
+  period: { test_start_date?: string; test_end_date?: string }
+  input_factor_count: number
+  input_factors?: Array<Record<string, any>>
+  readiness?: {
+    alphalens_report?: boolean
+    alphalens_dashboard?: boolean
+    joinquant_export?: boolean
+  }
+}
+
+export function getOosArtifacts(taskId: number) {
+  return api.get<any, { data: OosArtifactsResponse }>(`/tasks/${taskId}/oos-artifacts`)
 }
 
 export function getTaskLogs(taskId: number, lines = 200) {
