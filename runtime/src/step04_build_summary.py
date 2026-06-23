@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from common import OUTPUT_DIR, build_summary_payload, env_config, label_name, log_step_end, log_step_start, read_json, write_json
+from step04_5_build_feature_evidence import build_feature_evidence
 
 
 def run() -> None:
@@ -19,6 +20,7 @@ def run() -> None:
     if previous_top_path.exists():
         summary["previous_round_top_factors"] = read_json(previous_top_path)
     write_json(OUTPUT_DIR / "health" / "llm_summary.json", summary)
+    write_json(OUTPUT_DIR / "health" / "llm_feature_evidence.json", build_feature_evidence())
     log_step_end("04", "LLM 摘要构建完成")
 
 

@@ -26,11 +26,33 @@ def _log(message: str) -> None:
     print(message, flush=True)
 
 
+def _slice_feature_evidence_by_analyst(feature_evidence: dict) -> dict[str, list[dict]]:
+    if not isinstance(feature_evidence, dict):
+        return {}
+    feature_map = feature_evidence.get("feature_evidence", {})
+    focus_by_analyst = feature_evidence.get("focus_features_by_analyst", {})
+    if not isinstance(feature_map, dict) or not isinstance(focus_by_analyst, dict):
+        return {}
+
+    sliced: dict[str, list[dict]] = {}
+    for agent_id, feature_names in focus_by_analyst.items():
+        names = feature_names if isinstance(feature_names, list) else []
+        sliced[agent_id] = [
+            dict(feature_map[name])
+            for name in names
+            if isinstance(name, str) and name in feature_map and isinstance(feature_map[name], dict)
+        ]
+    return sliced
+
+
 def _build_multi_agent_context() -> dict:
     """构建多 Agent 模式所需的统一上下文。"""
     config = env_config()
     feature_cfg = feature_pool_config()
     summary = read_json(OUTPUT_DIR / "health" / "llm_summary.json")
+    feature_evidence_path = OUTPUT_DIR / "health" / "llm_feature_evidence.json"
+    feature_evidence = read_json(feature_evidence_path) if feature_evidence_path.exists() else {}
+    analyst_feature_evidence = _slice_feature_evidence_by_analyst(feature_evidence)
     market_context_path = OUTPUT_DIR / "health" / "market_context.json"
     market_context = (
         read_json(market_context_path)
@@ -51,6 +73,8 @@ def _build_multi_agent_context() -> dict:
         "allowed_operators": allowed_operators,
         "generation_constraints": generation_constraints,
         "llm_summary": summary,
+        "llm_feature_evidence": feature_evidence,
+        "analyst_feature_evidence": analyst_feature_evidence,
         "market_context": market_context,
         "previous_top": previous_top,
         "previous_skipped": previous_skipped,

@@ -8,6 +8,47 @@ from __future__ import annotations
 from typing import Any
 
 
+_FEATURE_EVIDENCE_FIELD_DESCRIPTIONS_FULL = {
+    "feature_name": "特征名称。",
+    "description": "特征的业务含义，帮助理解这个特征在市场里代表什么。",
+    "expr": "特征的计算公式，便于判断能否与其他特征形成互补。",
+    "valid_observations": "该特征与标签同时非空、真正参与统计的股票×日期样本数。",
+    "missing_ratio": "缺失比例，越高说明特征可用性越差。",
+    "label_corr": "特征与收益标签的整体相关系数，反映线性相关方向和强弱。",
+    "mean_rank_ic": "按调仓观察日计算的平均 Rank IC，反映横截面排序能力。",
+    "rank_ic_ir": "Rank IC 的稳定性指标，绝对值越大通常越稳。",
+    "positive_ic_ratio": "Rank IC 方向正确的比例，越高说明该特征更常在正确方向上工作。",
+    "top_quantile_return": "每天按该特征排序后，特征值最高 20% 股票的平均收益。",
+    "bottom_quantile_return": "每天按该特征排序后，特征值最低 20% 股票的平均收益。",
+    "long_short_return": "top_quantile_return - bottom_quantile_return，衡量高分组相对低分组的收益差。",
+    "yearly_stability_score": "按年份看特征-标签关系的稳定性评分，越高越稳。",
+    "coverage_ratio": "在可评估样本里，该特征真实参与 Rank IC 统计的覆盖比例。",
+    "high_corr_neighbors": "与该特征高度相关的其他特征，格式为 [特征名, 相关系数]；一起使用时要警惕冗余。",
+    "poor_quality_flag": "是否属于低质量特征；为 true 时说明缺失率高或波动不足，应谨慎使用。",
+    "recommended_focus_fields": "当前分析师最应该优先阅读的证据字段列表，用来减少不必要的信息干扰。",
+}
+
+_FEATURE_EVIDENCE_FIELD_DESCRIPTIONS_COMPACT = {
+    "feature_name": "特征名",
+    "description": "业务含义",
+    "expr": "计算公式",
+    "valid_observations": "有效样本数",
+    "missing_ratio": "缺失率",
+    "label_corr": "整体相关系数",
+    "mean_rank_ic": "平均 Rank IC",
+    "rank_ic_ir": "Rank IC 稳定性",
+    "positive_ic_ratio": "方向正确比例",
+    "top_quantile_return": "高分组平均收益",
+    "bottom_quantile_return": "低分组平均收益",
+    "long_short_return": "高低分组收益差",
+    "yearly_stability_score": "跨年份稳定性",
+    "coverage_ratio": "统计覆盖率",
+    "high_corr_neighbors": "高相关邻居特征",
+    "poor_quality_flag": "是否低质量",
+    "recommended_focus_fields": "建议优先关注字段",
+}
+
+
 def build_summary_context(llm_summary: dict[str, Any]) -> dict[str, Any]:
     """为特征体检报告摘要增加字段说明。"""
     return {
@@ -31,6 +72,65 @@ def build_summary_context(llm_summary: dict[str, Any]) -> dict[str, Any]:
         },
         "数据": llm_summary,
     }
+
+
+def build_feature_evidence_context(
+    feature_evidence: list[dict[str, Any]],
+    focus_fields: list[str] | None = None,
+    *,
+    compact: bool = False,
+) -> dict[str, Any]:
+    """为重点特征证据包增加字段说明。"""
+    focus_fields = [str(item) for item in (focus_fields or []) if str(item)]
+    always_keep = [
+        "feature_name",
+        "description",
+        "expr",
+        "high_corr_neighbors",
+        "poor_quality_flag",
+    ]
+    allowed_fields = always_keep + [field for field in focus_fields if field not in always_keep]
+    filtered_rows: list[dict[str, Any]] = []
+    for row in feature_evidence:
+        if not isinstance(row, dict):
+            continue
+        filtered_rows.append({key: row.get(key) for key in allowed_fields if key in row})
+    field_descriptions = (
+        _FEATURE_EVIDENCE_FIELD_DESCRIPTIONS_COMPACT
+        if compact
+        else _FEATURE_EVIDENCE_FIELD_DESCRIPTIONS_FULL
+    )
+    return {
+        "字段说明": field_descriptions,
+        "recommended_focus_fields": focus_fields,
+        "数据": filtered_rows,
+    }
+
+
+def select_feature_evidence_rows(
+    feature_map: dict[str, Any],
+    feature_names: list[str],
+    *,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """按名称顺序从 feature_evidence 映射中抽取并去重。"""
+    if not isinstance(feature_map, dict):
+        return []
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    max_count = limit if isinstance(limit, int) and limit > 0 else None
+    for name in feature_names:
+        feature_name = str(name or "").strip()
+        if not feature_name or feature_name in seen:
+            continue
+        row = feature_map.get(feature_name)
+        if not isinstance(row, dict):
+            continue
+        selected.append(dict(row))
+        seen.add(feature_name)
+        if max_count is not None and len(selected) >= max_count:
+            break
+    return selected
 
 
 def build_market_context(market_context: dict[str, Any]) -> dict[str, Any]:

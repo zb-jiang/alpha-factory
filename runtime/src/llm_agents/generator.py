@@ -10,7 +10,14 @@ from typing import Any
 from common import feature_pool_config
 
 from .agent_runner import AgentConfig, call_llm_agent
-from .context_builders import build_summary_context, build_market_context, build_operator_context, build_constraints_context
+from .context_builders import (
+    build_constraints_context,
+    build_feature_evidence_context,
+    build_market_context,
+    build_operator_context,
+    build_summary_context,
+    select_feature_evidence_rows,
+)
 
 _GENERATOR_SYSTEM = """你是一个顶级的量化交易策略研究员和金融数据科学家。你精通A股市场微观结构、多因子模型、行为金融学以及Alpha挖掘。
 你的任务是严格遵循首席分析师的设计方向，挖掘出具有强预测能力、低相关性且逻辑严密的全新选股因子（Alpha因子）。
@@ -28,6 +35,7 @@ _GENERATOR_SYSTEM = """你是一个顶级的量化交易策略研究员和金融
 10. 当前系统已接入按 ann_date 做 as-of 对齐的季频财务数据，因此可以使用 eps、roe、netprofit_yoy、or_yoy 来表达真实的盈利能力和成长逻辑；但 pe_ttm、pb、ps_ttm、dv_ttm 仍应优先解释为估值/红利/风格偏好，而不是直接等同于财务成长
 11. 当使用基本面风格特征时，可以生成"价值修复""红利防守""质量成长""收入/利润同比改善"这类与当前数据含义一致的逻辑，但必须避免未来函数叙事，确保理由与已接入字段一致
 12. 如果市场环境中出现 northbound、leverage、capital_structure 等资金面标签，请把它们用于决定因子更偏进攻、防守、拥挤修复还是风险收缩；尤其当"外资谨慎/杠杆激进"或"外资积极/杠杆收缩"出现时，要在 risk 和 expected_failure_regime 中明确体现资金分歧风险
+13. 你必须参考【全局重点特征证据包及字段说明】中的定量证据，优先依据 recommended_focus_fields 判断哪些特征更值得组合，不能只根据特征名称和业务含义拼凑公式
 
 方向只能是 higher_better（因子值越大越看多）或 lower_better（因子值越小越看多）。
 
@@ -43,6 +51,20 @@ _REQUIRED_FACTOR_FIELDS = {
     "risk",
     "expected_failure_regime",
 }
+
+_GENERATOR_EVIDENCE_FOCUS_FIELDS = [
+    "label_corr",
+    "mean_rank_ic",
+    "rank_ic_ir",
+    "positive_ic_ratio",
+    "top_quantile_return",
+    "bottom_quantile_return",
+    "long_short_return",
+    "yearly_stability_score",
+    "coverage_ratio",
+    "valid_observations",
+    "missing_ratio",
+]
 
 
 def _build_feature_specs(feature_names: list[str]) -> list[dict[str, str]]:
@@ -70,19 +92,33 @@ def _build_generator_messages(design_direction: dict[str, Any], context: dict[st
     """构建生成器的 messages。"""
     operator_context = build_operator_context(list(context.get("allowed_operators", [])))
     constraints_context = build_constraints_context(dict(context.get("generation_constraints", {})))
+    recommended_features = list(design_direction.get("recommended_features", []))
+    avoid_features = list(design_direction.get("avoid_features", []))
+    global_feature_evidence_raw = dict(context.get("llm_feature_evidence", {}))
+    feature_map = global_feature_evidence_raw.get("feature_evidence", {})
+    global_feature_evidence = select_feature_evidence_rows(
+        feature_map,
+        recommended_features,
+    )
+    feature_evidence_context = build_feature_evidence_context(
+        global_feature_evidence,
+        focus_fields=_GENERATOR_EVIDENCE_FOCUS_FIELDS,
+        compact=True,
+    )
     summary_context = build_summary_context(dict(context.get("llm_summary", {})))
     summary_context["数据"]["previous_top"] = context.get("previous_top", [])
     summary_context["数据"]["previous_skipped"] = context.get("previous_skipped", [])
     market_context = build_market_context(dict(context.get("market_context", {})))
 
-    recommended_features = list(design_direction.get("recommended_features", []))
-    avoid_features = list(design_direction.get("avoid_features", []))
     recommended_specs = _build_feature_specs(recommended_features)
 
     user_content = f"""请根据以下设计方向，生成 {context.get('candidate_count', 10)} 个候选因子。
 
 【设计方向】
 {json.dumps(design_direction, ensure_ascii=False, indent=2)}
+
+【全局重点特征证据包及字段说明】
+{json.dumps(feature_evidence_context, ensure_ascii=False, indent=2)}
 
 【首席分析师推荐特征】（公式中应优先使用这些特征；每个特征包含 description 业务含义和 expr 计算公式）
 {json.dumps(recommended_specs, ensure_ascii=False, indent=2)}
@@ -96,11 +132,11 @@ def _build_generator_messages(design_direction: dict[str, Any], context: dict[st
 【公式约束及字段说明】（硬性规则，任何不满足的公式都会在验证阶段被直接拒绝）
 {json.dumps(constraints_context, ensure_ascii=False, indent=2)}
 
-【特征体检报告摘要及字段说明】
-{json.dumps(summary_context, ensure_ascii=False, indent=2)}
-
 【市场环境及字段说明】
 {json.dumps(market_context, ensure_ascii=False, indent=2)}
+
+【特征体检报告摘要及字段说明】
+{json.dumps(summary_context, ensure_ascii=False, indent=2)}
 
 请严格按照以下 JSON Schema 输出（只输出 JSON，不要 Markdown 代码块）：
 {{
