@@ -427,15 +427,10 @@ def compute_daily_market(
     return daily_market.sort_index()
 
 
-def build_window_context(
+def _compute_market_label_bundle(
     window_frame: pd.DataFrame,
     thresholds: dict[str, Any],
-    macro_data: pd.DataFrame | None = None,
-    windows: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if window_frame.empty:
-        return {"summary_text": "当前样本期无有效市场数据。", "labels": {}, "stats": {}}
-
     trend_up = _cfg_float(thresholds, "trend_up", 0.03)
     trend_down = _cfg_float(thresholds, "trend_down", -0.03)
     rank_high = _cfg_float(thresholds, "rank_high", 0.67)
@@ -472,131 +467,432 @@ def build_window_context(
         "leverage": _classify_leverage(margin_flow_rank_mean, margin_balance_rank_mean, leverage_hot, leverage_cold),
     }
     labels["capital_structure"] = _classify_capital_structure(labels["northbound"], labels["leverage"])
-    north_alignment_label = _classify_alignment(northbound_alignment_mean)
+    return {
+        "labels": labels,
+        "means": {
+            "trend_20d_mean": trend_mean,
+            "vol_rank_250d_mean": vol_rank_mean,
+            "amount_rank_250d_mean": amount_rank_mean,
+            "turnover_rank_250d_mean": _safe_float(window_frame["turnover_rank_250d"].mean()),
+            "dispersion_rank_250d_mean": dispersion_rank_mean,
+            "breadth_up_ratio_mean": breadth_mean,
+            "size_style_spread_mean": style_mean,
+            "northbound_flow_rank_mean": northbound_rank_mean,
+            "northbound_inflow_ratio_mean": northbound_inflow_ratio_mean,
+            "northbound_trend_alignment_mean": northbound_alignment_mean,
+            "margin_flow_rank_mean": margin_flow_rank_mean,
+            "margin_balance_rank_mean": margin_balance_rank_mean,
+            "short_balance_change_mean": short_balance_change_mean,
+        },
+        "north_alignment_label": _classify_alignment(northbound_alignment_mean),
+    }
 
-    # ── 宏观维度标签 ──────────────────────────────────────────
+
+def _slice_macro_data_for_end(
+    macro_data: pd.DataFrame | None,
+    end_date: pd.Timestamp,
+) -> pd.DataFrame | None:
+    if macro_data is None or macro_data.empty:
+        return None
+    end_month = pd.Timestamp(end_date).strftime("%Y%m")
+    sliced = macro_data.loc[macro_data["month"] <= end_month].copy()
+    return sliced if not sliced.empty else None
+
+
+def _compute_macro_label_bundle(
+    thresholds: dict[str, Any],
+    macro_data: pd.DataFrame | None = None,
+    windows: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     macro_stats: dict[str, Any] = {}
-    rate_label = "未知"
-    macro_liquidity_label = "未知"
-    economy_label = "未知"
-    inflation_label = "未知"
+    labels = {
+        "rate": "未知",
+        "macro_liquidity": "未知",
+        "economy": "未知",
+        "inflation": "未知",
+    }
+    if macro_data is None or macro_data.empty or windows is None:
+        return {"labels": labels, "stats": macro_stats}
 
-    if macro_data is not None and not macro_data.empty and windows is not None:
-        rate_easing = _cfg_float(thresholds, "rate_easing_threshold", -0.0025)
-        rate_tightening = _cfg_float(thresholds, "rate_tightening_threshold", 0.0025)
-        m2_change_threshold = _cfg_float(thresholds, "m2_yoy_change_threshold", 0.3)
-        pmi_expansion = _cfg_float(thresholds, "pmi_expansion_threshold", 50.0)
-        inflation_change_threshold = _cfg_float(thresholds, "inflation_yoy_change_threshold", 0.3)
+    rate_easing = _cfg_float(thresholds, "rate_easing_threshold", -0.0025)
+    rate_tightening = _cfg_float(thresholds, "rate_tightening_threshold", 0.0025)
+    m2_change_threshold = _cfg_float(thresholds, "m2_yoy_change_threshold", 0.3)
+    pmi_expansion = _cfg_float(thresholds, "pmi_expansion_threshold", 50.0)
+    inflation_change_threshold = _cfg_float(thresholds, "inflation_yoy_change_threshold", 0.3)
 
-        m2_trend_months = _cfg_int(windows, "m2_trend_months", 3)
-        pmi_trend_months = _cfg_int(windows, "pmi_trend_months", 3)
-        inflation_trend_months = _cfg_int(windows, "inflation_trend_months", 3)
+    m2_trend_months = _cfg_int(windows, "m2_trend_months", 3)
+    pmi_trend_months = _cfg_int(windows, "pmi_trend_months", 3)
+    inflation_trend_months = _cfg_int(windows, "inflation_trend_months", 3)
 
-        # 取训练窗口末尾对应的宏观数据
-        # 宏观数据是月频，取最后 N 个月来计算趋势
-        macro_sorted = macro_data.sort_values("month").reset_index(drop=True)
-        last_row = macro_sorted.iloc[-1] if not macro_sorted.empty else None
+    macro_sorted = macro_data.sort_values("month").reset_index(drop=True)
+    last_row = macro_sorted.iloc[-1] if not macro_sorted.empty else None
+    if last_row is None:
+        return {"labels": labels, "stats": macro_stats}
 
-        # 10. 利率方向：Shibor 1Y 变化
-        if "shibor_1y" in macro_sorted.columns and last_row is not None:
-            shibor_current = _safe_float(last_row.get("shibor_1y"))
-            if shibor_current is not None and len(macro_sorted) >= 2:
-                # 找 shibor_trend_days 天前的 Shibor
-                shibor_trend_days = _cfg_int(windows, "shibor_trend_days", 20)
-                # Shibor 是月均值，往前找约 shibor_trend_days/22 个月
-                lookback_months = max(1, shibor_trend_days // 22)
-                if len(macro_sorted) > lookback_months:
-                    shibor_prev = _safe_float(macro_sorted.iloc[-(lookback_months + 1)].get("shibor_1y"))
-                    if shibor_prev is not None:
-                        shibor_change = shibor_current - shibor_prev
-                        rate_label = _classify_rate(shibor_change, rate_easing, rate_tightening)
-                        macro_stats["shibor_1y_current"] = shibor_current
-                        macro_stats["shibor_1y_change"] = shibor_change
-                    else:
-                        macro_stats["shibor_1y_current"] = shibor_current
-                        macro_stats["shibor_1y_change"] = None
+    if "shibor_1y" in macro_sorted.columns:
+        shibor_current = _safe_float(last_row.get("shibor_1y"))
+        if shibor_current is not None and len(macro_sorted) >= 2:
+            shibor_trend_days = _cfg_int(windows, "shibor_trend_days", 20)
+            lookback_months = max(1, shibor_trend_days // 22)
+            if len(macro_sorted) > lookback_months:
+                shibor_prev = _safe_float(macro_sorted.iloc[-(lookback_months + 1)].get("shibor_1y"))
+                if shibor_prev is not None:
+                    shibor_change = shibor_current - shibor_prev
+                    labels["rate"] = _classify_rate(shibor_change, rate_easing, rate_tightening)
+                    macro_stats["shibor_1y_current"] = shibor_current
+                    macro_stats["shibor_1y_change"] = shibor_change
                 else:
                     macro_stats["shibor_1y_current"] = shibor_current
                     macro_stats["shibor_1y_change"] = None
             else:
-                macro_stats["shibor_1y_current"] = shibor_current if shibor_current else None
+                macro_stats["shibor_1y_current"] = shibor_current
                 macro_stats["shibor_1y_change"] = None
+        else:
+            macro_stats["shibor_1y_current"] = shibor_current if shibor_current else None
+            macro_stats["shibor_1y_change"] = None
 
-        # 11. 宏观流动性：M2 同比变化趋势
-        if "m2_yoy" in macro_sorted.columns and last_row is not None:
-            m2_yoy_current = _safe_float(last_row.get("m2_yoy"))
-            if m2_yoy_current is not None and len(macro_sorted) > m2_trend_months:
-                m2_yoy_prev = _safe_float(macro_sorted.iloc[-(m2_trend_months + 1)].get("m2_yoy"))
-                if m2_yoy_prev is not None:
-                    m2_yoy_change = m2_yoy_current - m2_yoy_prev
-                    macro_liquidity_label = _classify_macro_liquidity(m2_yoy_change, m2_change_threshold)
-                    macro_stats["m2_yoy_current"] = m2_yoy_current
-                    macro_stats["m2_yoy_change"] = m2_yoy_change
-                else:
-                    macro_stats["m2_yoy_current"] = m2_yoy_current
-                    macro_stats["m2_yoy_change"] = None
+    if "m2_yoy" in macro_sorted.columns:
+        m2_yoy_current = _safe_float(last_row.get("m2_yoy"))
+        if m2_yoy_current is not None and len(macro_sorted) > m2_trend_months:
+            m2_yoy_prev = _safe_float(macro_sorted.iloc[-(m2_trend_months + 1)].get("m2_yoy"))
+            if m2_yoy_prev is not None:
+                m2_yoy_change = m2_yoy_current - m2_yoy_prev
+                labels["macro_liquidity"] = _classify_macro_liquidity(m2_yoy_change, m2_change_threshold)
+                macro_stats["m2_yoy_current"] = m2_yoy_current
+                macro_stats["m2_yoy_change"] = m2_yoy_change
             else:
                 macro_stats["m2_yoy_current"] = m2_yoy_current
                 macro_stats["m2_yoy_change"] = None
+        else:
+            macro_stats["m2_yoy_current"] = m2_yoy_current
+            macro_stats["m2_yoy_change"] = None
 
-        # 12. 经济周期：PMI 水平和趋势
-        if "pmi_manufacturing" in macro_sorted.columns and last_row is not None:
-            pmi_current = _safe_float(last_row.get("pmi_manufacturing"))
-            if pmi_current is not None and len(macro_sorted) > pmi_trend_months:
-                pmi_prev = _safe_float(macro_sorted.iloc[-(pmi_trend_months + 1)].get("pmi_manufacturing"))
-                if pmi_prev is not None:
-                    pmi_change = pmi_current - pmi_prev
-                    economy_label = _classify_economy(pmi_current, pmi_change, pmi_expansion)
-                    macro_stats["pmi_current"] = pmi_current
-                    macro_stats["pmi_change"] = pmi_change
-                else:
-                    economy_label = _classify_economy(pmi_current, None, pmi_expansion)
-                    macro_stats["pmi_current"] = pmi_current
-                    macro_stats["pmi_change"] = None
+    if "pmi_manufacturing" in macro_sorted.columns:
+        pmi_current = _safe_float(last_row.get("pmi_manufacturing"))
+        if pmi_current is not None and len(macro_sorted) > pmi_trend_months:
+            pmi_prev = _safe_float(macro_sorted.iloc[-(pmi_trend_months + 1)].get("pmi_manufacturing"))
+            if pmi_prev is not None:
+                pmi_change = pmi_current - pmi_prev
+                labels["economy"] = _classify_economy(pmi_current, pmi_change, pmi_expansion)
+                macro_stats["pmi_current"] = pmi_current
+                macro_stats["pmi_change"] = pmi_change
             else:
-                economy_label = _classify_economy(pmi_current, None, pmi_expansion) if pmi_current is not None else "未知"
+                labels["economy"] = _classify_economy(pmi_current, None, pmi_expansion)
                 macro_stats["pmi_current"] = pmi_current
                 macro_stats["pmi_change"] = None
+        else:
+            labels["economy"] = _classify_economy(pmi_current, None, pmi_expansion) if pmi_current is not None else "未知"
+            macro_stats["pmi_current"] = pmi_current
+            macro_stats["pmi_change"] = None
 
-        # 13. 通胀方向：CPI/PPI 同比变化趋势
-        cpi_change_val = None
-        ppi_change_val = None
-        if "cpi_yoy" in macro_sorted.columns and last_row is not None:
-            cpi_current = _safe_float(last_row.get("cpi_yoy"))
-            if cpi_current is not None and len(macro_sorted) > inflation_trend_months:
-                cpi_prev = _safe_float(macro_sorted.iloc[-(inflation_trend_months + 1)].get("cpi_yoy"))
-                if cpi_prev is not None:
-                    cpi_change_val = cpi_current - cpi_prev
-                    macro_stats["cpi_yoy_current"] = cpi_current
-                    macro_stats["cpi_yoy_change"] = cpi_change_val
-                else:
-                    macro_stats["cpi_yoy_current"] = cpi_current
-                    macro_stats["cpi_yoy_change"] = None
+    cpi_change_val = None
+    ppi_change_val = None
+    if "cpi_yoy" in macro_sorted.columns:
+        cpi_current = _safe_float(last_row.get("cpi_yoy"))
+        if cpi_current is not None and len(macro_sorted) > inflation_trend_months:
+            cpi_prev = _safe_float(macro_sorted.iloc[-(inflation_trend_months + 1)].get("cpi_yoy"))
+            if cpi_prev is not None:
+                cpi_change_val = cpi_current - cpi_prev
+                macro_stats["cpi_yoy_current"] = cpi_current
+                macro_stats["cpi_yoy_change"] = cpi_change_val
             else:
                 macro_stats["cpi_yoy_current"] = cpi_current
                 macro_stats["cpi_yoy_change"] = None
+        else:
+            macro_stats["cpi_yoy_current"] = cpi_current
+            macro_stats["cpi_yoy_change"] = None
 
-        if "ppi_yoy" in macro_sorted.columns and last_row is not None:
-            ppi_current = _safe_float(last_row.get("ppi_yoy"))
-            if ppi_current is not None and len(macro_sorted) > inflation_trend_months:
-                ppi_prev = _safe_float(macro_sorted.iloc[-(inflation_trend_months + 1)].get("ppi_yoy"))
-                if ppi_prev is not None:
-                    ppi_change_val = ppi_current - ppi_prev
-                    macro_stats["ppi_yoy_current"] = ppi_current
-                    macro_stats["ppi_yoy_change"] = ppi_change_val
-                else:
-                    macro_stats["ppi_yoy_current"] = ppi_current
-                    macro_stats["ppi_yoy_change"] = None
+    if "ppi_yoy" in macro_sorted.columns:
+        ppi_current = _safe_float(last_row.get("ppi_yoy"))
+        if ppi_current is not None and len(macro_sorted) > inflation_trend_months:
+            ppi_prev = _safe_float(macro_sorted.iloc[-(inflation_trend_months + 1)].get("ppi_yoy"))
+            if ppi_prev is not None:
+                ppi_change_val = ppi_current - ppi_prev
+                macro_stats["ppi_yoy_current"] = ppi_current
+                macro_stats["ppi_yoy_change"] = ppi_change_val
             else:
                 macro_stats["ppi_yoy_current"] = ppi_current
                 macro_stats["ppi_yoy_change"] = None
+        else:
+            macro_stats["ppi_yoy_current"] = ppi_current
+            macro_stats["ppi_yoy_change"] = None
 
-        inflation_label = _classify_inflation(cpi_change_val, ppi_change_val, inflation_change_threshold)
+    labels["inflation"] = _classify_inflation(cpi_change_val, ppi_change_val, inflation_change_threshold)
+    return {"labels": labels, "stats": macro_stats}
 
-    labels["rate"] = rate_label
-    labels["macro_liquidity"] = macro_liquidity_label
-    labels["economy"] = economy_label
-    labels["inflation"] = inflation_label
+
+def _build_segment_summary_text(segment_name: str, labels: dict[str, str]) -> str:
+    return (
+        f"{segment_name}趋势{labels.get('trend', '未知')}、波动{labels.get('volatility', '未知')}、"
+        f"流动性{labels.get('liquidity', '未知')}、分化{labels.get('dispersion', '未知')}、"
+        f"广度{labels.get('breadth', '未知')}、风格{labels.get('style', '未知')}；"
+        f"北向{labels.get('northbound', '未知')}、两融{labels.get('leverage', '未知')}、"
+        f"资金结构{labels.get('capital_structure', '未知')}；"
+        f"利率{labels.get('rate', '未知')}、宏观流动性{labels.get('macro_liquidity', '未知')}、"
+        f"经济{labels.get('economy', '未知')}、通胀{labels.get('inflation', '未知')}"
+    )
+
+
+def _segment_name(index: int, segment_count: int) -> str:
+    if segment_count == 3:
+        return ["前段", "中段", "后段"][index]
+    return f"第{index + 1}段"
+
+
+def _build_segment_contexts(
+    window_frame: pd.DataFrame,
+    thresholds: dict[str, Any],
+    macro_data: pd.DataFrame | None = None,
+    windows: dict[str, Any] | None = None,
+    segment_count: int = 3,
+) -> list[dict[str, Any]]:
+    if window_frame.empty:
+        return []
+    segment_count = max(1, int(segment_count))
+    position_groups = [group for group in np.array_split(np.arange(len(window_frame)), segment_count) if len(group) > 0]
+    segments: list[dict[str, Any]] = []
+    for idx, positions in enumerate(position_groups):
+        segment_frame = window_frame.iloc[positions]
+        market_bundle = _compute_market_label_bundle(segment_frame, thresholds)
+        macro_bundle = _compute_macro_label_bundle(
+            thresholds,
+            macro_data=_slice_macro_data_for_end(macro_data, pd.Timestamp(segment_frame.index.max())),
+            windows=windows,
+        )
+        labels = {**dict(market_bundle["labels"]), **dict(macro_bundle["labels"])}
+        stats = {**dict(market_bundle["means"]), **dict(macro_bundle["stats"])}
+        segment_name = _segment_name(idx, len(position_groups))
+        segments.append(
+            {
+                "segment": segment_name,
+                "start_date": pd.Timestamp(segment_frame.index.min()).strftime("%Y-%m-%d"),
+                "end_date": pd.Timestamp(segment_frame.index.max()).strftime("%Y-%m-%d"),
+                "trading_days": int(len(segment_frame)),
+                "labels": labels,
+                "stats": stats,
+                "summary_text": _build_segment_summary_text(segment_name, labels),
+            }
+        )
+    return segments
+
+
+def _compress_label_path(labels: pd.Series) -> list[str]:
+    path: list[str] = []
+    previous = ""
+    for value in labels.astype(str).tolist():
+        text = str(value).strip()
+        if not text or text == "未知":
+            continue
+        if text == previous:
+            continue
+        path.append(text)
+        previous = text
+    return path
+
+
+def _build_stability_metrics(
+    window_frame: pd.DataFrame,
+    thresholds: dict[str, Any],
+    segment_contexts: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if window_frame.empty:
+        return {}
+    trend_up = _cfg_float(thresholds, "trend_up", 0.03)
+    trend_down = _cfg_float(thresholds, "trend_down", -0.03)
+    rank_high = _cfg_float(thresholds, "rank_high", 0.67)
+    rank_low = _cfg_float(thresholds, "rank_low", 0.33)
+    north_in_high = _cfg_float(thresholds, "northbound_inflow_high", rank_high)
+    north_out_low = _cfg_float(thresholds, "northbound_outflow_low", rank_low)
+    leverage_hot = _cfg_float(thresholds, "leverage_hot_high", rank_high)
+    leverage_cold = _cfg_float(thresholds, "leverage_cold_low", rank_low)
+
+    trend_states = window_frame["trend_20d"].map(lambda value: _classify_trend(_safe_float(value), trend_up, trend_down))
+    volatility_states = window_frame["vol_rank_250d"].map(
+        lambda value: _classify_rank_level(_safe_float(value), rank_high, rank_low)
+    )
+    liquidity_states = window_frame["amount_rank_250d"].map(
+        lambda value: _classify_rank_level(_safe_float(value), rank_high, rank_low)
+    )
+    dispersion_states = window_frame["dispersion_rank_250d"].map(
+        lambda value: _classify_rank_level(_safe_float(value), rank_high, rank_low)
+    )
+    breadth_states = window_frame["breadth_up_ratio"].map(
+        lambda value: _classify_breadth(_safe_float(value), _cfg_float(thresholds, "breadth_risk_on", 0.62), _cfg_float(thresholds, "breadth_risk_off", 0.38))
+    )
+    style_states = window_frame["size_style_spread"].map(
+        lambda value: "未知" if _safe_float(value) is None else ("大盘占优" if float(value) > 0 else "小盘占优")
+    )
+    north_states = window_frame["northbound_flow_rank"].map(
+        lambda value: _classify_capital_flow(_safe_float(value), north_in_high, north_out_low)
+    )
+    leverage_states = pd.Series(
+        [
+            _classify_leverage(_safe_float(flow), _safe_float(balance), leverage_hot, leverage_cold)
+            for flow, balance in zip(
+                window_frame["margin_flow_rank"].tolist(),
+                window_frame["margin_balance_rank"].tolist(),
+            )
+        ],
+        index=window_frame.index,
+        dtype="object",
+    )
+    capital_structure_states = pd.Series(
+        [
+            _classify_capital_structure(str(north), str(leverage))
+            for north, leverage in zip(north_states.tolist(), leverage_states.tolist())
+        ],
+        index=window_frame.index,
+        dtype="object",
+    )
+
+    core_state_series = {
+        "trend": trend_states,
+        "volatility": volatility_states,
+        "breadth": breadth_states,
+        "style": style_states,
+        "capital_structure": capital_structure_states,
+    }
+    aux_state_series = {
+        "liquidity": liquidity_states,
+        "dispersion": dispersion_states,
+        "northbound": north_states,
+        "leverage": leverage_states,
+    }
+    core_state_paths = {name: _compress_label_path(series) for name, series in core_state_series.items()}
+    aux_state_paths = {name: _compress_label_path(series) for name, series in aux_state_series.items()}
+    core_switch_counts = {f"{name}_switches": max(0, len(path) - 1) for name, path in core_state_paths.items()}
+    aux_switch_counts = {f"{name}_switches": max(0, len(path) - 1) for name, path in aux_state_paths.items()}
+
+    core_total_switches = sum(core_switch_counts.values())
+    aux_total_switches = sum(aux_switch_counts.values())
+    core_switch_density_per_20d = core_total_switches / max(len(window_frame) / 20.0, 1.0)
+    aux_switch_density_per_20d = aux_total_switches / max(len(window_frame) / 20.0, 1.0)
+    if core_switch_density_per_20d <= 2.0:
+        market_structure_stability = "高"
+    elif core_switch_density_per_20d <= 4.0:
+        market_structure_stability = "中"
+    else:
+        market_structure_stability = "低"
+    if aux_switch_density_per_20d <= 2.0:
+        auxiliary_structure_stability = "高"
+    elif aux_switch_density_per_20d <= 4.0:
+        auxiliary_structure_stability = "中"
+    else:
+        auxiliary_structure_stability = "低"
+
+    macro_dimension_names = ["rate", "macro_liquidity", "economy", "inflation"]
+    macro_state_paths: dict[str, list[str]] = {}
+    macro_segment_switch_counts: dict[str, int] = {}
+    segment_contexts = segment_contexts or []
+    for name in macro_dimension_names:
+        segment_labels = pd.Series(
+            [str(segment.get("labels", {}).get(name, "未知")) for segment in segment_contexts],
+            dtype="object",
+        )
+        path = _compress_label_path(segment_labels)
+        macro_state_paths[name] = path
+        macro_segment_switch_counts[f"{name}_segment_switches"] = max(0, len(path) - 1)
+    macro_total_switches = sum(macro_segment_switch_counts.values())
+    if macro_total_switches <= 1:
+        macro_structure_stability = "高"
+    elif macro_total_switches <= 3:
+        macro_structure_stability = "中"
+    else:
+        macro_structure_stability = "低"
+
+    composite_stability = "低"
+    if market_structure_stability == "高" and macro_structure_stability == "高" and auxiliary_structure_stability != "低":
+        composite_stability = "高"
+    elif market_structure_stability != "低" and macro_structure_stability != "低":
+        composite_stability = "中"
+
+    return {
+        "market_structure_stability": market_structure_stability,
+        "core_switch_counts": core_switch_counts,
+        "core_state_paths": core_state_paths,
+        "core_switch_density_per_20d": round(float(core_switch_density_per_20d), 3),
+        "auxiliary_structure_stability": auxiliary_structure_stability,
+        "aux_switch_counts": aux_switch_counts,
+        "aux_state_paths": aux_state_paths,
+        "aux_switch_density_per_20d": round(float(aux_switch_density_per_20d), 3),
+        "macro_structure_stability": macro_structure_stability,
+        "macro_segment_switch_counts": macro_segment_switch_counts,
+        "macro_state_paths": macro_state_paths,
+        "composite_stability": composite_stability,
+        "summary_text": (
+            f"核心市场结构稳定性 {market_structure_stability}"
+            f"（趋势切换 {core_switch_counts['trend_switches']} 次、"
+            f"波动切换 {core_switch_counts['volatility_switches']} 次、"
+            f"广度切换 {core_switch_counts['breadth_switches']} 次、"
+            f"风格切换 {core_switch_counts['style_switches']} 次、"
+            f"资金结构切换 {core_switch_counts['capital_structure_switches']} 次）；"
+            f"辅助维度稳定性 {auxiliary_structure_stability}"
+            f"（流动性切换 {aux_switch_counts['liquidity_switches']} 次、"
+            f"分化切换 {aux_switch_counts['dispersion_switches']} 次、"
+            f"北向切换 {aux_switch_counts['northbound_switches']} 次、"
+            f"两融切换 {aux_switch_counts['leverage_switches']} 次）；"
+            f"宏观分段稳定性 {macro_structure_stability}"
+            f"（利率/宏观流动性/经济/通胀的分段切换合计 {macro_total_switches} 次）；"
+            f"综合稳定性 {composite_stability}"
+        ),
+    }
+
+
+def _build_temporal_structure_summary(
+    segments: list[dict[str, Any]],
+    stability_metrics: dict[str, Any],
+) -> str:
+    if not segments:
+        return ""
+    segment_text = "；".join(
+        f"{segment['segment']}({segment['start_date']}~{segment['end_date']}): {segment.get('summary_text', '').strip()}"
+        for segment in segments
+    )
+    stability_text = str(stability_metrics.get("summary_text", "")).strip()
+    if stability_text:
+        return f"{segment_text}。{stability_text}。"
+    return f"{segment_text}。"
+
+
+def build_window_context(
+    window_frame: pd.DataFrame,
+    thresholds: dict[str, Any],
+    macro_data: pd.DataFrame | None = None,
+    windows: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if window_frame.empty:
+        return {
+            "summary_text": "当前样本期无有效市场数据。",
+            "labels": {},
+            "label_notes": {},
+            "mapping_explain": "",
+            "stats": {},
+            "segment_contexts": [],
+            "stability_metrics": {},
+            "temporal_structure_summary_text": "",
+        }
+
+    bundle = _compute_market_label_bundle(window_frame, thresholds)
+    labels = dict(bundle["labels"])
+    means = dict(bundle["means"])
+    trend_mean = means.get("trend_20d_mean")
+    vol_rank_mean = means.get("vol_rank_250d_mean")
+    amount_rank_mean = means.get("amount_rank_250d_mean")
+    dispersion_rank_mean = means.get("dispersion_rank_250d_mean")
+    breadth_mean = means.get("breadth_up_ratio_mean")
+    style_mean = means.get("size_style_spread_mean")
+    northbound_rank_mean = means.get("northbound_flow_rank_mean")
+    northbound_inflow_ratio_mean = means.get("northbound_inflow_ratio_mean")
+    northbound_alignment_mean = means.get("northbound_trend_alignment_mean")
+    margin_flow_rank_mean = means.get("margin_flow_rank_mean")
+    margin_balance_rank_mean = means.get("margin_balance_rank_mean")
+    short_balance_change_mean = means.get("short_balance_change_mean")
+    north_alignment_label = str(bundle["north_alignment_label"])
+
+    macro_bundle = _compute_macro_label_bundle(thresholds, macro_data=macro_data, windows=windows)
+    macro_labels = dict(macro_bundle["labels"])
+    macro_stats = dict(macro_bundle["stats"])
+    labels.update(macro_labels)
 
     summary_text = (
         f"当前市场状态：趋势{labels['trend']}（20日累计收益均值 {_fmt_pct(trend_mean)}），"
@@ -613,56 +909,57 @@ def build_window_context(
         f"经济周期{labels['economy']}（PMI {_fmt_num(macro_stats.get('pmi_current'), 2)}），"
         f"通胀{labels['inflation']}（CPI同比 {_fmt_num(macro_stats.get('cpi_yoy_current'), 2)}%，PPI同比 {_fmt_num(macro_stats.get('ppi_yoy_current'), 2)}%）。"
     )
-    return {
+    label_notes = {
+        "trend": f"{labels['trend']}（依据 trend_20d_mean 与趋势阈值映射）",
+        "volatility": f"{labels['volatility']}（依据 vol_rank_250d_mean 的历史分位映射）",
+        "liquidity": f"{labels['liquidity']}（依据 amount_rank_250d_mean 的历史分位映射）",
+        "dispersion": f"{labels['dispersion']}（依据 dispersion_rank_250d_mean 的历史分位映射）",
+        "breadth": f"{labels['breadth']}（依据 breadth_up_ratio_mean 与广度阈值映射）",
+        "style": f"{labels['style']}（依据 size_style_spread_mean 正负映射）",
+        "northbound": f"{labels['northbound']}（依据 northbound_flow_rank_mean 的历史分位映射）",
+        "leverage": f"{labels['leverage']}（综合融资净流与融资余额分位映射）",
+        "capital_structure": f"{labels['capital_structure']}（结合北向资金方向与杠杆情绪共同判断）",
+        "rate": f"{labels['rate']}（依据 Shibor 1Y 变化量与利率阈值映射）",
+        "macro_liquidity": f"{labels['macro_liquidity']}（依据 M2 同比变化趋势映射）",
+        "economy": f"{labels['economy']}（依据 PMI 水平与趋势映射）",
+        "inflation": f"{labels['inflation']}（综合 CPI/PPI 同比变化趋势映射）",
+    }
+    mapping_explain = _build_mapping_explain(
+        trend_mean,
+        vol_rank_mean,
+        amount_rank_mean,
+        dispersion_rank_mean,
+        breadth_mean,
+        style_mean,
+        northbound_rank_mean,
+        margin_flow_rank_mean,
+        margin_balance_rank_mean,
+        labels["capital_structure"],
+        labels,
+        thresholds,
+        macro_stats,
+    )
+    stats = {**means, **macro_stats}
+    segment_count = 3 if windows is None else _cfg_int(windows, "segment_count", 3)
+    segment_contexts = _build_segment_contexts(
+        window_frame,
+        thresholds,
+        macro_data=macro_data,
+        windows=windows,
+        segment_count=segment_count,
+    )
+    stability_metrics = _build_stability_metrics(window_frame, thresholds, segment_contexts=segment_contexts)
+    context = {
         "summary_text": summary_text,
         "labels": labels,
-        "label_notes": {
-            "trend": f"{labels['trend']}（依据 trend_20d_mean 与趋势阈值映射）",
-            "volatility": f"{labels['volatility']}（依据 vol_rank_250d_mean 的历史分位映射）",
-            "liquidity": f"{labels['liquidity']}（依据 amount_rank_250d_mean 的历史分位映射）",
-            "dispersion": f"{labels['dispersion']}（依据 dispersion_rank_250d_mean 的历史分位映射）",
-            "breadth": f"{labels['breadth']}（依据 breadth_up_ratio_mean 与广度阈值映射）",
-            "style": f"{labels['style']}（依据 size_style_spread_mean 正负映射）",
-            "northbound": f"{labels['northbound']}（依据 northbound_flow_rank_mean 的历史分位映射）",
-            "leverage": f"{labels['leverage']}（综合融资净流与融资余额分位映射）",
-            "capital_structure": f"{labels['capital_structure']}（结合北向资金方向与杠杆情绪共同判断）",
-            "rate": f"{labels['rate']}（依据 Shibor 1Y 变化量与利率阈值映射）",
-            "macro_liquidity": f"{labels['macro_liquidity']}（依据 M2 同比变化趋势映射）",
-            "economy": f"{labels['economy']}（依据 PMI 水平与趋势映射）",
-            "inflation": f"{labels['inflation']}（综合 CPI/PPI 同比变化趋势映射）",
-        },
-        "mapping_explain": _build_mapping_explain(
-            trend_mean,
-            vol_rank_mean,
-            amount_rank_mean,
-            dispersion_rank_mean,
-            breadth_mean,
-            style_mean,
-            northbound_rank_mean,
-            margin_flow_rank_mean,
-            margin_balance_rank_mean,
-            labels["capital_structure"],
-            labels,
-            thresholds,
-            macro_stats,
-        ),
-        "stats": {
-            "trend_20d_mean": trend_mean,
-            "vol_rank_250d_mean": vol_rank_mean,
-            "amount_rank_250d_mean": amount_rank_mean,
-            "turnover_rank_250d_mean": _safe_float(window_frame["turnover_rank_250d"].mean()),
-            "dispersion_rank_250d_mean": dispersion_rank_mean,
-            "breadth_up_ratio_mean": breadth_mean,
-            "size_style_spread_mean": style_mean,
-            "northbound_flow_rank_mean": northbound_rank_mean,
-            "northbound_inflow_ratio_mean": northbound_inflow_ratio_mean,
-            "northbound_trend_alignment_mean": northbound_alignment_mean,
-            "margin_flow_rank_mean": margin_flow_rank_mean,
-            "margin_balance_rank_mean": margin_balance_rank_mean,
-            "short_balance_change_mean": short_balance_change_mean,
-            **macro_stats,
-        },
+        "label_notes": label_notes,
+        "mapping_explain": mapping_explain,
+        "stats": stats,
+        "segment_contexts": segment_contexts,
+        "stability_metrics": stability_metrics,
+        "temporal_structure_summary_text": _build_temporal_structure_summary(segment_contexts, stability_metrics),
     }
+    return context
 
 
 def build_train_context(

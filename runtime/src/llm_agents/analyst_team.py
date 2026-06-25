@@ -709,6 +709,7 @@ _COMMON_ANALYST_SYSTEM_APPENDIX = """
 通用要求：
 - 推荐特征时必须参考特征体检报告中的 high_corr_pairs。如果两个特征高度相关，同时选入通常是冗余，应尽量避免；确有必要同时使用时，需要说明它们分别提供什么增量信息，或建议使用差值/比值来提取增量信号。
 - 必须参考【当前分析师重点特征证据包及字段说明】中的定量证据，不能只根据业务经验做判断。
+- 阅读【当前市场环境及字段说明】时，不能只看总 summary_text 和 labels；如果存在 temporal_structure_summary_text、segment_contexts、stability_metrics、selector_similarity，必须把它们当成判断训练窗口内部演变和关键相似月份的重要证据。
 - 优先阅读证据包里“建议重点关注字段”，先看与你专业最相关的定量字段，再综合其他字段形成结论。"""
 
 
