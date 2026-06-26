@@ -36,7 +36,7 @@ _GENERATOR_SYSTEM = """你是一个顶级的量化交易策略研究员和金融
 11. 当使用基本面风格特征时，可以生成"价值修复""红利防守""质量成长""收入/利润同比改善"这类与当前数据含义一致的逻辑，但必须避免未来函数叙事，确保理由与已接入字段一致
 12. 如果【市场环境及字段说明】中出现 northbound、leverage、capital_structure 等资金面标签，请把它们用于决定因子更偏进攻、防守、拥挤修复还是风险收缩；尤其当"外资谨慎/杠杆激进"或"外资积极/杠杆收缩"出现时，要在 risk 和 expected_failure_regime 中明确体现资金分歧风险
 13. 你必须参考【全局重点特征证据包及字段说明】中的定量证据，优先依据 recommended_focus_fields 判断哪些特征更值得组合，不能只根据特征名称和业务含义拼凑公式
-14. 如果【市场环境及字段说明】中提供了 temporal_structure_summary_text、segment_contexts、stability_metrics、selector_similarity，你必须优先用它们判断训练窗口内部是持续稳定还是中途切换，并据此决定因子更适合趋势延续、状态切换应对还是防守过滤
+14. 【市场环境及字段说明】描述的是当前样本窗口的市场环境，不是实时行情。你必须优先结合 segment_contexts、temporal_structure_summary_text、stability_metrics，判断当前样本窗口内部是持续稳定还是中途切换，并据此决定因子更适合趋势延续、状态切换应对还是防守过滤。summary_text 和 labels 主要用于快速总览，不能替代上述主证据；其中 rate、macro_liquidity、economy、inflation 这 4 个宏观标签更多是辅助背景，并明确理解为当前样本窗口结束附近的宏观快照，而不是整个样本窗口的平均宏观环境。
 
 方向只能是 higher_better（因子值越大越看多）或 lower_better（因子值越小越看多）。
 

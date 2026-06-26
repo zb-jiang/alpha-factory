@@ -10,7 +10,6 @@ from common import (
     log_step_end,
     log_step_start,
     market_context_config,
-    read_json,
     write_json,
 )
 from market_regime import build_train_context, compute_daily_market
@@ -19,110 +18,6 @@ from market_regime import build_train_context, compute_daily_market
 def _cfg_int(payload: dict[str, object], key: str, default: int) -> int:
     value = payload.get(key, default)
     return int(default if value is None else value)
-
-
-def _matches_window(
-    row: dict[str, object] | None,
-    train_start: pd.Timestamp,
-    train_end: pd.Timestamp,
-) -> bool:
-    if not isinstance(row, dict):
-        return False
-    start_text = str(row.get("train_start_date", "")).strip()
-    end_text = str(row.get("train_end_date", "")).strip()
-    if not start_text or not end_text:
-        return False
-    return (
-        pd.Timestamp(start_text).normalize() == train_start
-        and pd.Timestamp(end_text).normalize() == train_end
-    )
-
-
-def _build_selector_month_context(
-    train_start: pd.Timestamp,
-    train_end: pd.Timestamp,
-) -> dict[str, object] | None:
-    selector_dir = OUTPUT_DIR / "selector"
-    recommended_path = selector_dir / "recommended_train_window.json"
-    similarity_path = selector_dir / "historical_month_similarity.csv"
-    if not recommended_path.exists():
-        return None
-
-    report = read_json(recommended_path)
-    matched_row = None
-    if _matches_window(report.get("recommended_train_window"), train_start, train_end):
-        matched_row = dict(report.get("recommended_train_window", {}))
-    else:
-        for row in report.get("alternative_windows", []):
-            if _matches_window(row, train_start, train_end):
-                matched_row = dict(row)
-                break
-    if matched_row is None:
-        return None
-
-    top_similar_months = list(report.get("top_similar_months", []))
-    overlap_months: list[dict[str, object]] = []
-    if similarity_path.exists():
-        similarity = pd.read_csv(similarity_path)
-        if not similarity.empty and {"month_start", "month_end"}.issubset(similarity.columns):
-            similarity["month_start"] = pd.to_datetime(similarity["month_start"]).dt.normalize()
-            similarity["month_end"] = pd.to_datetime(similarity["month_end"]).dt.normalize()
-            overlap = similarity.loc[
-                (similarity["month_start"] >= train_start) & (similarity["month_end"] <= train_end)
-            ].sort_values("distance_score", ascending=True)
-            for _, row in overlap.head(5).iterrows():
-                overlap_months.append(
-                    {
-                        "month": str(row.get("month", "")),
-                        "month_start": pd.Timestamp(row["month_start"]).strftime("%Y-%m-%d"),
-                        "month_end": pd.Timestamp(row["month_end"]).strftime("%Y-%m-%d"),
-                        "similarity_score": float(row.get("similarity_score", 0.0)),
-                        "trend_label": str(row.get("trend_label", "")),
-                        "volatility_label": str(row.get("volatility_label", "")),
-                        "capital_structure_label": str(row.get("capital_structure_label", "")),
-                    }
-                )
-
-    top_preview = []
-    for row in top_similar_months[:5]:
-        if not isinstance(row, dict):
-            continue
-        top_preview.append(
-            {
-                "month": str(row.get("month", "")),
-                "month_start": str(row.get("month_start", "")),
-                "month_end": str(row.get("month_end", "")),
-                "similarity_score": float(row.get("similarity_score", 0.0)),
-                "distance_score": float(row.get("distance_score", 0.0)),
-            }
-        )
-
-    parts: list[str] = []
-    if top_preview:
-        parts.append(
-            "Top 相似月份："
-            + "；".join(
-                f"{row['month']}（相似度 {row['similarity_score']:.4f}）"
-                for row in top_preview
-                if row.get("month")
-            )
-        )
-    if overlap_months:
-        parts.append(
-            "当前训练窗口覆盖的核心相似月份："
-            + "；".join(
-                f"{row['month']}（趋势{row['trend_label']}，波动{row['volatility_label']}，资金结构{row['capital_structure_label']}）"
-                for row in overlap_months
-                if row.get("month")
-            )
-        )
-    return {
-        "matched_recommended_window": matched_row,
-        "top_similar_months": top_preview,
-        "core_similar_months_in_train_window": overlap_months,
-        "summary_text": "。".join(parts) + ("。" if parts else ""),
-    }
-
 
 def run() -> None:
     log_step_start("03", "市场环境分析")
@@ -195,9 +90,6 @@ def run() -> None:
     train_window = daily_market.loc[(daily_market.index >= train_start) & (daily_market.index <= train_end)]
 
     train_context = build_train_context(train_window, thresholds, macro_data=macro_frame, windows=windows)
-    selector_month_context = _build_selector_month_context(train_start, train_end)
-    if selector_month_context is not None:
-        train_context["selector_similarity"] = selector_month_context
 
     market_context = {
         "meta": {

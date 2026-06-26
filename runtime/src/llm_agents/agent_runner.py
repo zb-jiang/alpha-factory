@@ -20,12 +20,13 @@ from typing import Any
 
 import httpx
 from openai import OpenAI
+from common import OUTPUT_DIR
 
 
 _LOG_LOCK = threading.Lock()
 
-# Prompt 落盘目录：runtime/outputs/llm/prompts
-_PROMPT_LOG_DIR = Path(__file__).resolve().parent.parent.parent / "outputs" / "llm" / "prompts"
+# Prompt 落盘目录：当前 staging 实例的 outputs/llm/prompts
+_PROMPT_LOG_DIR = OUTPUT_DIR / "llm" / "prompts"
 
 
 def _log(message: str) -> None:
@@ -82,7 +83,7 @@ def _parse_json_from_text(text: str) -> Any:
 
 
 def _log_prompt(caller_name: str, model: str, messages: list[dict[str, str]]) -> None:
-    """将 prompt 以 banner 形式写入 runtime/outputs/llm/prompts/<safe_name>.txt。
+    """将 prompt 以 banner 形式写入当前 staging 的 outputs/llm/prompts/<safe_name>.txt。
 
     每次调用都覆盖同名文件（同一 agent 多次调用只保留最新）。
     """
