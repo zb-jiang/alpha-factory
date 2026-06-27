@@ -427,6 +427,82 @@ def compute_daily_market(
     return daily_market.sort_index()
 
 
+def build_daily_regime_labels(
+    daily_market: pd.DataFrame,
+    thresholds: dict[str, Any],
+    *,
+    macro_data: pd.DataFrame | None = None,
+    windows: dict[str, Any] | None = None,
+) -> pd.DataFrame:
+    if daily_market.empty:
+        return pd.DataFrame(
+            columns=[
+                "trend",
+                "volatility",
+                "liquidity",
+                "dispersion",
+                "breadth",
+                "style",
+                "northbound",
+                "leverage",
+                "capital_structure",
+                "rate",
+                "macro_liquidity",
+                "economy",
+                "inflation",
+            ]
+        )
+
+    rank_high = _cfg_float(thresholds, "rank_high", 0.67)
+    rank_low = _cfg_float(thresholds, "rank_low", 0.33)
+    breadth_on = _cfg_float(thresholds, "breadth_risk_on", 0.62)
+    breadth_off = _cfg_float(thresholds, "breadth_risk_off", 0.38)
+    trend_up = _cfg_float(thresholds, "trend_up", 0.03)
+    trend_down = _cfg_float(thresholds, "trend_down", -0.03)
+    north_in_high = _cfg_float(thresholds, "northbound_inflow_high", rank_high)
+    north_out_low = _cfg_float(thresholds, "northbound_outflow_low", rank_low)
+    leverage_hot = _cfg_float(thresholds, "leverage_hot_high", rank_high)
+    leverage_cold = _cfg_float(thresholds, "leverage_cold_low", rank_low)
+
+    normalized = daily_market.sort_index().copy()
+    normalized.index = pd.to_datetime(normalized.index)
+    label_rows: list[dict[str, str]] = []
+    month_macro_cache: dict[str, dict[str, str]] = {}
+
+    for dt, row in normalized.iterrows():
+        northbound = _classify_capital_flow(_safe_float(row.get("northbound_flow_rank")), north_in_high, north_out_low)
+        leverage = _classify_leverage(
+            _safe_float(row.get("margin_flow_rank")),
+            _safe_float(row.get("margin_balance_rank")),
+            leverage_hot,
+            leverage_cold,
+        )
+        labels = {
+            "trend": _classify_trend(_safe_float(row.get("trend_20d")), trend_up, trend_down),
+            "volatility": _classify_rank_level(_safe_float(row.get("vol_rank_250d")), rank_high, rank_low),
+            "liquidity": _classify_rank_level(_safe_float(row.get("amount_rank_250d")), rank_high, rank_low),
+            "dispersion": _classify_rank_level(_safe_float(row.get("dispersion_rank_250d")), rank_high, rank_low),
+            "breadth": _classify_breadth(_safe_float(row.get("breadth_up_ratio")), breadth_on, breadth_off),
+            "style": "未知" if _safe_float(row.get("size_style_spread")) is None else ("大盘占优" if float(row["size_style_spread"]) > 0 else "小盘占优"),
+            "northbound": northbound,
+            "leverage": leverage,
+            "capital_structure": _classify_capital_structure(northbound, leverage),
+        }
+
+        month_key = pd.Timestamp(dt).strftime("%Y%m")
+        if month_key not in month_macro_cache:
+            macro_bundle = _compute_macro_label_bundle(
+                thresholds,
+                macro_data=_slice_macro_data_for_end(macro_data, pd.Timestamp(dt)),
+                windows=windows,
+            )
+            month_macro_cache[month_key] = dict(macro_bundle.get("labels", {}))
+        labels.update(month_macro_cache[month_key])
+        label_rows.append(labels)
+
+    return pd.DataFrame(label_rows, index=normalized.index)
+
+
 def _compute_market_label_bundle(
     window_frame: pd.DataFrame,
     thresholds: dict[str, Any],
@@ -971,4 +1047,4 @@ def build_train_context(
     return build_window_context(train_window, thresholds, macro_data=macro_data, windows=windows)
 
 
-__all__ = ["build_train_context", "build_window_context", "compute_daily_market"]
+__all__ = ["build_daily_regime_labels", "build_train_context", "build_window_context", "compute_daily_market"]

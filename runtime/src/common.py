@@ -161,6 +161,8 @@ OUTPUT_ARTIFACTS = [
     Path("llm") / "factors_rejected.json",
     Path("backtest") / "factor_values.parquet",
     Path("backtest") / "factor_metrics.csv",
+    Path("backtest") / "factor_regime_slices.csv",
+    Path("backtest") / "factor_regime_consistency.csv",
     Path("backtest") / "strategy_metrics.csv",
     Path("backtest") / "nav_curve.parquet",
     Path("backtest") / "orders.parquet",

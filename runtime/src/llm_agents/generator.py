@@ -25,7 +25,7 @@ _GENERATOR_SYSTEM = """你是一个顶级的量化交易策略研究员和金融
 核心约束：
 1. 你只能使用【首席分析师推荐特征】中的特征构造公式；严禁使用【首席分析师建议规避特征】或推荐列表之外的任何特征
 2. 每个因子必须有明确的经济学逻辑解释（reason 字段）
-3. 每个因子必须指明最可能失效的市场环境（expected_failure_regime 字段），且必须使用市场环境的 13 个标签维度（trend / volatility / liquidity / dispersion / breadth / style / northbound / leverage / capital_structure / rate / macro_liquidity / economy / inflation）的合法取值组合，便于后续做 regime-aware 归因；自由文本只能作为括号内补充说明，不能取代标签
+3. 每个因子必须指明最可能失效的市场环境（expected_failure_regime 字段），且只能使用以下 5 个核心市场标签维度的合法取值组合：trend / volatility / style / breadth / capital_structure。自由文本只能作为括号内补充说明，不能取代标签
 4. 公式必须可被 Python 直接 eval 执行，仅允许使用 +、-、*、/ 等基本算术运算符和【允许的算子】中的函数算子
 5. 禁止使用未来函数（如 .shift(-1)）
 6. 公式必须严格遵守【公式约束】中的硬性规则（嵌套深度、特征数量、算子数量、禁止链等）
@@ -34,7 +34,7 @@ _GENERATOR_SYSTEM = """你是一个顶级的量化交易策略研究员和金融
 9. 如果设计方向涉及 pe_ttm、pb、ps_ttm、dv_ttm、eps、roe、netprofit_yoy、or_yoy，请正确解释它们的金融含义：pe_ttm/pb 更偏价值，dv_ttm 更偏红利，ps_ttm 更偏高成长预期定价，roe 更偏质量，netprofit_yoy/or_yoy 更偏财务成长
 10. 当前系统已接入按 ann_date 做 as-of 对齐的季频财务数据，因此可以使用 eps、roe、netprofit_yoy、or_yoy 来表达真实的盈利能力和成长逻辑；但 pe_ttm、pb、ps_ttm、dv_ttm 仍应优先解释为估值/红利/风格偏好，而不是直接等同于财务成长
 11. 当使用基本面风格特征时，可以生成"价值修复""红利防守""质量成长""收入/利润同比改善"这类与当前数据含义一致的逻辑，但必须避免未来函数叙事，确保理由与已接入字段一致
-12. 如果【市场环境及字段说明】中出现 northbound、leverage、capital_structure 等资金面标签，请把它们用于决定因子更偏进攻、防守、拥挤修复还是风险收缩；尤其当"外资谨慎/杠杆激进"或"外资积极/杠杆收缩"出现时，要在 risk 和 expected_failure_regime 中明确体现资金分歧风险
+12. 如果【市场环境及字段说明】中出现 northbound、leverage、capital_structure 等资金面标签，请把它们用于理解资金主导结构，但写入 expected_failure_regime 时只能落到 5 个允许维度之一。资金分歧相关内容优先归入 capital_structure，严禁直接写 northbound=... 或 leverage=...；一旦出现 liquidity / dispersion / northbound / leverage / rate / macro_liquidity / economy / inflation 这些维度名，expected_failure_regime 就视为无效
 13. 你必须参考【全局重点特征证据包及字段说明】中的定量证据，优先依据 recommended_focus_fields 判断哪些特征更值得组合，不能只根据特征名称和业务含义拼凑公式
 14. 【市场环境及字段说明】描述的是当前样本窗口的市场环境，不是实时行情。你必须优先结合 segment_contexts、temporal_structure_summary_text、stability_metrics，判断当前样本窗口内部是持续稳定还是中途切换，并据此决定因子更适合趋势延续、状态切换应对还是防守过滤。summary_text 和 labels 主要用于快速总览，不能替代上述主证据；其中 rate、macro_liquidity、economy、inflation 这 4 个宏观标签更多是辅助背景，并明确理解为当前样本窗口结束附近的宏观快照，而不是整个样本窗口的平均宏观环境。
 
@@ -149,10 +149,23 @@ def _build_generator_messages(design_direction: dict[str, Any], context: dict[st
       "direction": "higher_better 或 lower_better",
       "reason": "中文简述因子的经济学逻辑",
       "risk": "中文简述风险",
-      "expected_failure_regime": "最可能失效的市场环境，必须使用以下 13 个标签维度的取值组合（用顿号或加号连接），并附简短中文说明。允许的维度与取值：trend(上行/震荡/下行)、volatility(高/中/低)、liquidity(高/中/低)、dispersion(高/中/低)、breadth(普涨/分化/普跌)、style(大盘占优/小盘占优)、northbound(偏流入/中性/偏流出)、leverage(升温/平稳/降温)、capital_structure(同向进攻/同向防守/外资谨慎/杠杆激进/中性)、rate(宽松/中性/收紧)、macro_liquidity(扩张/中性/收缩)、economy(扩张/中性/收缩/未知)、inflation(上行/中性/下行)。例如：'trend=下行、rate=收紧、economy=收缩（利率上行+经济衰退双杀）'"
+      "expected_failure_regime": "最可能失效的市场环境，必须使用以下 5 个核心标签维度的取值组合（用顿号或加号连接），并附简短中文说明。只允许出现这 5 个维度名：trend(上行/震荡/下行)、volatility(高/中/低)、style(大盘占优/小盘占优)、breadth(普涨/分化/普跌)、capital_structure(同向进攻/同向防守/外资谨慎/杠杆激进/中性)。严禁出现 liquidity、dispersion、northbound、leverage、rate、macro_liquidity、economy、inflation。合法示例：'trend=上行、capital_structure=外资谨慎/杠杆激进（单边风险偏好抬升时，低估值防守逻辑容易失效）'"
     }}
   ]
-}}"""
+}}
+
+输出前请逐条自检 expected_failure_regime：
+1. 等号左边只能出现 trend / volatility / style / breadth / capital_structure 这 5 个维度名
+2. 绝对不能出现 liquidity / dispersion / northbound / leverage / rate / macro_liquidity / economy / inflation
+3. 如果你想表达“杠杆升温”或“北向流出”，必须改写成 capital_structure 的合法取值，而不是直接写 leverage 或 northbound
+4. 如果拿不准，就只写 1 到 2 个最确定的允许维度，不要冒险写不允许的维度
+
+下面是示例：
+- 合法：trend=上行、capital_structure=外资谨慎/杠杆激进（资金偏进攻时反转逻辑容易被压制）
+- 非法：trend=上行、leverage=升温
+- 非法：northbound=偏流出、capital_structure=外资谨慎/杠杆激进
+
+"""
 
     return [
         {"role": "system", "content": _GENERATOR_SYSTEM},
