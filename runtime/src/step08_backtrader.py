@@ -230,6 +230,115 @@ def _build_market_timing(rule: dict[str, Any], ohlcv_map: dict[str, pd.DataFrame
     )
 
 
+def _optional_threshold(cfg: dict[str, Any], key: str) -> float | None:
+    if key not in cfg:
+        return None
+    value = cfg.get(key)
+    if value in {None, ""}:
+        return None
+    return float(value)
+
+
+def _append_skip(skipped_factors: list[dict[str, str]], factor_name: str, formula_map: dict[str, str], reason: str) -> None:
+    skipped_factors.append(
+        {
+            "factor_name": factor_name,
+            "formula": formula_map.get(factor_name, ""),
+            "reason": reason,
+        }
+    )
+
+
+def _format_screening_reasons(reasons: list[str]) -> str:
+    if not reasons:
+        return ""
+    numbered = "；".join(f"{idx + 1}) {item}" for idx, item in enumerate(reasons))
+    return f"训练期因子预筛未通过，共命中 {len(reasons)} 条淘汰条件：{numbered}"
+
+
+def _descriptive_metric_reason(
+    metric_name: str,
+    value: float,
+    threshold: float,
+    direction: str,
+    config_key: str | None = None,
+) -> str:
+    config_hint = f" 对应配置键：`{config_key}`。" if config_key else ""
+    if metric_name == "mean_rank_ic_abs":
+        return (
+            "统计有效性检查失败：指标 `|mean_rank_ic|`（截面秩相关信息系数绝对值，衡量因子分数排序与未来收益排序的一致性强弱）"
+            f" 当前为 {value:.4f}，低于阈值 {threshold:.4f}。{config_hint}"
+        )
+    if metric_name == "rank_ic_ir_abs":
+        return (
+            "统计稳定性检查失败：指标 `|rank_ic_ir|`（RankIC 均值与其波动之比，衡量因子信号稳定程度）"
+            f" 当前为 {value:.4f}，低于阈值 {threshold:.4f}。{config_hint}"
+        )
+    if metric_name == "directional_win_rate":
+        return (
+            "方向胜率检查失败：指标 `directional_win_rate`（按经验方向统计，RankIC 为正的观测日占比；若因子经验方向为负，则使用 1 - positive_ic_ratio）"
+            f" 当前为 {value:.4f}，低于阈值 {threshold:.4f}。{config_hint}"
+        )
+    if metric_name == "monotonicity_score":
+        return (
+            "单调性检查失败：指标 `monotonicity_score`（先按经验方向统一成“高分更好”，再把每日股票分成 5 组，"
+            "综合分组收益与组序号的 Spearman 相关性，以及相邻组收益递增比例得到的 0~1 评分）"
+            f" 当前为 {value:.4f}，低于阈值 {threshold:.4f}。{config_hint}"
+        )
+    if metric_name == "yearly_stability_score":
+        return (
+            "跨年稳定性检查失败：指标 `yearly_stability_score`（按经验方向把 daily RankIC 转为同向口径后，"
+            "先计算各年份平均表现，再综合正向年份占比和年度间波动得到的 0~1 评分）"
+            f" 当前为 {value:.4f}，低于阈值 {threshold:.4f}。{config_hint}"
+        )
+    if metric_name == "neutralized_ic_retention":
+        return (
+            "中性化保真度检查失败：指标 `neutralized_ic_retention`（同一因子在 neutralization=none 与 "
+            "neutralization=industry_market_cap 两种口径下的 |mean_rank_ic| 保留比例）"
+            f" 当前为 {value:.4f}，低于阈值 {threshold:.4f}。{config_hint}这通常说明因子有效性可能主要来自行业或市值暴露。"
+        )
+    if metric_name == "monotonicity_violation_ratio":
+        return (
+            "单调性反向比例检查失败：指标 `monotonicity_violation_ratio`（基于 5 组平均收益曲线，"
+            "统计相邻组收益没有按“高组不差于低组”排列的比例）"
+            f" 当前为 {value:.4f}，高于上限 {threshold:.4f}。{config_hint}"
+        )
+    comparator = "低于" if direction == "min" else "高于"
+    return f"指标 `{metric_name}` 当前为 {value:.4f}，{comparator} 阈值 {threshold:.4f}。{config_hint}"
+
+
+def _collect_metric_threshold_reason(
+    metric_name: str,
+    factor_row: pd.Series,
+    cfg: dict[str, Any],
+    min_key: str | None = None,
+    max_key: str | None = None,
+) -> str | None:
+    value = pd.to_numeric(pd.Series([factor_row.get(metric_name)]), errors="coerce").iloc[0]
+    if pd.isna(value):
+        configured = []
+        if min_key and _optional_threshold(cfg, min_key) is not None:
+            configured.append(min_key)
+        if max_key and _optional_threshold(cfg, max_key) is not None:
+            configured.append(max_key)
+        if configured:
+            return (
+                f"指标数据缺失：`{metric_name}` 在本轮评估结果中为空，"
+                f"但它被 {', '.join(f'`{item}`' for item in configured)} 配置为强制门槛，因此该因子无法进入回测。"
+            )
+        return None
+
+    if min_key:
+        minimum = _optional_threshold(cfg, min_key)
+        if minimum is not None and float(value) < minimum:
+            return _descriptive_metric_reason(metric_name, float(value), minimum, "min", config_key=min_key)
+    if max_key:
+        maximum = _optional_threshold(cfg, max_key)
+        if maximum is not None and float(value) > maximum:
+            return _descriptive_metric_reason(metric_name, float(value), maximum, "max", config_key=max_key)
+    return None
+
+
 def run_backtest_batch_export() -> None:
     log_step_start("08", "因子回测")
     cfg = env_config()
@@ -281,29 +390,92 @@ def run_backtest_batch_export() -> None:
         score_sign = 1.0
         try:
             if not factor_metrics.empty and factor_name in factor_metrics.index:
-                mean_rank_ic = float(factor_metrics.loc[factor_name, "mean_rank_ic"])
-                rank_ic_ir = float(factor_metrics.loc[factor_name, "rank_ic_ir"])
-                pos_ratio = float(factor_metrics.loc[factor_name, "positive_ic_ratio"])
-                empirical_direction = str(factor_metrics.loc[factor_name, "empirical_direction"])
-                llm_direction = str(factor_metrics.loc[factor_name, "llm_direction"])
+                factor_row = factor_metrics.loc[factor_name]
+                mean_rank_ic = float(factor_row["mean_rank_ic"])
+                rank_ic_ir = float(factor_row["rank_ic_ir"])
+                pos_ratio = float(factor_row["positive_ic_ratio"])
+                empirical_direction = str(factor_row["empirical_direction"])
+                llm_direction = str(factor_row["llm_direction"])
+                screening_reasons: list[str] = []
                 if abs(mean_rank_ic) < min_rank_ic_to_backtest:
-                    reason = f"Rank IC too low (|{mean_rank_ic:.4f}| < {min_rank_ic_to_backtest})"
-                    skipped_factors.append({"factor_name": factor_name, "formula": _formula_map.get(factor_name, ""), "reason": reason})
-                    continue
+                    screening_reasons.append(
+                        _descriptive_metric_reason(
+                            "mean_rank_ic_abs",
+                            abs(mean_rank_ic),
+                            min_rank_ic_to_backtest,
+                            "min",
+                            config_key="min_rank_ic_to_backtest",
+                        )
+                    )
                 if abs(rank_ic_ir) < min_rank_ic_ir_to_backtest:
-                    reason = f"Rank IC IR too low (|{rank_ic_ir:.4f}| < {min_rank_ic_ir_to_backtest})"
-                    skipped_factors.append({"factor_name": factor_name, "formula": _formula_map.get(factor_name, ""), "reason": reason})
-                    continue
+                    screening_reasons.append(
+                        _descriptive_metric_reason(
+                            "rank_ic_ir_abs",
+                            abs(rank_ic_ir),
+                            min_rank_ic_ir_to_backtest,
+                            "min",
+                            config_key="min_rank_ic_ir_to_backtest",
+                        )
+                    )
                 if enable_direction_filter and llm_direction != empirical_direction:
-                    reason = f"Direction mismatch (LLM={llm_direction}, empirical={empirical_direction})"
-                    skipped_factors.append({"factor_name": factor_name, "formula": _formula_map.get(factor_name, ""), "reason": reason})
-                    continue
+                    screening_reasons.append(
+                        "方向一致性检查失败：配置 `enable_direction_filter=true` 时，要求 LLM 预判方向与样本内经验方向一致；"
+                        f" 当前 LLM 方向为 `{llm_direction}`，样本内经验方向为 `{empirical_direction}`。"
+                        " 对应配置键：`enable_direction_filter`。"
+                    )
                 is_negative_ic = mean_rank_ic < 0
                 score_sign = -1.0 if is_negative_ic else 1.0
                 win_rate = pos_ratio if not is_negative_ic else (1 - pos_ratio)
                 if win_rate < min_positive_ic_ratio:
-                    reason = f"Directional win rate too low ({win_rate:.2f} < {min_positive_ic_ratio})"
-                    skipped_factors.append({"factor_name": factor_name, "formula": _formula_map.get(factor_name, ""), "reason": reason})
+                    screening_reasons.append(
+                        _descriptive_metric_reason(
+                            "directional_win_rate",
+                            win_rate,
+                            min_positive_ic_ratio,
+                            "min",
+                            config_key="min_positive_ic_ratio",
+                        )
+                    )
+                reason = _collect_metric_threshold_reason(
+                    "monotonicity_score",
+                    factor_row,
+                    cfg,
+                    min_key="min_monotonicity_score_to_backtest",
+                )
+                if reason:
+                    screening_reasons.append(reason)
+                reason = _collect_metric_threshold_reason(
+                    "yearly_stability_score",
+                    factor_row,
+                    cfg,
+                    min_key="min_yearly_stability_score_to_backtest",
+                )
+                if reason:
+                    screening_reasons.append(reason)
+                reason = _collect_metric_threshold_reason(
+                    "neutralized_ic_retention",
+                    factor_row,
+                    cfg,
+                    min_key="min_neutralized_ic_retention_to_backtest",
+                )
+                if reason:
+                    screening_reasons.append(reason)
+                reason = _collect_metric_threshold_reason(
+                    "monotonicity_violation_ratio",
+                    factor_row,
+                    cfg,
+                    max_key="max_monotonicity_violation_ratio_to_backtest",
+                )
+                if reason:
+                    screening_reasons.append(reason)
+
+                if screening_reasons:
+                    _append_skip(
+                        skipped_factors,
+                        factor_name,
+                        _formula_map,
+                        _format_screening_reasons(screening_reasons),
+                    )
                     continue
 
             bundle = _build_data_bundle_for_factor(factor_name, factor_values, ohlcv_map, score_sign=score_sign)
@@ -356,7 +528,12 @@ def run_backtest_batch_export() -> None:
                 position_rows.extend(positions_df.to_dict(orient="records"))
 
         except Exception as exc:
-            skipped_factors.append({"factor_name": factor_name, "formula": _formula_map.get(factor_name, ""), "reason": str(exc)})
+            _append_skip(
+                skipped_factors,
+                factor_name,
+                _formula_map,
+                f"回测执行阶段发生异常，导致该因子无法进入结果汇总：{exc}",
+            )
             print(f"  跳过: {factor_name} ({exc})")
 
     metrics_df = pd.DataFrame(metric_rows).set_index("factor_name") if metric_rows else pd.DataFrame()
