@@ -34,15 +34,6 @@ def run() -> None:
 
     scfg = score_config()
     weights = scfg.get("weights", {})
-    regime_cfg = dict(scfg.get("regime_analysis", {}))
-    neutral_regime_score = float(regime_cfg.get("neutral_score", 0.5))
-    if "regime_consistency_score" not in merged.columns:
-        merged["regime_consistency_score"] = neutral_regime_score
-    merged["regime_consistency_component"] = (
-        pd.to_numeric(merged["regime_consistency_score"], errors="coerce")
-        .fillna(neutral_regime_score)
-        .clip(lower=0.0, upper=1.0)
-    )
 
     w_ic = float(weights.get("ic_stability", 0.35))
     w_ret = float(weights.get("annual_return", 0.50))

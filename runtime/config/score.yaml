@@ -30,36 +30,3 @@ weights:
 # 负收益惩罚：当年化收益率 < 0 时，total_score 额外减去此值
 negative_return_penalty: 0.5
 
-regime_analysis:
-  # 这 5 个维度是正式参与 expected_failure_regime 一致性评分的核心维度。
-  scoring_dimensions:
-    - trend
-    - volatility
-    - style
-    - breadth
-    - capital_structure
-  # 这组维度全部进入 step07 的分环境分析报表，但不全部进入一致性评分。
-  report_dimensions:
-    - trend
-    - volatility
-    - liquidity
-    - dispersion
-    - breadth
-    - style
-    - northbound
-    - leverage
-    - capital_structure
-    - rate
-    - macro_liquidity
-    - economy
-    - inflation
-  # regime 报表与一致性核验专用的 observation 有效覆盖率门槛。
-  regime_min_valid_ratio_per_observation: 0.8
-  # 当某个 failure regime 子样本的观测日太少时，先不给强结论，按中性分处理。
-  min_observation_count: 4
-  # neutral_score 同时用于“无法解析/样本不足”的中性处理值。
-  neutral_score: 0.5
-  # 下面三个阈值用于判断 failure regime 下是否出现了足够明显的变差。
-  ic_tolerance: 0.002
-  win_rate_tolerance: 0.05
-  long_short_tolerance: 0.001

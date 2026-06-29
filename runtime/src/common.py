@@ -363,6 +363,8 @@ CONFIG_OWNERSHIP: dict[str, set[str]] = {
         "min_neutralized_ic_retention_to_backtest",
         "max_monotonicity_violation_ratio_to_backtest",
         "enable_direction_filter",
+        "regime_analysis",
+        "regime_consistency_gate",
         "llm_agents",
     },
     "analysis_rule": {

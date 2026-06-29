@@ -30,12 +30,29 @@ from common import (
     preprocess_config,
     preprocess_signature,
     read_json,
-    score_config,
     write_table,
 )
 from market_regime import build_daily_regime_labels, compute_daily_market
 
-_ALL_REGIME_DIMENSIONS = [
+# regime 一致性评分的数学中点。
+# _comparison_score 中 component 只取 1.0 / 0.0 / NEUTRAL_SCORE 三值，
+# 三者均值的中点必须为 0.5，否则 ±0.15 死区不再对称，判定语义被破坏。
+# 因此这是算法常量，不暴露为配置项。
+NEUTRAL_SCORE = 0.5
+
+# 参与 expected_failure_regime 一致性评分的 5 个核心维度。
+# 与 generator.py 中 LLM prompt 写死的维度名硬耦合，不可配置。
+SCORING_DIMENSIONS = [
+    "trend",
+    "volatility",
+    "style",
+    "breadth",
+    "capital_structure",
+]
+
+# 进入 step07 分环境分析报表的维度全集。
+# 与 market_regime.py 中 build_daily_regime_labels 计算的标签维度硬耦合，不可配置。
+REPORT_DIMENSIONS = [
     "trend",
     "volatility",
     "liquidity",
@@ -564,30 +581,16 @@ def _build_slice_payload(
 
 
 def _regime_eval_config() -> dict[str, Any]:
-    regime_cfg = dict(score_config().get("regime_analysis", {}))
-    scoring_dimensions = [
-        str(item).strip()
-        for item in regime_cfg.get(
-            "scoring_dimensions",
-            ["trend", "volatility", "style", "breadth", "capital_structure"],
-        )
-        if str(item).strip()
-    ]
-    report_dimensions = [
-        str(item).strip()
-        for item in regime_cfg.get("report_dimensions", _ALL_REGIME_DIMENSIONS)
-        if str(item).strip()
-    ]
+    regime_cfg = dict(env_config().get("regime_analysis", {}))
     return {
-        "scoring_dimensions": scoring_dimensions,
-        "report_dimensions": report_dimensions,
+        "scoring_dimensions": SCORING_DIMENSIONS,
+        "report_dimensions": REPORT_DIMENSIONS,
         "regime_min_valid_ratio_per_observation": float(
             regime_cfg.get(
                 "regime_min_valid_ratio_per_observation",
                 regime_cfg.get("min_valid_ratio_per_observation", 0.8),
             )
         ),
-        "neutral_score": float(regime_cfg.get("neutral_score", 0.5)),
         "min_observation_count": int(regime_cfg.get("min_observation_count", 4)),
         "ic_tolerance": float(regime_cfg.get("ic_tolerance", 0.002)),
         "win_rate_tolerance": float(regime_cfg.get("win_rate_tolerance", 0.05)),
@@ -595,19 +598,19 @@ def _regime_eval_config() -> dict[str, Any]:
     }
 
 
-def _comparison_score(subgroup_value: float, baseline_value: float, tolerance: float, neutral_score: float) -> float:
+def _comparison_score(subgroup_value: float, baseline_value: float, tolerance: float) -> float:
     delta = baseline_value - subgroup_value
     if delta > tolerance:
         return 1.0
     if delta < -tolerance:
         return 0.0
-    return neutral_score
+    return NEUTRAL_SCORE
 
 
-def _consistency_status(score_value: float, neutral_score: float) -> str:
-    if score_value >= neutral_score + 0.15:
+def _consistency_status(score_value: float) -> str:
+    if score_value >= NEUTRAL_SCORE + 0.15:
         return "consistent"
-    if score_value <= neutral_score - 0.15:
+    if score_value <= NEUTRAL_SCORE - 0.15:
         return "inconsistent"
     return "neutral"
 
@@ -632,13 +635,12 @@ def _analyze_regime_consistency(
     config: dict[str, Any],
     regime_cfg: dict[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
-    neutral_score = float(regime_cfg["neutral_score"])
     if regime_label_frame.empty:
         return {
             "expected_failure_regime": expected_failure_regime,
             "regime_declared_dimension_count": 0,
             "regime_scored_dimension_count": 0,
-            "regime_consistency_score": neutral_score,
+            "regime_consistency_score": NEUTRAL_SCORE,
             "regime_consistency_status": "missing_regime_data",
             "regime_consistency_summary": "缺少可用的 regime 标签数据",
         }, [], []
@@ -703,7 +705,7 @@ def _analyze_regime_consistency(
             "expected_failure_regime": expected_failure_regime,
             "regime_declared_dimension_count": 0,
             "regime_scored_dimension_count": 0,
-            "regime_consistency_score": neutral_score,
+            "regime_consistency_score": NEUTRAL_SCORE,
             "regime_consistency_status": "no_declared_regime",
             "regime_consistency_summary": "未解析到可评分的 expected_failure_regime 维度",
         }, slice_rows, consistency_rows
@@ -722,7 +724,7 @@ def _analyze_regime_consistency(
                     "regime_dimension": dimension,
                     "declared_failure_label": declared_label,
                     "baseline_source": "overall",
-                    "dimension_score": neutral_score,
+                    "dimension_score": NEUTRAL_SCORE,
                     "dimension_status": "missing_dimension",
                     "dimension_reason": dimension_reason,
                     "subgroup_sample_days": 0,
@@ -764,11 +766,11 @@ def _analyze_regime_consistency(
         baseline_source = "complement" if use_complement else "overall"
 
         if int(subgroup["sample_days"]) == 0:
-            dimension_score = neutral_score
+            dimension_score = NEUTRAL_SCORE
             component_summary = "declared_label_not_observed"
             dimension_reason = "declared_label_not_observed"
         elif int(subgroup["observation_count"]) < min_obs:
-            dimension_score = neutral_score
+            dimension_score = NEUTRAL_SCORE
             component_summary = "insufficient_subgroup_observation"
             dimension_reason = "insufficient_subgroup_observation"
         else:
@@ -777,19 +779,16 @@ def _analyze_regime_consistency(
                     float(subgroup["oriented_rank_ic"]),
                     float(baseline["oriented_rank_ic"]),
                     float(regime_cfg["ic_tolerance"]),
-                    neutral_score,
                 ),
                 _comparison_score(
                     float(subgroup["directional_win_rate"]),
                     float(baseline["directional_win_rate"]),
                     float(regime_cfg["win_rate_tolerance"]),
-                    neutral_score,
                 ),
                 _comparison_score(
                     float(subgroup["oriented_long_short_return"]),
                     float(baseline["oriented_long_short_return"]),
                     float(regime_cfg["long_short_tolerance"]),
-                    neutral_score,
                 ),
             ]
             dimension_score = float(sum(score_components) / len(score_components))
@@ -797,7 +796,7 @@ def _analyze_regime_consistency(
             dimension_reason = "scored"
 
         per_dimension_scores.append(dimension_score)
-        dimension_status = _consistency_status(dimension_score, neutral_score)
+        dimension_status = _consistency_status(dimension_score)
         consistency_rows.append(
             {
                 "factor_name": factor_name,
@@ -822,13 +821,13 @@ def _analyze_regime_consistency(
             f"{dimension}={declared_label}:{dimension_status}[{_consistency_reason_tag(dimension_reason)}]({dimension_score:.2f})"
         )
 
-    final_score = float(sum(per_dimension_scores) / len(per_dimension_scores)) if per_dimension_scores else neutral_score
+    final_score = float(sum(per_dimension_scores) / len(per_dimension_scores)) if per_dimension_scores else NEUTRAL_SCORE
     return {
         "expected_failure_regime": expected_failure_regime,
         "regime_declared_dimension_count": int(len(declared_pairs)),
         "regime_scored_dimension_count": int(len(per_dimension_scores)),
         "regime_consistency_score": final_score,
-        "regime_consistency_status": _consistency_status(final_score, neutral_score),
+        "regime_consistency_status": _consistency_status(final_score),
         "regime_consistency_summary": "; ".join(summary_parts),
     }, slice_rows, consistency_rows
 def run() -> None:
@@ -915,7 +914,7 @@ def run() -> None:
             regime_consistency_rows.extend(consistency_rows)
             rank_ic = metrics.get("mean_rank_ic", 0.0)
             rank_ir = metrics.get("rank_ic_ir", 0.0)
-            regime_score = float(metrics.get("regime_consistency_score", regime_cfg["neutral_score"]))
+            regime_score = float(metrics.get("regime_consistency_score", NEUTRAL_SCORE))
             print(
                 f"  [{i}/{total}] {factor_name}: rank_ic={rank_ic:.4f}, rank_ir={rank_ir:.4f}, regime_score={regime_score:.2f}",
                 flush=True,
