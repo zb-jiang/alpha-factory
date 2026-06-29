@@ -54,7 +54,7 @@ def run() -> None:
     merged.loc[negative_return_mask, "total_score"] -= neg_penalty
 
     merged = merged.sort_values("total_score", ascending=False)
-    # final_score.csv 只保留与打分直接相关的列，原始指标见 factor_metrics.csv 和 strategy_metrics.csv
+    # final_score.csv 保留打分相关列 + 展示所需字段
     final_columns = [
         "mean_rank_ic",
         "rank_ic_ir",
@@ -62,6 +62,9 @@ def run() -> None:
         "max_drawdown",
         "turnover",
         "positive_ic_ratio",
+        "observation_count",
+        "llm_direction",
+        "empirical_direction",
         "ic_stability_score",
         "annual_return_score",
         "drawdown_penalty",
@@ -69,6 +72,8 @@ def run() -> None:
         "instability_penalty",
         "total_score",
     ]
+    # 过滤掉 factor_metrics.csv 中可能不存在的列
+    final_columns = [c for c in final_columns if c in merged.columns]
     write_table(OUTPUT_DIR / "backtest" / "final_score.csv", merged[final_columns])
 
     # 丰富 top3_factors.json，补充公式和逻辑说明

@@ -134,6 +134,27 @@ public class StagingConfigService {
         result.put("min_positive_ic_ratio", prescreen.getOrDefault("min_positive_ic_ratio", 0.4));
         result.put("enable_direction_filter", prescreen.getOrDefault("enable_direction_filter", false));
 
+        // 单调性与稳定性预筛门槛
+        result.put("min_monotonicity_score_to_backtest", prescreen.getOrDefault("min_monotonicity_score_to_backtest", 0.3));
+        result.put("max_monotonicity_violation_ratio_to_backtest", prescreen.getOrDefault("max_monotonicity_violation_ratio_to_backtest", 0.5));
+        result.put("min_yearly_stability_score_to_backtest", prescreen.getOrDefault("min_yearly_stability_score_to_backtest", 0.2));
+        result.put("min_neutralized_ic_retention_to_backtest", prescreen.getOrDefault("min_neutralized_ic_retention_to_backtest", 0.2));
+
+        // regime一致性预筛配置
+        Map<String, Object> regimeFlat = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : prescreen.entrySet()) {
+            if (entry.getKey().startsWith("regime_analysis.")) {
+                regimeFlat.put(entry.getKey(), entry.getValue());
+            }
+        }
+        if (!regimeFlat.isEmpty()) {
+            Map<String, Object> regimeNested = expandDottedKeys(regimeFlat);
+            if (regimeNested.containsKey("regime_analysis")) {
+                result.put("regime_analysis", regimeNested.get("regime_analysis"));
+            }
+        }
+        result.put("regime_consistency_gate", prescreen.getOrDefault("regime_consistency_gate", "none"));
+
         Map<String, Object> featurePool = sectionMap(taskId, TaskConfigService.TAB_FEATURE_POOL, HashMap::new);
         result.put("summary_top_k", featurePool.getOrDefault("summary_top_k", 3));
         result.put("unstable_top_k", featurePool.getOrDefault("unstable_top_k", 3));

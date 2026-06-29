@@ -1745,9 +1745,9 @@ public class TaskConfigService {
         Map<String, Object> scoreValues = getSectionMap(taskId, TAB_SCORE);
         List<ConfigGroup> groups = new ArrayList<>();
 
-        // 组1: 因子预筛门槛
+        // 组1: 基础预筛门槛
         groups.add(ConfigGroup.builder()
-                .name("prescreen").label("因子预筛门槛").icon("Filter")
+                .name("prescreen_basic").label("基础预筛门槛").icon("Filter")
                 .description("不满足以下全部条件则跳过回测")
                 .fields(List.of(
                         numField("min_rank_ic_to_backtest", "Rank IC 绝对值门槛",
@@ -1762,6 +1762,78 @@ public class TaskConfigService {
                         field("enable_direction_filter", "启用方向过滤", "switch",
                                 prescreenValues.getOrDefault("enable_direction_filter", false), false,
                                 "要求LLM猜测方向与样本内经验方向一致", null, "task")
+                ))
+                .build());
+
+        // 组2: 单调性与稳定性预筛
+        groups.add(ConfigGroup.builder()
+                .name("prescreen_advanced").label("单调性与稳定性预筛").icon("Histogram")
+                .description("高级预筛门槛：因子结构质量与跨年稳健性")
+                .fields(List.of(
+                        numField("min_monotonicity_score_to_backtest", "单调性评分门槛",
+                                prescreenValues.getOrDefault("min_monotonicity_score_to_backtest", 0.3), 0.3,
+                                "单调性评分阈值（0~1，低于此值跳过）", 0, 1, 0.05, 2, true),
+                        numField("max_monotonicity_violation_ratio_to_backtest", "单调性反向比例上限",
+                                prescreenValues.getOrDefault("max_monotonicity_violation_ratio_to_backtest", 0.5), 0.5,
+                                "单调性反向比例上限（0~1，高于此值跳过）", 0, 1, 0.05, 2, true),
+                        numField("min_yearly_stability_score_to_backtest", "跨年稳定性评分门槛",
+                                prescreenValues.getOrDefault("min_yearly_stability_score_to_backtest", 0.2), 0.2,
+                                "跨年稳定性评分阈值（0~1，低于此值跳过）", 0, 1, 0.05, 2, true),
+                        numField("min_neutralized_ic_retention_to_backtest", "中性化后IC保留比例门槛",
+                                prescreenValues.getOrDefault("min_neutralized_ic_retention_to_backtest", 0.2), 0.2,
+                                "中性化后IC保留比例门槛（0~1，低于此值跳过）", 0, 1, 0.05, 2, true)
+                ))
+                .build());
+
+        // 组3: regime一致性预筛
+        groups.add(ConfigGroup.builder()
+                .name("prescreen_regime").label("regime一致性预筛").icon("ScaleToOriginal")
+                .description("诊断性门槛：验证LLM声明的失效regime是否与实际数据一致")
+                .fields(List.of(
+                        field("regime_consistency_gate", "regime一致性拦截策略", "select",
+                                prescreenValues.getOrDefault("regime_consistency_gate", "none"), "none",
+                                "none=不拦截，inconsistent=只拦截不一致，strict=拦截不一致和中性",
+                                List.of(opt("不拦截", "none"), opt("拦截不一致", "inconsistent"), opt("严格（仅放行一致）", "strict")), "task"),
+                        ConfigField.builder()
+                                .key("regime_analysis.regime_min_valid_ratio_per_observation").label("观测有效覆盖率门槛").type("number")
+                                .value(getNestedValue(prescreenValues, "regime_analysis", "regime_min_valid_ratio_per_observation"))
+                                .defaultValue(0.8)
+                                .description("regime切片分析时单个观测日的有效数据比例门槛")
+                                .min(0).max(1).step(0.05).precision(2).required(true).source("task")
+                                .disableWhenKey("regime_consistency_gate").disableWhenValue("none")
+                                .build(),
+                        ConfigField.builder()
+                                .key("regime_analysis.min_observation_count").label("最小观测日数").type("number")
+                                .value(getNestedValue(prescreenValues, "regime_analysis", "min_observation_count"))
+                                .defaultValue(4)
+                                .description("regime子样本最少需要的观测日数，少于此值按中性分处理")
+                                .min(1).max(100).step(1).precision(0).required(true).source("task")
+                                .disableWhenKey("regime_consistency_gate").disableWhenValue("none")
+                                .build(),
+                        ConfigField.builder()
+                                .key("regime_analysis.ic_tolerance").label("IC容差").type("number")
+                                .value(getNestedValue(prescreenValues, "regime_analysis", "ic_tolerance"))
+                                .defaultValue(0.002)
+                                .description("regime一致性判断中IC差异的容差阈值")
+                                .min(0).max(0.1).step(0.001).precision(3).required(true).source("task")
+                                .disableWhenKey("regime_consistency_gate").disableWhenValue("none")
+                                .build(),
+                        ConfigField.builder()
+                                .key("regime_analysis.win_rate_tolerance").label("胜率容差").type("number")
+                                .value(getNestedValue(prescreenValues, "regime_analysis", "win_rate_tolerance"))
+                                .defaultValue(0.05)
+                                .description("regime一致性判断中胜率差异的容差阈值")
+                                .min(0).max(0.5).step(0.01).precision(2).required(true).source("task")
+                                .disableWhenKey("regime_consistency_gate").disableWhenValue("none")
+                                .build(),
+                        ConfigField.builder()
+                                .key("regime_analysis.long_short_tolerance").label("多空收益容差").type("number")
+                                .value(getNestedValue(prescreenValues, "regime_analysis", "long_short_tolerance"))
+                                .defaultValue(0.001)
+                                .description("regime一致性判断中多空收益差异的容差阈值")
+                                .min(0).max(0.1).step(0.001).precision(3).required(true).source("task")
+                                .disableWhenKey("regime_consistency_gate").disableWhenValue("none")
+                                .build()
                 ))
                 .build());
 

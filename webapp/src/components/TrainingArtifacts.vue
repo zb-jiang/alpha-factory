@@ -207,13 +207,7 @@ const summaryStats = computed(() => {
             </div>
             <div v-if="w.discovery?.market_context?.train_context" class="market-context">
               <div class="market-summary">
-                {{ w.discovery.market_context.train_context.summary_text || 'NA' }}
-              </div>
-              <div class="label-grid">
-                <div v-for="(value, key) in (w.discovery.market_context.train_context.labels || {})" :key="String(key)" class="label-cell">
-                  <div class="label-key">{{ key }}</div>
-                  <div class="label-value" :class="'lv-' + value">{{ value }}</div>
-                </div>
+                {{ w.discovery.market_context.train_context.temporal_structure_summary_text || 'NA' }}
               </div>
             </div>
             <div v-else class="empty-tip">尚未生成 market_context.json</div>

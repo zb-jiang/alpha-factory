@@ -94,6 +94,9 @@ public class StructuredConfigResponse {
         /** 第二重条件显示（与第一重为 AND 关系） */
         private String showWhenKey2;
         private Object showWhenValue2;
+        /** 条件禁用：当指定key的值等于指定值时禁用该字段 */
+        private String disableWhenKey;
+        private Object disableWhenValue;
         /** 选项过滤：用哪个字段的值来过滤当前select的options */
         private String optionFilterKey;
         /** 选项过滤映射：字段值 -> 允许显示的option value列表 */

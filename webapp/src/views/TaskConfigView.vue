@@ -112,7 +112,7 @@
                     <el-switch
                       v-else-if="field.type === 'switch'"
                       v-model="formValues[field.key]"
-                      :disabled="!isEditable || field.readonly"
+                      :disabled="!isEditable || field.readonly || isFieldDisabled(field)"
                     />
                     <!-- 数字输入 -->
                     <el-input-number
@@ -122,7 +122,7 @@
                       :max="field.max ?? Infinity"
                       :step="field.step || 1"
                       :precision="field.precision"
-                      :disabled="!isEditable"
+                      :disabled="!isEditable || isFieldDisabled(field)"
                       controls-position="right"
                       size="large"
                       style="width: 100%"
@@ -134,7 +134,7 @@
                         :min="field.min ?? 0"
                         :max="field.max ?? 1"
                         :step="field.step ?? 0.1"
-                        :disabled="!isEditable"
+                        :disabled="!isEditable || isFieldDisabled(field)"
                         show-input
                         input-size="small"
                       />
@@ -143,7 +143,7 @@
                     <el-select
                       v-else-if="field.type === 'select'"
                       v-model="formValues[field.key]"
-                      :disabled="!isEditable"
+                      :disabled="!isEditable || isFieldDisabled(field)"
                       size="large"
                       style="width: 100%"
                       @change="handleSelectChange(field, $event)"
@@ -167,7 +167,7 @@
                     />
                     <!-- 标签多选 -->
                     <div v-else-if="field.type === 'tag_select'" class="tag-select-wrapper">
-                      <el-checkbox-group v-model="formValues[field.key]" :disabled="!isEditable">
+                      <el-checkbox-group v-model="formValues[field.key]" :disabled="!isEditable || isFieldDisabled(field)">
                         <el-checkbox
                           v-for="opt in field.options"
                           :key="opt.value"
@@ -183,7 +183,7 @@
                       v-model="formValues[field.key]"
                       type="date"
                       value-format="YYYY-MM-DD"
-                      :disabled="!isEditable"
+                      :disabled="!isEditable || isFieldDisabled(field)"
                       size="large"
                       style="width: 100%"
                     />
@@ -194,7 +194,7 @@
                       type="textarea"
                       :rows="4"
                       :placeholder="field.placeholder"
-                      :disabled="!isEditable"
+                      :disabled="!isEditable || isFieldDisabled(field)"
                       size="large"
                       style="width: 100%"
                     />
@@ -203,7 +203,7 @@
                       v-else
                       v-model="formValues[field.key]"
                       :placeholder="field.placeholder"
-                      :disabled="!isEditable || field.readonly"
+                      :disabled="!isEditable || field.readonly || isFieldDisabled(field)"
                       size="large"
                     />
                   </div>
@@ -341,6 +341,18 @@ function isFieldVisible(field: ConfigField) {
     return val === value
   }
   return check(field.showWhenKey, field.showWhenValue) && check(field.showWhenKey2, field.showWhenValue2)
+}
+
+function isFieldDisabled(field: ConfigField): boolean {
+  function check(key?: string, value?: any): boolean {
+    if (!key) return false
+    const val = formValues.value[key]
+    if (Array.isArray(value)) {
+      return value.includes(val)
+    }
+    return val === value
+  }
+  return check(field.disableWhenKey, field.disableWhenValue)
 }
 
 function isGroupVisible(group: ConfigGroup) {
@@ -498,17 +510,34 @@ async function loadTab(section: string) {
       extractProviderUrlsFromTab(res.data)
     }
     const values: Record<string, any> = {}
+    // 第一遍：收集所有原始值（不对数字做兜底）
     for (const group of res.data.groups || []) {
       for (const field of group.fields || []) {
-        let val = field.value ?? field.defaultValue
-        // 确保数字字段有有效数值
+        values[field.key] = field.value ?? field.defaultValue
+      }
+    }
+    // 第二遍：数字字段兜底，但处于禁用状态的字段保持原样
+    for (const group of res.data.groups || []) {
+      for (const field of group.fields || []) {
         if (field.type === 'number' || field.type === 'slider') {
-          if (val === null || val === undefined || val === '' || isNaN(Number(val))) {
+          let val = values[field.key]
+          const disabled = (() => {
+            function check(key?: string, value?: any): boolean {
+              if (!key) return false
+              const v = values[key]
+              if (Array.isArray(value)) return value.includes(v)
+              return v === value
+            }
+            return check(field.disableWhenKey, field.disableWhenValue)
+          })()
+          if (!disabled && (val === null || val === undefined || val === '' || isNaN(Number(val)))) {
             val = field.defaultValue ?? 0
           }
-          val = Number(val)
+          if (val !== null && val !== undefined && val !== '') {
+            val = Number(val)
+          }
+          values[field.key] = val
         }
-        values[field.key] = val
       }
     }
     formValues.value = { ...values }
@@ -554,6 +583,9 @@ function validateForm(): string | null {
   if (!currentTabData.value) return null
   for (const group of currentTabData.value.groups || []) {
     for (const field of group.fields || []) {
+      // 被禁用的字段跳过验证
+      if (isFieldDisabled(field)) continue
+
       const val = formValues.value[field.key]
 
       // 必填验证

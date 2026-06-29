@@ -30,6 +30,8 @@ export interface ConfigField {
   showWhenValue?: any
   showWhenKey2?: string
   showWhenValue2?: any
+  disableWhenKey?: string
+  disableWhenValue?: any
   optionFilterKey?: string
   optionFilterMap?: Record<string, string[]>
 }
