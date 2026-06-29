@@ -54,7 +54,22 @@ def run() -> None:
     merged.loc[negative_return_mask, "total_score"] -= neg_penalty
 
     merged = merged.sort_values("total_score", ascending=False)
-    write_table(OUTPUT_DIR / "backtest" / "final_score.csv", merged)
+    # final_score.csv 只保留与打分直接相关的列，原始指标见 factor_metrics.csv 和 strategy_metrics.csv
+    final_columns = [
+        "mean_rank_ic",
+        "rank_ic_ir",
+        "annualized_return",
+        "max_drawdown",
+        "turnover",
+        "positive_ic_ratio",
+        "ic_stability_score",
+        "annual_return_score",
+        "drawdown_penalty",
+        "turnover_penalty",
+        "instability_penalty",
+        "total_score",
+    ]
+    write_table(OUTPUT_DIR / "backtest" / "final_score.csv", merged[final_columns])
 
     # 丰富 top3_factors.json，补充公式和逻辑说明
     top3 = merged.head(3).reset_index().rename(columns={"index": "factor_name"}).to_dict(orient="records")

@@ -924,7 +924,35 @@ def run() -> None:
     if not wrote_factor_values:
         raise RuntimeError("没有可评估的合法因子")
     metrics = pd.DataFrame(metric_rows).set_index("factor_name").sort_index()
-    write_table(OUTPUT_DIR / "backtest" / "factor_metrics.csv", metrics)
+    # factor_metrics.csv 只保留最终结果列，中间分解项见各分项 CSV：
+    # - monotonicity 过程数据见 factor_health_group_returns.csv
+    # - yearly 过程数据见 factor_health_yearly.csv
+    # - neutralization 过程数据见 factor_health_neutralization.csv
+    # - regime 维度级明细见 factor_regime_consistency.csv
+    final_columns = [
+        "mean_ic",
+        "mean_rank_ic",
+        "ic_ir",
+        "rank_ic_ir",
+        "positive_ic_ratio",
+        "coverage",
+        "observation_count",
+        "llm_direction",
+        "empirical_direction",
+        "analysis_profile",
+        "label_mode",
+        "monotonicity_score",
+        "monotonicity_violation_ratio",
+        "yearly_stability_score",
+        "neutralized_ic_retention",
+        "expected_failure_regime",
+        "regime_declared_dimension_count",
+        "regime_scored_dimension_count",
+        "regime_consistency_score",
+        "regime_consistency_status",
+        "regime_consistency_summary",
+    ]
+    write_table(OUTPUT_DIR / "backtest" / "factor_metrics.csv", metrics[final_columns])
     write_table(
         OUTPUT_DIR / "backtest" / "factor_health_metrics.csv",
         metrics[

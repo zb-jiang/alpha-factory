@@ -156,9 +156,12 @@ OUTPUT_ARTIFACTS = [
     Path("health") / "market_context.json",
     Path("health") / "health_summary.json",
     Path("health") / "fundamental_feature_health.json",
-    Path("llm") / "raw_response.json",
     Path("llm") / "factors_validated.json",
     Path("llm") / "factors_rejected.json",
+    Path("llm") / "review_report.json",
+    Path("llm") / "review_rejected.json",
+    Path("llm") / "prompts",
+    Path("llm") / "agent_outputs",
     Path("backtest") / "factor_values.parquet",
     Path("backtest") / "factor_metrics.csv",
     Path("backtest") / "factor_health_metrics.csv",
@@ -2946,18 +2949,23 @@ def sharpe_ratio(period_returns: pd.Series) -> float:
 
 
 def archive_outputs_bundle(target_dir: Path) -> None:
+    import shutil
+
     target_dir.mkdir(parents=True, exist_ok=True)
     for relative in OUTPUT_ARTIFACTS:
         source = OUTPUT_DIR / relative
-        if source.exists():
-            target = target_dir / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if source.suffix == ".parquet":
-                pd.read_parquet(source).to_parquet(target, index=True)
-            elif source.suffix == ".csv":
-                pd.read_csv(source).to_csv(target, index=False)
-            else:
-                target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        if not source.exists():
+            continue
+        target = target_dir / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_dir():
+            shutil.copytree(source, target, dirs_exist_ok=True)
+        elif source.suffix == ".parquet":
+            pd.read_parquet(source).to_parquet(target, index=True)
+        elif source.suffix == ".csv":
+            pd.read_csv(source).to_csv(target, index=False)
+        else:
+            target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
 
 
 def archive_iteration_outputs(iteration: int, scope: str | None = None) -> None:
