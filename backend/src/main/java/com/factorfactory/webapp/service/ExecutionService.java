@@ -275,6 +275,14 @@ public class ExecutionService {
             existing.destroyForcibly();
         }
 
+        // 清除旧结果文件，避免前端因检测到旧结果而提前停止轮询
+        Path selectorDir = Paths.get(task.getStagingPath(), "outputs", "selector");
+        Path oldResult = selectorDir.resolve("recommended_train_window.json");
+        try {
+            Files.deleteIfExists(oldResult);
+        } catch (IOException ignored) {
+        }
+
         Path logPath = Paths.get(task.getStagingPath(), "outputs", "_runtime",
                 "selector_" + System.currentTimeMillis() + ".log");
 

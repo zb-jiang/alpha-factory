@@ -147,7 +147,7 @@ async function pollResult() {
     const res = await getSelectorResult(props.taskId)
     result.value = res.data
     running.value = !!res.data.running
-    if (res.data.running) {
+    if (res.data.running || (res.data.progress_logs && res.data.progress_logs.length > 0)) {
       showProgressLogs.value = true
     }
     if (res.data.ready) {
