@@ -43,6 +43,18 @@ public class OosArtifactsService {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("status", task.getStatus().name());
 
+        // 只有 step11 成功完成后才展示 OOS 数据；运行中（RUNNING）或 step10 完成时均不展示，
+        // 避免把 step10 validation 残留产物或不完整的中间结果当成 OOS 结果。
+        if (task.getStatus() != Task.TaskStatus.TESTING_FINISHED) {
+            result.put("factors", Collections.emptyList());
+            result.put("top3", Collections.emptyList());
+            result.put("input_factors", Collections.emptyList());
+            result.put("input_factor_count", 0);
+            result.put("period", Collections.emptyMap());
+            result.put("readiness", Collections.emptyMap());
+            return result;
+        }
+
         // 1. OOS 测试因子清单（含 formula）
         Map<String, Map<String, Object>> validatedByName = readValidatedByName(
                 outputs.resolve("llm").resolve("factors_validated.json"));

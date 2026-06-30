@@ -515,11 +515,13 @@ def run_backtest_batch_export() -> None:
                         )
 
                 if screening_reasons:
+                    skip_reason = _format_screening_reasons(screening_reasons)
+                    print(f"  跳过因子: {factor_name} | 原因: {skip_reason}")
                     _append_skip(
                         skipped_factors,
                         factor_name,
                         _formula_map,
-                        _format_screening_reasons(screening_reasons),
+                        skip_reason,
                     )
                     continue
 
