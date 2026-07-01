@@ -1,5 +1,4 @@
-# 策略工厂入口：可选 TopKDropout / EnhancedIndexing / SoftTopK
-# 当前 step08 仅实现 TopKDropout，其它策略先完成配置与校验能力。
+# 策略工厂入口：可选 TopKDropout / SoftTopK
 strategy_type: TopKDropout
 
 # TopKDropout（当前可执行）
