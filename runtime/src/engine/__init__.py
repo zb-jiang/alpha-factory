@@ -225,7 +225,7 @@ class MarketData:
             return False
         limit_rate = 0.10
         pure_code = code[2:] if len(code) > 2 and code[:2] in ("SH", "SZ") else code
-        if pure_code.startswith("688") or pure_code.startswith("300"):
+        if pure_code.startswith(("688", "300", "301")):
             limit_rate = 0.20
         high_limit = round(prev_close * (1 + limit_rate), 2)
         return open_price >= high_limit
@@ -237,7 +237,7 @@ class MarketData:
             return False
         limit_rate = 0.10
         pure_code = code[2:] if len(code) > 2 and code[:2] in ("SH", "SZ") else code
-        if pure_code.startswith("688") or pure_code.startswith("300"):
+        if pure_code.startswith(("688", "300", "301")):
             limit_rate = 0.20
         low_limit = round(prev_close * (1 - limit_rate), 2)
         return open_price <= low_limit
