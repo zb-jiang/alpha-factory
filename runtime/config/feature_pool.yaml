@@ -69,6 +69,19 @@ raw_fields:
   # ── 行业分类 ──────────────────────────────────────────────
   - name: industry
     description: 行业分类，来自 Tushare stock_basic.industry，可用于行业分组或中性化处理
+  # ── 基准指数行情（Alpha191） ─────────────────────────────
+  - name: benchmark_open
+    description: 基准指数开盘价，来自 Tushare index_daily，用于 Alpha75/149/181/182
+    hidden: true
+  - name: benchmark_high
+    description: 基准指数最高价，来自 Tushare index_daily
+    hidden: true
+  - name: benchmark_low
+    description: 基准指数最低价，来自 Tushare index_daily
+    hidden: true
+  - name: benchmark_close
+    description: 基准指数收盘价，来自 Tushare index_daily，用于 Alpha75/149/181/182
+    hidden: true
 
 # 基础特征 (Features): 相当于"切好、腌制好的半成品"，是基于原始数据经过简单计算得出的指标
 base_features:
@@ -316,6 +329,74 @@ base_features:
     description: 自由现金流收益率，等于 fcff / market_cap；类似 earnings_yield 但用现金流口径。注意：fcff 对金融行业（银行/保险/证券）不可用，会导致覆盖率下降，当股票池包含金融股时慎用，或配合行业中性化处理
     expr: fcff / market_cap
 
+  # ── Alpha191 原始字段直引（供 alpha191 公式直接引用） ──────
+  - name: open
+    description: 开盘价直引（alpha191 公式直接引用 OPEN）
+    expr: open
+    hidden: true
+  - name: close
+    description: 收盘价直引（alpha191 公式直接引用 CLOSE）
+    expr: close
+    hidden: true
+  - name: high
+    description: 最高价直引（alpha191 公式直接引用 HIGH）
+    expr: high
+    hidden: true
+  - name: low
+    description: 最低价直引（alpha191 公式直接引用 LOW）
+    expr: low
+    hidden: true
+  - name: volume
+    description: 成交量直引（alpha191 公式直接引用 VOLUME/VOL）
+    expr: volume
+    hidden: true
+  - name: amount
+    description: 成交额直引（alpha191 公式直接引用 AMOUNT）
+    expr: amount
+    hidden: true
+  - name: vwap
+    description: VWAP 直引（alpha191 公式直接引用 VWAP）
+    expr: vwap
+    hidden: true
+  - name: benchmark_open
+    description: 基准指数开盘价直引（alpha191 公式直接引用 BANCHMARKINDEXOPEN）
+    expr: benchmark_open
+    hidden: true
+  - name: benchmark_high
+    description: 基准指数最高价直引（alpha191 公式直接引用 BANCHMARKINDEXHIGH）
+    expr: benchmark_high
+    hidden: true
+  - name: benchmark_low
+    description: 基准指数最低价直引（alpha191 公式直接引用 BANCHMARKINDEXLOW）
+    expr: benchmark_low
+    hidden: true
+  - name: benchmark_close
+    description: 基准指数收盘价直引（alpha191 公式直接引用 BANCHMARKINDEXCLOSE）
+    expr: benchmark_close
+    hidden: true
+
+  # ── Alpha191 辅助特征 ──────────────────────────────────
+  - name: dtm
+    description: Alpha69 辅助变量，等于 MAX(OPEN-DELAY(OPEN,1), 0)，当日开盘相对昨日开盘的上行幅度（取正）
+    expr: (open - open.shift(1)).clip(lower=0)
+    hidden: true
+  - name: dbm
+    description: Alpha69 辅助变量，等于 MAX(DELAY(OPEN,1)-OPEN, 0)，昨日开盘相对今日开盘的下行幅度（取正）
+    expr: (open.shift(1) - open).clip(lower=0)
+    hidden: true
+  - name: hd
+    description: Alpha172/186 辅助变量，正向趋向动量，当日高点比昨日高点的上扬幅度（取正），且大于低价下挫幅度时才有值，否则为 0
+    expr: ((high - high.shift(1)).clip(lower=0)).where((high - high.shift(1)) > (low.shift(1) - low).clip(lower=0), 0)
+    hidden: true
+  - name: ld
+    description: Alpha172/186 辅助变量，负向趋向动量，昨日低点比今日低点的下挫幅度（取正），且大于高点上扬幅度时才有值，否则为 0
+    expr: ((low.shift(1) - low).clip(lower=0)).where((low.shift(1) - low) > (high - high.shift(1)).clip(lower=0), 0)
+    hidden: true
+  - name: tr
+    description: Alpha172/186 辅助变量，真实波幅 TR = MAX(HIGH-LOW, ABS(HIGH-DELAY(CLOSE,1)), ABS(DELAY(CLOSE,1)-LOW))
+    expr: np.maximum(np.maximum(high - low, (high - close.shift(1)).abs()), (close.shift(1) - low).abs())
+    hidden: true
+
 # 允许使用的算子 (Operators): 相当于"烹饪手法"，用来限制大模型，它只能用这些方法去组合产生新的因子
 allowed_operators:
   - name: add
@@ -418,6 +499,71 @@ allowed_operators:
     signature: winsorize(series, lower_quantile, upper_quantile)
     type: 横截面
     description: 每天按横截面分位数缩尾，例如 winsorize(x, 0.01, 0.99)
+  # ── Alpha191 扩展算子 ──────────────────────────────────────
+  - name: sma
+    signature: sma(series, n, m)
+    type: 时序
+    description: 递推 SMA，Y_t = (m * x_t + (n - m) * Y_{t-1}) / n，等价于 ewm(alpha=m/n, adjust=False)；alpha191 大量使用
+  - name: decay_linear
+    signature: decay_linear(series, n)
+    type: 时序
+    description: 线性衰减加权移动平均，权重 w_i = i+1（最新值权重最大），min_periods=n
+  - name: wma
+    signature: wma(series, n)
+    type: 时序
+    description: 加权移动平均，权重与 decay_linear 相同
+  - name: regbeta
+    signature: regbeta(y, x, n)
+    type: 时序
+    description: 滚动 OLS 回归斜率，y 对 x 回归，窗口 n 期；分母为 0 时返回缺失值
+  - name: regbeta_seq
+    signature: regbeta_seq(y, n)
+    type: 时序
+    description: 滚动回归 y 对时间趋势 [1, 2, ..., n] 的斜率，用于 REGBETA(y, SEQUENCE(n)) 场景
+  - name: count
+    signature: count(cond, n)
+    type: 时序
+    description: 条件计数，统计过去 n 期中 cond 为真的次数
+  - name: sumif
+    signature: sumif(x, n, cond)
+    type: 时序
+    description: 条件求和，过去 n 期中 cond 为真时的 x 求和
+  - name: sumac
+    signature: sumac(series)
+    type: 时序
+    description: 累计求和，按单只股票的时间序列做 cumsum
+  - name: prod
+    signature: prod(series, n)
+    type: 时序
+    description: 滚动累乘，计算过去 n 期的乘积
+  - name: lowday
+    signature: lowday(series, n)
+    type: 时序
+    description: 极值位置，最小值距今的天数（0 = 今天）
+  - name: highday
+    signature: highday(series, n)
+    type: 时序
+    description: 极值位置，最大值距今的天数（0 = 今天）
+  - name: covariance
+    signature: covariance(x, y, n)
+    type: 时序
+    description: 滚动协方差（ddof=0），按单只股票的时间序列计算两个序列过去 n 期的协方差
+  - name: maximum
+    signature: maximum(left, right)
+    type: 逐元素
+    description: 逐元素最大值，兼容 Series 与标量
+  - name: minimum
+    signature: minimum(left, right)
+    type: 逐元素
+    description: 逐元素最小值，兼容 Series 与标量
+  - name: filter_cond
+    signature: filter_cond(x, cond)
+    type: 逐元素
+    description: 条件过滤，cond 为真时保留 x，否则置 NaN
+  - name: where
+    signature: where(cond, x, y)
+    type: 逐元素
+    description: 三元条件表达式，cond 为真返回 x，否则返回 y；保留 Series 类型，用于替代 np.where
 
 # 因子生成约束 (Generation Constraints): 用来收紧 LLM 的搜索空间，提升生产稳定性与可解释性
 generation_constraints:

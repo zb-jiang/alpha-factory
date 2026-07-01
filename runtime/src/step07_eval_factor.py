@@ -859,6 +859,16 @@ def run() -> None:
     label_column = label_name(config)
     label_series = feature_frame[label_column]
     factor_input = feature_frame[[item["name"] for item in feature_cfg.get("base_features", [])]]
+    # 构造含 warmup 数据的 factor_input，供大窗口公式（如 alpha191）访问完整历史
+    # raw_frame 包含 warmup 期的原始数据，用 raw_frame 的列替换 factor_input 中被裁剪的对应列
+    raw_field_names = [item["name"] for item in feature_cfg.get("raw_fields", [])]
+    raw_cols_available = [f for f in raw_field_names if f in raw_frame.columns]
+    if raw_cols_available:
+        # 保留 factor_input 中不在 raw_frame 的列（如 ret_5d 等计算特征）
+        computed_cols = [c for c in factor_input.columns if c not in raw_cols_available]
+        factor_input_with_warmup = pd.concat([factor_input[computed_cols], raw_frame[raw_cols_available]], axis=1).sort_index()
+    else:
+        factor_input_with_warmup = factor_input
     active_analysis_profile = analysis_profile(config)
     active_label_mode = label_signature(config)
     active_preprocess = preprocess_signature(config)
@@ -875,7 +885,7 @@ def run() -> None:
     try:
         for i, item in enumerate(validated, start=1):
             factor_name = str(item["factor_name"])
-            raw_score = evaluate_formula(str(item["formula"]), factor_input)
+            raw_score = evaluate_formula(str(item["formula"]), factor_input_with_warmup)
             score = apply_factor_preprocess(raw_score, raw_frame, config)
             metrics = factor_metrics_from_series(factor_name, score, label_series, config)
             health_metrics, group_rows, yearly_rows, neutralization_row = _compute_factor_health_metrics(

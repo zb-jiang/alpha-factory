@@ -848,6 +848,14 @@ public class TaskConfigService {
         List<Map<String, Object>> rawFields = (List<Map<String, Object>>) yaml.getOrDefault("raw_fields", List.of());
         List<Map<String, Object>> baseFeatures = (List<Map<String, Object>>) yaml.getOrDefault("base_features", List.of());
 
+        // 过滤掉 hidden: true 的条目（如 Alpha191 辅助特征），不在前端 UI 展示
+        rawFields = rawFields.stream()
+                .filter(f -> !Boolean.TRUE.equals(f.get("hidden")))
+                .collect(java.util.stream.Collectors.toList());
+        baseFeatures = baseFeatures.stream()
+                .filter(f -> !Boolean.TRUE.equals(f.get("hidden")))
+                .collect(java.util.stream.Collectors.toList());
+
         // 按特征名映射到维度（不依赖 YAML 注释格式）
         Map<String, List<Map<String, Object>>> dimensionGroups = new LinkedHashMap<>();
         for (DimensionDef dim : FEATURE_DIMENSIONS) {

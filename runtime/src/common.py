@@ -1510,9 +1510,12 @@ def load_raw_data(
     
     provider = get_data_provider(cfg)
     provider.initialize()
+    # benchmark 字段由 provider.get_index_daily 单独加载，不传给 get_features
+    benchmark_fields_set = {"benchmark_open", "benchmark_high", "benchmark_low", "benchmark_close"}
+    provider_fields = [f for f in fields if f not in benchmark_fields_set]
     frame = provider.get_features(
         instruments=instruments,
-        fields=raw_field_tokens(fields),
+        fields=raw_field_tokens(provider_fields),
         start_date=start_time,
         end_date=end_time,
         freq=str(cfg.get("freq", "day")),
@@ -1531,6 +1534,39 @@ def load_raw_data(
         # 单索引: 尝试转换为 MultiIndex
         if frame.index.name is None or frame.index.name == "":
             frame.index.name = "datetime"
+
+    # ── Alpha191: 注入基准指数行情（broadcast 到每只股票） ──
+    benchmark_fields = {"benchmark_open", "benchmark_high", "benchmark_low", "benchmark_close"}
+    if benchmark_fields & set(fields):
+        stock_pool_cfg = dict(cfg.get("stock_pool", {}))
+        index_code = str(stock_pool_cfg.get("index_code", "000300.XSHG") or "000300.XSHG").strip()
+        try:
+            benchmark_df = provider.get_index_daily(index_code, start_time, end_time)
+            if not benchmark_df.empty:
+                rename_map = {
+                    "open": "benchmark_open",
+                    "high": "benchmark_high",
+                    "low": "benchmark_low",
+                    "close": "benchmark_close",
+                }
+                benchmark_df = benchmark_df.rename(columns=rename_map)
+                if isinstance(frame.index, pd.MultiIndex):
+                    dates_in_frame = frame.index.get_level_values("datetime")
+                    benchmark_aligned = benchmark_df.reindex(dates_in_frame.unique())
+                    for col in benchmark_aligned.columns:
+                        if col not in frame.columns:
+                            # 按日期广播到所有股票
+                            mapping = benchmark_aligned[col].to_dict()
+                            frame[col] = dates_in_frame.map(mapping).values
+                else:
+                    for col in benchmark_df.columns:
+                        if col not in frame.columns:
+                            frame[col] = benchmark_df[col].reindex(frame.index)
+        except Exception as exc:
+            print(f"警告: 加载基准指数行情失败（{index_code}）: {exc}")
+            for field_name in benchmark_fields:
+                if field_name not in frame.columns:
+                    frame[field_name] = np.nan
     
     _store_cached_raw_frame(cfg, fields, start_timestamp, end_timestamp, frame)
     return frame
@@ -1713,6 +1749,8 @@ def _compute_group_features(group: pd.DataFrame, base_features: list[dict[str, s
     valid_mask = local["close"].notna()
     local_valid = local.loc[valid_mask].copy()
     env = {column: local_valid[column] for column in local_valid.columns}
+    # 注入 numpy 供 base_features 的 expr 使用（如 TR = np.maximum(...)）
+    env["np"] = np
     values: dict[str, pd.Series] = {}
     
     chip_features_computed = False
@@ -2154,6 +2192,18 @@ WINDOW_OPERATOR_ARG_INDEXES = {
     "ts_rank": [1],
     "ts_zscore": [1],
     "rolling_corr": [2],
+    # ── Alpha191 扩展算子 ──
+    "sma": [1],
+    "decay_linear": [1],
+    "wma": [1],
+    "regbeta": [2],
+    "regbeta_seq": [1],
+    "count": [1],
+    "sumif": [1],
+    "prod": [1],
+    "lowday": [1],
+    "highday": [1],
+    "covariance": [2],
 }
 
 
@@ -2274,6 +2324,23 @@ OPERATOR_ARITY: dict[str, int] = {
     "rolling_corr": 3,
     "clip": 3,
     "winsorize": 3,
+    # ── Alpha191 扩展算子 ──
+    "sma": 3,
+    "decay_linear": 2,
+    "wma": 2,
+    "regbeta": 3,
+    "regbeta_seq": 2,
+    "count": 2,
+    "sumif": 3,
+    "sumac": 1,
+    "prod": 2,
+    "lowday": 2,
+    "highday": 2,
+    "covariance": 3,
+    "maximum": 2,
+    "minimum": 2,
+    "filter_cond": 2,
+    "where": 3,
 }
 
 
@@ -2299,6 +2366,23 @@ SERIES_FIRST_OPERATORS: set[str] = {
     "rolling_corr",
     "clip",
     "winsorize",
+    # ── Alpha191 扩展算子 ──
+    "sma",
+    "decay_linear",
+    "wma",
+    "regbeta",
+    "regbeta_seq",
+    "count",
+    "sumif",
+    "sumac",
+    "prod",
+    "lowday",
+    "highday",
+    "covariance",
+    "maximum",
+    "minimum",
+    "filter_cond",
+    "where",
 }
 
 
@@ -2553,6 +2637,201 @@ def sigma_clip(series: pd.Series, n: float) -> pd.Series:
     return series.groupby(level="datetime").transform(_clip)
 
 
+# ── Alpha191 扩展算子 ──────────────────────────────────────────
+
+
+def sma(series: pd.Series, n: int, m: float) -> pd.Series:
+    """递推 SMA：Y_t = (m * x_t + (n - m) * Y_{t-1}) / n，等价于 ewm(alpha=m/n, adjust=False)"""
+    n_val = int(n)
+    m_val = float(m)
+    if n_val <= 0:
+        raise ValueError("sma 的 n 参数必须大于 0")
+    alpha = m_val / n_val
+    if not 0 < alpha <= 1:
+        raise ValueError("sma 要求 0 < m/n <= 1")
+    return series.groupby(level="instrument").transform(
+        lambda s: s.ewm(alpha=alpha, adjust=False, min_periods=n_val).mean()
+    )
+
+
+def decay_linear(series: pd.Series, n: int) -> pd.Series:
+    """线性衰减加权移动平均，权重 w_i = i+1（i=0 最旧权重 1，i=n-1 最新权重 n）"""
+    win = int(n)
+    if win <= 0:
+        raise ValueError("decay_linear 的 n 参数必须大于 0")
+    weights = np.arange(1, win + 1, dtype=float)
+    weights = weights / weights.sum()
+    return series.groupby(level="instrument").transform(
+        lambda s: s.rolling(win, min_periods=win).apply(
+            lambda vals: np.dot(vals, weights), raw=True
+        )
+    )
+
+
+def wma(series: pd.Series, n: int) -> pd.Series:
+    """加权移动平均，与 decay_linear 相同的加权方式"""
+    win = int(n)
+    if win <= 0:
+        raise ValueError("wma 的 n 参数必须大于 0")
+    weights = np.arange(1, win + 1, dtype=float)
+    weights = weights / weights.sum()
+    return series.groupby(level="instrument").transform(
+        lambda s: s.rolling(win, min_periods=win).apply(
+            lambda vals: np.dot(vals, weights), raw=True
+        )
+    )
+
+
+def regbeta(y_series: pd.Series, x_series: pd.Series, n: int) -> pd.Series:
+    """滚动 OLS 回归斜率：beta = (n*sum_xy - sum_x*sum_y) / (n*sum_x2 - sum_x^2)"""
+    win = int(n)
+    if win <= 0:
+        raise ValueError("regbeta 的 n 参数必须大于 0")
+    frame = pd.concat([y_series.rename("y"), x_series.rename("x")], axis=1)
+
+    def _calc(group: pd.DataFrame) -> pd.Series:
+        x = group["x"]
+        y = group["y"]
+        xy = x * y
+        x2 = x * x
+        sum_x = x.rolling(win, min_periods=win).sum()
+        sum_y = y.rolling(win, min_periods=win).sum()
+        sum_xy = xy.rolling(win, min_periods=win).sum()
+        sum_x2 = x2.rolling(win, min_periods=win).sum()
+        numerator = win * sum_xy - sum_x * sum_y
+        denominator = win * sum_x2 - sum_x ** 2
+        return numerator / denominator.replace(0, np.nan)
+
+    return frame.groupby(level="instrument", group_keys=False).apply(_calc)
+
+
+def regbeta_seq(y_series: pd.Series, n: int) -> pd.Series:
+    """滚动回归 y 对时间趋势 [1, 2, ..., n] 的斜率，用于 REGBETA(y, SEQUENCE(n)) 场景"""
+    win = int(n)
+    if win <= 0:
+        raise ValueError("regbeta_seq 的 n 参数必须大于 0")
+    x_vals = np.arange(1, win + 1, dtype=float)
+    x_mean = (win + 1) / 2.0
+    x_centered = x_vals - x_mean
+    x_ss = float(np.sum(x_centered ** 2))  # = win * (win^2 - 1) / 12
+
+    def _calc(group: pd.Series) -> pd.Series:
+        return group.rolling(win, min_periods=win).apply(
+            lambda vals: np.dot(vals, x_centered) / x_ss, raw=True
+        )
+
+    return y_series.groupby(level="instrument").transform(_calc)
+
+
+def count(cond: pd.Series, n: int) -> pd.Series:
+    """条件计数：统计过去 n 期中 cond 为真的次数"""
+    win = int(n)
+    if win <= 0:
+        raise ValueError("count 的 n 参数必须大于 0")
+    int_cond = cond.astype(float) if isinstance(cond, pd.Series) else float(bool(cond))
+    return rolling_sum(int_cond, win)
+
+
+def sumif(x: pd.Series, n: int, cond: pd.Series) -> pd.Series:
+    """条件求和：过去 n 期中 cond 为真时的 x 求和"""
+    win = int(n)
+    if win <= 0:
+        raise ValueError("sumif 的 n 参数必须大于 0")
+    if isinstance(cond, pd.Series):
+        masked = x.where(cond.astype(bool), 0)
+    else:
+        masked = x if cond else pd.Series(0.0, index=x.index)
+    return rolling_sum(masked, win)
+
+
+def sumac(series: pd.Series) -> pd.Series:
+    """累计求和（按 instrument 分组）"""
+    return series.groupby(level="instrument").transform(lambda s: s.cumsum())
+
+
+def prod(series: pd.Series, n: int) -> pd.Series:
+    """滚动累乘"""
+    win = int(n)
+    if win <= 0:
+        raise ValueError("prod 的 n 参数必须大于 0")
+    return series.groupby(level="instrument").transform(
+        lambda s: s.rolling(win, min_periods=win).apply(
+            lambda vals: np.prod(vals), raw=True
+        )
+    )
+
+
+def lowday(series: pd.Series, n: int) -> pd.Series:
+    """极值位置：最小值距今的天数（0 = 今天）"""
+    win = int(n)
+    if win <= 0:
+        raise ValueError("lowday 的 n 参数必须大于 0")
+    return series.groupby(level="instrument").transform(
+        lambda s: s.rolling(win, min_periods=win).apply(
+            lambda vals: float(win - 1 - np.argmin(vals)), raw=True
+        )
+    )
+
+
+def highday(series: pd.Series, n: int) -> pd.Series:
+    """极值位置：最大值距今的天数（0 = 今天）"""
+    win = int(n)
+    if win <= 0:
+        raise ValueError("highday 的 n 参数必须大于 0")
+    return series.groupby(level="instrument").transform(
+        lambda s: s.rolling(win, min_periods=win).apply(
+            lambda vals: float(win - 1 - np.argmax(vals)), raw=True
+        )
+    )
+
+
+def covariance(x_series: pd.Series, y_series: pd.Series, n: int) -> pd.Series:
+    """滚动协方差（ddof=0，与 rolling_std 保持一致）"""
+    win = int(n)
+    if win <= 0:
+        raise ValueError("covariance 的 n 参数必须大于 0")
+    frame = pd.concat([x_series.rename("x"), y_series.rename("y")], axis=1)
+
+    def _calc(group: pd.DataFrame) -> pd.Series:
+        x = group["x"]
+        y = group["y"]
+        xy = x * y
+        sum_x = x.rolling(win, min_periods=win).sum()
+        sum_y = y.rolling(win, min_periods=win).sum()
+        sum_xy = xy.rolling(win, min_periods=win).sum()
+        mean_x = sum_x / win
+        mean_y = sum_y / win
+        return sum_xy / win - mean_x * mean_y
+
+    return frame.groupby(level="instrument", group_keys=False).apply(_calc)
+
+
+def maximum(left, right) -> pd.Series:
+    """逐元素最大值，兼容 Series 和标量"""
+    return np.maximum(left, right)
+
+
+def minimum(left, right) -> pd.Series:
+    """逐元素最小值，兼容 Series 和标量"""
+    return np.minimum(left, right)
+
+
+def filter_cond(x: pd.Series, cond: pd.Series) -> pd.Series:
+    """条件过滤：cond 为真时保留 x，否则置 NaN（用于 FILTER 算子）"""
+    if isinstance(cond, pd.Series):
+        return x.where(cond.astype(bool), np.nan)
+    return x if cond else pd.Series(np.nan, index=x.index)
+
+
+def where(cond, x, y) -> pd.Series:
+    """三元条件表达式：cond 为真返回 x，否则返回 y（替代 np.where，保留 Series 类型）"""
+    result = np.where(cond, x, y)
+    for obj in (cond, x, y):
+        if isinstance(obj, pd.Series):
+            return pd.Series(result, index=obj.index)
+    return result
+
+
 def _cross_section_regression_residual(
     score: pd.Series,
     design: pd.DataFrame,
@@ -2700,6 +2979,24 @@ OPERATOR_ENV = {
     "minmax": minmax,
     "clip": lambda series, lower, upper: series.clip(lower=lower, upper=upper),
     "winsorize": winsorize,
+    # ── Alpha191 扩展算子 ──
+    "sma": sma,
+    "decay_linear": decay_linear,
+    "wma": wma,
+    "regbeta": regbeta,
+    "regbeta_seq": regbeta_seq,
+    "count": count,
+    "sumif": sumif,
+    "sumac": sumac,
+    "prod": prod,
+    "lowday": lowday,
+    "highday": highday,
+    "covariance": covariance,
+    "maximum": maximum,
+    "minimum": minimum,
+    "filter_cond": filter_cond,
+    # ── 条件表达式 ──
+    "where": where,
 }
 
 
@@ -2707,6 +3004,7 @@ def evaluate_formula(formula: str, data_frame: pd.DataFrame) -> pd.Series:
     formula = _normalize_pct_change_expr(formula)
     env = {column: data_frame[column] for column in data_frame.columns}
     env.update(OPERATOR_ENV)
+    env["np"] = np
     result = eval(formula, {"__builtins__": {}}, env)
     if not isinstance(result, pd.Series):
         raise TypeError("公式执行结果不是 pandas Series")

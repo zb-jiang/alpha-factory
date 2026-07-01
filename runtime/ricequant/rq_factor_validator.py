@@ -88,8 +88,8 @@ FUNDAMENTAL_FIELD_CANDIDATES: dict[str, list[str]] = {
     # fcff: RQ 衍生因子中可能用 free_cash_flow 或 enterprise_free_cash_flow
     "fcff": ["fcff", "free_cash_flow_firm", "enterprise_free_cash_flow", "free_cash_flow"],
 }
-INTERNAL_LOOKBACK_DAYS = 80
-BASE_DATA_FIELDS = set(INTERNAL_FIELD_ALIAS.keys()) | {"market_cap", "industry"} | set(FUNDAMENTAL_FIELD_CANDIDATES.keys())
+INTERNAL_LOOKBACK_DAYS = 286
+BASE_DATA_FIELDS = set(INTERNAL_FIELD_ALIAS.keys()) | {"market_cap", "industry"} | set(FUNDAMENTAL_FIELD_CANDIDATES.keys()) | {"dtm", "dbm", "hd", "ld", "tr", "benchmark_open", "benchmark_high", "benchmark_low", "benchmark_close", "ret_1d"}
 _RESOLVED_FUNDAMENTAL_FACTOR_CACHE: dict[str, str] = {}
 INTERNAL_FEATURE_FORMULAS: dict[str, str] = {
     "ret_1d": "close.pct_change(1)",
@@ -236,14 +236,14 @@ def active_window(config: dict[str, Any]) -> tuple[pd.Timestamp, pd.Timestamp]:
 def _rolling_group(series: pd.Series, window: int, method: str) -> pd.Series:
     window = int(window)
     return series.groupby(level="instrument", group_keys=False).apply(
-        lambda s: getattr(s.rolling(window=window, min_periods=1), method)()
+        lambda s: getattr(s.rolling(window=window, min_periods=window), method)()
     )
 
 
 def _rolling_rank(series: pd.Series, window: int) -> pd.Series:
     return series.groupby(level="instrument", group_keys=False).apply(
-        lambda s: s.rolling(window=window, min_periods=1).apply(
-            lambda x: pd.Series(x).rank(method="average").iloc[-1], raw=False
+        lambda s: s.rolling(window=window, min_periods=window).apply(
+            lambda x: pd.Series(x).rank(pct=True, method="average").iloc[-1], raw=False
         )
     )
 
@@ -259,10 +259,130 @@ def _rolling_corr(left: pd.Series, right: pd.Series, window: int) -> pd.Series:
     out: list[pd.Series] = []
     for _, group in frame.groupby(level="instrument", sort=False):
         local = group.droplevel("instrument")
-        corr = local["left"].rolling(window=window, min_periods=1).corr(local["right"])
+        corr = local["left"].rolling(window=window, min_periods=window).corr(local["right"])
         corr.index = group.index
         out.append(corr)
     return pd.concat(out).sort_index()
+
+
+def _sma(x: pd.Series, n: int, m: float) -> pd.Series:
+    """递推 SMA: Y = (x*m + Y_prev*(n-m)) / n，等价于 ewm(alpha=m/n, adjust=False)"""
+    alpha = m / n
+    return x.groupby(level="instrument", group_keys=False).apply(
+        lambda s: s.ewm(alpha=alpha, adjust=False).mean()
+    )
+
+
+def _decay_linear(x: pd.Series, n: int) -> pd.Series:
+    """线性衰减加权移动平均，权重 [1, 2, ..., n] 归一化"""
+    weights = np.arange(1, n + 1, dtype=float)
+    weights = weights / weights.sum()
+    return x.groupby(level="instrument", group_keys=False).apply(
+        lambda s: s.rolling(window=n, min_periods=n).apply(
+            lambda vals: np.dot(vals, weights), raw=True
+        )
+    )
+
+
+def _wma(x: pd.Series, n: int) -> pd.Series:
+    """加权移动平均，权重 [1, 2, ..., n] 归一化（与 decay_linear 相同）"""
+    return _decay_linear(x, n)
+
+
+def _regbeta(y: pd.Series, x: pd.Series, n: int) -> pd.Series:
+    """滚动 OLS 回归斜率（y 对 x）"""
+    frame = pd.concat([y.rename("y"), x.rename("x")], axis=1)
+    out: list[pd.Series] = []
+    for _, group in frame.groupby(level="instrument", sort=False):
+        local = group.droplevel("instrument")
+        rolled = local.rolling(window=n, min_periods=n)
+        # 使用协方差公式计算 beta
+        cov = rolled.cov()
+        # cov 是 MultiIndex，需要提取 y,x 的协方差
+        beta = pd.Series(np.nan, index=local.index)
+        for i in range(n, len(local)):
+            window_data = local.iloc[i-n:i]
+            valid = window_data.dropna()
+            if len(valid) >= 2 and valid["x"].std() > 0:
+                beta.iloc[i] = valid.cov().loc["x", "y"] / valid["x"].var()
+        beta.index = group.index
+        out.append(beta)
+    return pd.concat(out).sort_index()
+
+
+def _regbeta_seq(y: pd.Series, n: int) -> pd.Series:
+    """滚动回归 y 对时间趋势 [1..n] 的斜率"""
+    x_arr = np.arange(1, n + 1, dtype=float)
+    x_mean = x_arr.mean()
+    x_centered = x_arr - x_mean
+    x_ss = (x_centered ** 2).sum()
+    out: list[pd.Series] = []
+    for _, group in y.groupby(level="instrument", sort=False):
+        local = group.droplevel("instrument")
+        beta = pd.Series(np.nan, index=local.index)
+        vals = local.values
+        for i in range(n - 1, len(vals)):
+            window = vals[i - n + 1: i + 1]
+            valid_mask = ~np.isnan(window)
+            if valid_mask.sum() >= 2:
+                y_valid = window[valid_mask]
+                x_valid = x_centered[valid_mask]
+                if x_valid.var() > 0:
+                    beta.iloc[i] = np.dot(x_valid, y_valid - y_valid.mean()) / x_ss
+        beta.index = group.index
+        out.append(beta)
+    return pd.concat(out).sort_index()
+
+
+def _prod(x: pd.Series, n: int) -> pd.Series:
+    """滚动累乘"""
+    return x.groupby(level="instrument", group_keys=False).apply(
+        lambda s: s.rolling(window=n, min_periods=n).apply(
+            lambda vals: np.prod(vals), raw=True
+        )
+    )
+
+
+def _extreme_day(x: pd.Series, n: int, is_min: bool) -> pd.Series:
+    """极值位置：最小值/最大值距今天数（0=今天）"""
+    out: list[pd.Series] = []
+    for _, group in x.groupby(level="instrument", sort=False):
+        local = group.droplevel("instrument")
+        result = pd.Series(np.nan, index=local.index)
+        vals = local.values
+        for i in range(n - 1, len(vals)):
+            window = vals[i - n + 1: i + 1]
+            valid = ~np.isnan(window)
+            if valid.sum() > 0:
+                if is_min:
+                    pos = np.nanargmin(window)
+                else:
+                    pos = np.nanargmax(window)
+                result.iloc[i] = n - 1 - pos
+        result.index = group.index
+        out.append(result)
+    return pd.concat(out).sort_index()
+
+
+def _covariance(x: pd.Series, y: pd.Series, n: int) -> pd.Series:
+    """滚动协方差（ddof=0）"""
+    frame = pd.concat([x.rename("x"), y.rename("y")], axis=1)
+    out: list[pd.Series] = []
+    for _, group in frame.groupby(level="instrument", sort=False):
+        local = group.droplevel("instrument")
+        cov = local["x"].rolling(window=n, min_periods=n).cov(local["y"], ddof=0)
+        cov.index = group.index
+        out.append(cov)
+    return pd.concat(out).sort_index()
+
+
+def _where(cond, x, y) -> pd.Series:
+    """三元条件表达式：cond 为真返回 x，否则返回 y"""
+    result = np.where(cond, x, y)
+    for obj in (cond, x, y):
+        if isinstance(obj, pd.Series):
+            return pd.Series(result, index=obj.index)
+    return result
 
 
 def _cross_section_zscore(series: pd.Series) -> pd.Series:
@@ -326,11 +446,28 @@ OPERATOR_ENV = {
     "ts_rank": lambda series, window: _rolling_rank(series, int(window)),
     "ts_zscore": lambda series, window: _rolling_zscore(series, int(window)),
     "rolling_corr": lambda left, right, window: _rolling_corr(left, right, int(window)),
-    "rank": lambda series: series.groupby(level="datetime").rank(method="average"),
+    "rank": lambda series: series.groupby(level="datetime").rank(pct=True, method="average"),
     "zscore": _cross_section_zscore,
     "minmax": _cross_section_minmax,
     "clip": lambda series, lower, upper: series.clip(lower=lower, upper=upper),
     "winsorize": lambda series, lower=0.01, upper=0.99: winsorize(series, lower, upper),
+    # ── Alpha191 扩展算子 ──
+    "sma": lambda x, n, m: _sma(x, int(n), float(m)),
+    "decay_linear": lambda x, n: _decay_linear(x, int(n)),
+    "wma": lambda x, n: _wma(x, int(n)),
+    "regbeta": lambda y, x, n: _regbeta(y, x, int(n)),
+    "regbeta_seq": lambda y, n: _regbeta_seq(y, int(n)),
+    "count": lambda cond, n: _rolling_group(cond.astype(float), int(n), "sum"),
+    "sumif": lambda x, n, cond: _rolling_group((x * cond.astype(float)).fillna(0), int(n), "sum"),
+    "sumac": lambda x: x.groupby(level="instrument").cumsum(),
+    "prod": lambda x, n: _prod(x, int(n)),
+    "lowday": lambda x, n: _extreme_day(x, int(n), is_min=True),
+    "highday": lambda x, n: _extreme_day(x, int(n), is_min=False),
+    "covariance": lambda x, y, n: _covariance(x, y, int(n)),
+    "maximum": lambda left, right: np.maximum(left, right) if not (isinstance(left, pd.Series) or isinstance(right, pd.Series)) else pd.concat([left.rename("l"), right.rename("r")], axis=1).max(axis=1),
+    "minimum": lambda left, right: np.minimum(left, right) if not (isinstance(left, pd.Series) or isinstance(right, pd.Series)) else pd.concat([left.rename("l"), right.rename("r")], axis=1).min(axis=1),
+    "filter_cond": lambda x, cond: x.where(cond.astype(bool), np.nan) if isinstance(cond, pd.Series) else (x if cond else pd.Series(np.nan, index=x.index)),
+    "where": lambda cond, x, y: _where(cond, x, y),
 }
 
 
@@ -1141,6 +1278,72 @@ def _build_raw_frame(
                     frame[code] = value
             frame = frame.loc[rq.get_trading_dates(fetch_start, fetch_end)]
             raw_cols[local_name] = frame.stack(dropna=False).rename(local_name)
+            continue
+
+        if local_name in ("dtm", "dbm", "hd", "ld", "tr"):
+            # Alpha191 辅助特征从 OHLCV 派生
+            ohlcv = _get_price_field(instruments, fetch_start, fetch_end, "open", adjust_type)
+            high_frame = _get_price_field(instruments, fetch_start, fetch_end, "high", adjust_type)
+            low_frame = _get_price_field(instruments, fetch_start, fetch_end, "low", adjust_type)
+            close_frame = _get_price_field(instruments, fetch_start, fetch_end, "close", adjust_type)
+            if local_name == "dtm":
+                # DTM = MAX(OPEN - DELAY(OPEN,1), 0)
+                delta_open = ohlcv.diff()
+                val = delta_open.where(delta_open > 0, 0)
+                raw_cols[local_name] = val.stack(dropna=False).rename(local_name)
+            elif local_name == "dbm":
+                # DBM = MAX(DELAY(OPEN,1) - OPEN, 0)
+                delta_open = -ohlcv.diff()
+                val = delta_open.where(delta_open > 0, 0)
+                raw_cols[local_name] = val.stack(dropna=False).rename(local_name)
+            elif local_name == "hd":
+                # HD = MAX(HIGH - DELAY(HIGH,1), 0) if > 0 else 0, 条件: HIGH-DELAY(HIGH,1) > DELAY(LOW,1)-LOW
+                high_diff = high_frame - high_frame.shift(1)
+                low_diff = -low_frame.diff()
+                val = high_diff.where((high_diff > 0) & (high_diff > low_diff), 0)
+                raw_cols[local_name] = val.stack(dropna=False).rename(local_name)
+            elif local_name == "ld":
+                # LD = MAX(DELAY(LOW,1) - LOW, 0) if > 0 else 0, 条件: DELAY(LOW,1)-LOW > HIGH-DELAY(HIGH,1)
+                low_diff = -low_frame.diff()
+                high_diff = high_frame - high_frame.shift(1)
+                val = low_diff.where((low_diff > 0) & (low_diff > high_diff), 0)
+                raw_cols[local_name] = val.stack(dropna=False).rename(local_name)
+            elif local_name == "tr":
+                # TR = MAX(HIGH-LOW, ABS(HIGH-DELAY(CLOSE,1)), ABS(DELAY(CLOSE,1)-LOW))
+                hl = high_frame - low_frame
+                hc = (high_frame - close_frame.shift(1)).abs()
+                cl = (close_frame.shift(1) - low_frame).abs()
+                val = pd.concat([hl, hc, cl], axis=1).groupby(axis=1, level=0).max() if isinstance(hl, pd.DataFrame) else np.maximum(np.maximum(hl, hc), cl)
+                # 简化处理：逐元素取最大
+                max_df = hl.copy()
+                max_df = max_df.where(max_df >= hc, hc)
+                max_df = max_df.where(max_df >= cl, cl)
+                raw_cols[local_name] = max_df.stack(dropna=False).rename(local_name)
+            continue
+
+        if local_name in ("benchmark_open", "benchmark_high", "benchmark_low", "benchmark_close"):
+            # 基准指数行情
+            index_code = config.get("stock_pool", {}).get("index_code", "SH000300")
+            rq_index_code = normalize_index_code(index_code)
+            field_map = {"benchmark_open": "open", "benchmark_high": "high", "benchmark_low": "low", "benchmark_close": "close"}
+            rq_field = field_map[local_name]
+            index_price = rq.get_price(
+                rq_index_code, start_date=fetch_start, end_date=fetch_end,
+                frequency="1d", fields=[rq_field], expect_df=True
+            )
+            if index_price is not None and not index_price.empty:
+                # 广播到所有股票
+                index_series = index_price[rq_field]
+                # 创建与 raw_frame 相同 index 的 Series
+                idx = pd.MultiIndex.from_product([index_series.index, instruments], names=["datetime", "instrument"])
+                raw_cols[local_name] = pd.Series(index_series.values, index=idx).rename(local_name)
+            continue
+
+        if local_name == "ret_1d":
+            # ret_1d = close.pct_change(1)
+            close_frame = _get_price_field(instruments, fetch_start, fetch_end, "close", adjust_type)
+            ret = close_frame.pct_change()
+            raw_cols[local_name] = ret.stack(dropna=False).rename(local_name)
             continue
 
         rq_field = field_alias.get(local_name, local_name)

@@ -1,0 +1,947 @@
+[
+  {
+    "name": "alpha1",
+    "formula": "(-1 * rolling_corr(rank(delta(log(volume), 1)), rank(((close -open) / open)), 6))",
+    "direction": 1
+  },
+  {
+    "name": "alpha2",
+    "formula": "(-1 * delta((((close -low) -(high -close)) / (high -low)), 1))",
+    "direction": 1
+  },
+  {
+    "name": "alpha3",
+    "formula": "rolling_sum((where(close==delay(close,1), 0, close-(where(close>delay(close,1), minimum(low, delay(close,1)), maximum(high, delay(close,1)))))),6)",
+    "direction": 1
+  },
+  {
+    "name": "alpha4",
+    "formula": "(where((((rolling_sum(close, 8) / 8) + rolling_std(close, 8)) < (rolling_sum(close, 2) / 2)), (-1 * 1), (where(((rolling_sum(close, 2) / 2) <((rolling_sum(close, 8) / 8) -rolling_std(close, 8))), 1, (where(((1 < (volume / rolling_mean(volume,20))) | ((volume /rolling_mean(volume,20)) == 1)), 1, (-1 * 1)))))))",
+    "direction": 1
+  },
+  {
+    "name": "alpha5",
+    "formula": "(-1 * rolling_max(rolling_corr(ts_rank(volume, 5), ts_rank(high, 5), 5), 3))",
+    "direction": 1
+  },
+  {
+    "name": "alpha6",
+    "formula": "(rank(sign(delta((((open * 0.85) + (high * 0.15))), 4)))* -1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha7",
+    "formula": "((rank(rolling_max((vwap -close), 3)) + rank(rolling_min((vwap -close), 3))) * rank(delta(volume, 3)))",
+    "direction": 1
+  },
+  {
+    "name": "alpha8",
+    "formula": "rank(delta(((((high + low) / 2) * 0.2) + (vwap * 0.8)), 4) * -1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha9",
+    "formula": "sma(((high+low)/2-(delay(high,1)+delay(low,1))/2)*(high-low)/volume,7,2)",
+    "direction": 1
+  },
+  {
+    "name": "alpha10",
+    "formula": "rank(rolling_max(where((ret_1d < 0), rolling_std(ret_1d, 20), close)**2, 5))",
+    "direction": 1
+  },
+  {
+    "name": "alpha11",
+    "formula": "rolling_sum(((close-low)-(high-close))/(high-low)*volume,6)",
+    "direction": 1
+  },
+  {
+    "name": "alpha12",
+    "formula": "(rank((open -(rolling_sum(vwap, 10) / 10)))) * (-1 * (rank(abs((close -vwap)))))",
+    "direction": 1
+  },
+  {
+    "name": "alpha13",
+    "formula": "(((high * low)**0.5) -vwap)",
+    "direction": 1
+  },
+  {
+    "name": "alpha14",
+    "formula": "close-delay(close,5)",
+    "direction": 1
+  },
+  {
+    "name": "alpha15",
+    "formula": "open/delay(close,1)-1",
+    "direction": 1
+  },
+  {
+    "name": "alpha16",
+    "formula": "(-1 * rolling_max(rank(rolling_corr(rank(volume), rank(vwap), 5)), 5))",
+    "direction": 1
+  },
+  {
+    "name": "alpha17",
+    "formula": "rank((vwap -rolling_max(vwap, 15)))**delta(close, 5)",
+    "direction": 1
+  },
+  {
+    "name": "alpha18",
+    "formula": "close/delay(close,5)",
+    "direction": 1
+  },
+  {
+    "name": "alpha19",
+    "formula": "(where(close<delay(close,5), (close-delay(close,5))/delay(close,5), (where(close==delay(close,5), 0, (close-delay(close,5))/close))))",
+    "direction": 1
+  },
+  {
+    "name": "alpha20",
+    "formula": "(close-delay(close,6))/delay(close,6)*100",
+    "direction": 1
+  },
+  {
+    "name": "alpha21",
+    "formula": "regbeta_seq(rolling_mean(close,6), 6)",
+    "direction": 1
+  },
+  {
+    "name": "alpha22",
+    "formula": "sma(((close-rolling_mean(close,6))/rolling_mean(close,6)-delay((close-rolling_mean(close,6))/rolling_mean(close,6),3)),12,1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha23",
+    "formula": "sma(where(close>delay(close,1), rolling_std(close, 20), 0), 20, 1)/(sma(where(close>delay(close,1), rolling_std(close, 20), 0), 20, 1)+sma(where(close<=delay(close,1), rolling_std(close, 20), 0), 20, 1))*100",
+    "direction": 1
+  },
+  {
+    "name": "alpha24",
+    "formula": "sma(close-delay(close,5),5,1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha25",
+    "formula": "((-1 * rank((delta(close, 7) * (1 -rank(decay_linear((volume/rolling_mean(volume,20)), 9)))))) * (1 +rank(rolling_sum(ret_1d, 250))))",
+    "direction": 1
+  },
+  {
+    "name": "alpha26",
+    "formula": "((((rolling_sum(close, 7) / 7) -close)) + ((rolling_corr(vwap, delay(close, 5), 230))))",
+    "direction": 1
+  },
+  {
+    "name": "alpha27",
+    "formula": "wma((close-delay(close,3))/delay(close,3)*100+(close-delay(close,6))/delay(close,6)*100,12)",
+    "direction": 1
+  },
+  {
+    "name": "alpha28",
+    "formula": "3*sma((close-rolling_min(low,9))/(rolling_max(high,9)-rolling_min(low,9))*100,3,1)-2*sma(sma((close-rolling_min(low,9))/(rolling_max(high, 9)-rolling_max(low,9))*100,3,1),3,1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha29",
+    "formula": "(close-delay(close,6))/delay(close,6)*volume",
+    "direction": 1
+  },
+  {
+    "name": "alpha31",
+    "formula": "(close-rolling_mean(close,12))/rolling_mean(close,12)*100",
+    "direction": 1
+  },
+  {
+    "name": "alpha32",
+    "formula": "(-1 * rolling_sum(rank(rolling_corr(rank(high), rank(volume), 3)), 3))",
+    "direction": 1
+  },
+  {
+    "name": "alpha33",
+    "formula": "((((-1 * rolling_min(low, 5)) + delay(rolling_min(low, 5), 5)) * rank(((rolling_sum(ret_1d, 240) -rolling_sum(ret_1d, 20)) / 220))) *ts_rank(volume, 5))",
+    "direction": 1
+  },
+  {
+    "name": "alpha34",
+    "formula": "rolling_mean(close,12)/close",
+    "direction": 1
+  },
+  {
+    "name": "alpha35",
+    "formula": "(minimum(rank(decay_linear(delta(open, 1), 15)), rank(decay_linear(rolling_corr((volume), ((open * 0.65) +(open *0.35)), 17),7))) * -1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha36",
+    "formula": "rank(rolling_sum(rolling_corr(rank(volume), rank(vwap), 6), 2))",
+    "direction": 1
+  },
+  {
+    "name": "alpha37",
+    "formula": "(-1 * rank(((rolling_sum(open, 5) * rolling_sum(ret_1d, 5)) -delay((rolling_sum(open,5) * rolling_sum(ret_1d, 5)), 10))))",
+    "direction": 1
+  },
+  {
+    "name": "alpha38",
+    "formula": "(where(((rolling_sum(high, 20) / 20) < high), (-1 * delta(high, 2)), 0))",
+    "direction": 1
+  },
+  {
+    "name": "alpha39",
+    "formula": "((rank(decay_linear(delta((close), 2),8)) -rank(decay_linear(rolling_corr(((vwap * 0.3) + (open * 0.7)),rolling_sum(rolling_mean(volume,180), 37), 14), 12))) * -1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha40",
+    "formula": "rolling_sum((where(close>delay(close,1), volume, 0)),26)/rolling_sum((where(close<=delay(close,1), volume, 0)),26)*100",
+    "direction": 1
+  },
+  {
+    "name": "alpha41",
+    "formula": "(rank(rolling_max(delta((vwap), 3), 5))* -1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha42",
+    "formula": "((-1 * rank(rolling_std(high, 10))) * rolling_corr(high, volume, 10))",
+    "direction": 1
+  },
+  {
+    "name": "alpha43",
+    "formula": "rolling_sum((where(close>delay(close,1), volume, (where(close<delay(close,1), -volume, 0)))),6)",
+    "direction": 1
+  },
+  {
+    "name": "alpha44",
+    "formula": "(ts_rank(decay_linear(rolling_corr(((low)), rolling_mean(volume,10), 7), 6),4) + ts_rank(decay_linear(delta((vwap),3), 10), 15))",
+    "direction": 1
+  },
+  {
+    "name": "alpha45",
+    "formula": "(rank(delta((((close * 0.6) + (open *0.4))), 1)) * rank(rolling_corr(vwap, rolling_mean(volume,150), 15)))",
+    "direction": 1
+  },
+  {
+    "name": "alpha46",
+    "formula": "(rolling_mean(close,3)+rolling_mean(close,6)+rolling_mean(close,12)+rolling_mean(close,24))/(4*close)",
+    "direction": 1
+  },
+  {
+    "name": "alpha47",
+    "formula": "sma((rolling_max(high,6)-close)/(rolling_max(high,6)-rolling_min(low,6))*100,9,1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha48",
+    "formula": "(-1*((rank(((sign((close -delay(close, 1))) + sign((delay(close, 1) -delay(close, 2)))) +sign((delay(close, 2) -delay(close, 3)))))) * rolling_sum(volume, 5)) / rolling_sum(volume, 20))",
+    "direction": 1
+  },
+  {
+    "name": "alpha49",
+    "formula": "rolling_sum((where((high+low)>=(delay(high,1)+delay(low,1)), 0, maximum(abs(high-delay(high,1)), abs(low-delay(low,1))))),12)/(rolling_sum((where((high+low)>=(delay(high,1)+delay(low,1)), 0, maximum(abs(high-delay(high,1)), abs(low-delay(low,1))))),12)+rolling_sum((where((high+low)<=(delay(high,1)+delay(low,1)), 0, maximum(abs(high-delay(high,1)), abs(low-delay(low,1))))),12))",
+    "direction": 1
+  },
+  {
+    "name": "alpha50",
+    "formula": "rolling_sum((where((high+low)<=(delay(high,1)+delay(low,1)), 0, maximum(abs(high-delay(high,1)), abs(low-delay(low,1))))),12)/(rolling_sum((where((high+low)<=(delay(high,1)+delay(low,1)), 0, maximum(abs(high-delay(high,1)), abs(low-delay(low,1))))),12)+rolling_sum((where((high+low)>=(delay(high,1)+delay(low,1)), 0, maximum(abs(high-delay(high,1)), abs(low-delay(low,1))))),12))-rolling_sum((where((high+low)>=(delay(high,1)+delay(low,1)), 0, maximum(abs(high-delay(high,1)), abs(low-delay(low,1))))),12)/(rolling_sum((where((high+low)>=(delay(high,1)+delay(low,1)), 0, maximum(abs(high-delay(high,1)), abs(low-delay(low,1))))),12)+rolling_sum((where((high+low)<=(delay(high,1)+delay(low,1)), 0, maximum(abs(high-delay(high,1)), abs(low-delay(low,1))))),12))",
+    "direction": 1
+  },
+  {
+    "name": "alpha51",
+    "formula": "rolling_sum((where((high+low)<=(delay(high,1)+delay(low,1)), 0, maximum(abs(high-delay(high,1)), abs(low-delay(low,1))))),12)/(rolling_sum((where((high+low)<=(delay(high,1)+delay(low,1)), 0, maximum(abs(high-delay(high,1)), abs(low-delay(low,1))))),12)+rolling_sum((where((high+low)>=(delay(high,1)+delay(low,1)), 0, maximum(abs(high-delay(high,1)), abs(low-delay(low,1))))),12))",
+    "direction": 1
+  },
+  {
+    "name": "alpha52",
+    "formula": "rolling_sum(maximum(0, high-delay((high+low+close)/3,1)),26)/rolling_sum(maximum(0, delay((high+low+close)/3,1)-low),26)*100",
+    "direction": 1
+  },
+  {
+    "name": "alpha53",
+    "formula": "count(close>delay(close,1),12)/12*100",
+    "direction": 1
+  },
+  {
+    "name": "alpha54",
+    "formula": "(-1 * rank((rolling_std(abs(close - open), 20) + (close - open)) + rolling_corr(close, open, 10)))",
+    "direction": 1
+  },
+  {
+    "name": "alpha55",
+    "formula": "rolling_sum(16*(close-delay(close,1)+(close-open)/2+delay(close,1)-delay(open,1))/((where((abs(high-delay(close,1))>abs(low-delay(close,1))) & (abs(high-delay(close,1))>abs(high-delay(low,1))), abs(high-delay(close,1))+abs(low-delay(close,1))/2+abs(delay(close,1)-delay(open,1))/4, (where((abs(low-delay(close,1))>abs(high-delay(low,1))) & (abs(low-delay(close,1))>abs(high-delay(close,1))), abs(low-delay(close,1))+abs(high-delay(close,1))/2+abs(delay(close,1)-delay(open,1))/4, abs(high-delay(low,1))+abs(delay(close,1)-delay(open,1))/4)))))*maximum(abs(high-delay(close,1)), abs(low-delay(close,1))),20)",
+    "direction": 1
+  },
+  {
+    "name": "alpha56",
+    "formula": "(rank((open -rolling_min(open, 12))) < rank((rank(rolling_corr(rolling_sum(((high + low) / 2), 19), rolling_sum(rolling_mean(volume,40), 19), 13))**5)))",
+    "direction": 1
+  },
+  {
+    "name": "alpha57",
+    "formula": "sma((close-rolling_min(low,9))/(rolling_max(high,9)-rolling_min(low,9))*100,3,1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha58",
+    "formula": "count(close>delay(close,1),20)/20*100",
+    "direction": 1
+  },
+  {
+    "name": "alpha59",
+    "formula": "rolling_sum((where(close==delay(close,1), 0, close-(where(close>delay(close,1), minimum(low, delay(close,1)), maximum(high, delay(close,1)))))),20)",
+    "direction": 1
+  },
+  {
+    "name": "alpha60",
+    "formula": "rolling_sum(((close-low)-(high-close))/(high-low)*volume,20)",
+    "direction": 1
+  },
+  {
+    "name": "alpha61",
+    "formula": "(maximum(rank(decay_linear(delta(vwap, 1), 12)), rank(decay_linear(rank(rolling_corr((low),rolling_mean(volume,80), 8)), 17))) * -1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha62",
+    "formula": "(-1 * rolling_corr(high, rank(volume), 5))",
+    "direction": 1
+  },
+  {
+    "name": "alpha63",
+    "formula": "sma(maximum(close-delay(close,1), 0),6,1)/sma(abs(close-delay(close,1)),6,1)*100",
+    "direction": 1
+  },
+  {
+    "name": "alpha64",
+    "formula": "(maximum(rank(decay_linear(rolling_corr(rank(vwap), rank(volume), 4), 4)), rank(decay_linear(rolling_max(rolling_corr(rank(close), rank(rolling_mean(volume,60)), 4), 13), 14))) * -1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha65",
+    "formula": "rolling_mean(close,6)/close",
+    "direction": 1
+  },
+  {
+    "name": "alpha66",
+    "formula": "(close-rolling_mean(close,6))/rolling_mean(close,6)*100",
+    "direction": 1
+  },
+  {
+    "name": "alpha67",
+    "formula": "sma(maximum(close-delay(close,1), 0),24,1)/sma(abs(close-delay(close,1)),24,1)*100",
+    "direction": 1
+  },
+  {
+    "name": "alpha68",
+    "formula": "sma(((high+low)/2-(delay(high,1)+delay(low,1))/2)*(high-low)/volume,15,2)",
+    "direction": 1
+  },
+  {
+    "name": "alpha69",
+    "formula": "(where(rolling_sum(dtm,20)>rolling_sum(dbm,20), (rolling_sum(dtm,20)-rolling_sum(dbm,20))/rolling_sum(dtm,20), (where(rolling_sum(dtm,20)==rolling_sum(dbm,20), 0, (rolling_sum(dtm,20)-rolling_sum(dbm,20))/rolling_sum(dbm,20)))))",
+    "direction": 1
+  },
+  {
+    "name": "alpha70",
+    "formula": "rolling_std(amount,6)",
+    "direction": 1
+  },
+  {
+    "name": "alpha71",
+    "formula": "(close-rolling_mean(close,24))/rolling_mean(close,24)*100",
+    "direction": 1
+  },
+  {
+    "name": "alpha72",
+    "formula": "sma((rolling_max(high,6)-close)/(rolling_max(high,6)-rolling_min(low,6))*100,15,1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha73",
+    "formula": "((ts_rank(decay_linear(decay_linear(rolling_corr((close), volume, 10), 16), 4), 5) - rank(decay_linear(rolling_corr(vwap, rolling_mean(volume,30), 4),3))) * -1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha74",
+    "formula": "(rank(rolling_corr(rolling_sum(((low * 0.35) + (vwap * 0.65)), 20), rolling_sum(rolling_mean(volume,40), 20), 7)) + rank(rolling_corr(rank(vwap), rank(volume), 6)))",
+    "direction": 1
+  },
+  {
+    "name": "alpha75",
+    "formula": "count((close>open) & (benchmark_close<benchmark_open),50)/count(benchmark_close<benchmark_open,50)",
+    "direction": 1
+  },
+  {
+    "name": "alpha76",
+    "formula": "rolling_std(abs((close/delay(close,1)-1))/volume,20)/rolling_mean(abs((close/delay(close,1)-1))/volume,20)",
+    "direction": 1
+  },
+  {
+    "name": "alpha77",
+    "formula": "minimum(rank(decay_linear(((((high + low) / 2) + high) -(vwap + high)), 20)), rank(decay_linear(rolling_corr(((high + low) / 2), rolling_mean(volume,40), 3), 6)))",
+    "direction": 1
+  },
+  {
+    "name": "alpha78",
+    "formula": "((high+low+close)/3-rolling_mean((high+low+close)/3,12))/(0.015*rolling_mean(abs(close-rolling_mean((high+low+close)/3,12)),12))",
+    "direction": 1
+  },
+  {
+    "name": "alpha79",
+    "formula": "sma(maximum(close-delay(close,1), 0),12,1)/sma(abs(close-delay(close,1)),12,1)*100",
+    "direction": 1
+  },
+  {
+    "name": "alpha80",
+    "formula": "(volume-delay(volume,5))/delay(volume,5)*100",
+    "direction": 1
+  },
+  {
+    "name": "alpha81",
+    "formula": "sma(volume,21,2)",
+    "direction": 1
+  },
+  {
+    "name": "alpha82",
+    "formula": "sma((rolling_max(high,6)-close)/(rolling_max(high,6)-rolling_min(low,6))*100,20,1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha83",
+    "formula": "(-1 * rank(covariance(rank(high), rank(volume), 5)))",
+    "direction": 1
+  },
+  {
+    "name": "alpha84",
+    "formula": "rolling_sum((where(close>delay(close,1), volume, (where(close<delay(close,1), -volume, 0)))),20)",
+    "direction": 1
+  },
+  {
+    "name": "alpha85",
+    "formula": "(ts_rank((volume / rolling_mean(volume,20)), 20) * ts_rank((-1 * delta(close, 7)), 8))",
+    "direction": 1
+  },
+  {
+    "name": "alpha86",
+    "formula": "(where((0.25 < (((delay(close, 20) -delay(close, 10)) / 10) -((delay(close, 10) -close) / 10))), (-1 * 1), (where(((((delay(close, 20) -delay(close, 10)) / 10) -((delay(close, 10) -close) / 10)) < 0), 1, ((-1 * 1) *(close -delay(close, 1)))))))",
+    "direction": 1
+  },
+  {
+    "name": "alpha87",
+    "formula": "((rank(decay_linear(delta(vwap, 4), 7)) + ts_rank(decay_linear(((((low * 0.9) + (low * 0.1)) -vwap) /(open -((high + low) / 2))), 11), 7)) * -1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha88",
+    "formula": "(close-delay(close,20))/delay(close,20)*100",
+    "direction": 1
+  },
+  {
+    "name": "alpha89",
+    "formula": "2*(sma(close,13,2)-sma(close,27,2)-sma(sma(close,13,2)-sma(close,27,2),10,2))",
+    "direction": 1
+  },
+  {
+    "name": "alpha90",
+    "formula": "(rank(rolling_corr(rank(vwap), rank(volume), 5)) * -1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha91",
+    "formula": "((rank((close -rolling_max(close, 5)))*rank(rolling_corr((rolling_mean(volume,40)), low, 5))) * -1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha92",
+    "formula": "(maximum(rank(decay_linear(delta(((close * 0.35) + (vwap *0.65)), 2), 3)), ts_rank(decay_linear(abs(rolling_corr((rolling_mean(volume,180)), close, 13)), 5), 15)) * -1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha93",
+    "formula": "rolling_sum((where(open>=delay(open,1), 0, maximum((open-low), (open-delay(open,1))))),20)",
+    "direction": 1
+  },
+  {
+    "name": "alpha94",
+    "formula": "rolling_sum((where(close>delay(close,1), volume, (where(close<delay(close,1), -volume, 0)))),30)",
+    "direction": 1
+  },
+  {
+    "name": "alpha95",
+    "formula": "rolling_std(amount,20)",
+    "direction": 1
+  },
+  {
+    "name": "alpha96",
+    "formula": "sma(sma((close-rolling_min(low,9))/(rolling_max(high,9)-rolling_min(low,9))*100,3,1),3,1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha97",
+    "formula": "rolling_std(volume,10)",
+    "direction": 1
+  },
+  {
+    "name": "alpha98",
+    "formula": "(where((((delta((rolling_sum(close, 100) / 100), 100) / delay(close, 100)) < 0.05) | ((delta((rolling_sum(close, 100) / 100), 100) /delay(close, 100)) == 0.05)), (-1 * (close -rolling_min(close, 100))), (-1 * delta(close, 3))))",
+    "direction": 1
+  },
+  {
+    "name": "alpha99",
+    "formula": "(-1 * rank(covariance(rank(close), rank(volume), 5)))",
+    "direction": 1
+  },
+  {
+    "name": "alpha100",
+    "formula": "rolling_std(volume,20)",
+    "direction": 1
+  },
+  {
+    "name": "alpha101",
+    "formula": "((rank(rolling_corr(close, rolling_sum(rolling_mean(volume,30), 37), 15)) < rank(rolling_corr(rank(((high * 0.1) + (vwap * 0.9))),rank(volume), 11))) * -1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha102",
+    "formula": "sma(maximum(volume-delay(volume,1), 0),6,1)/sma(abs(volume-delay(volume,1)),6,1)*100",
+    "direction": 1
+  },
+  {
+    "name": "alpha103",
+    "formula": "((20-lowday(low,20))/20)*100",
+    "direction": 1
+  },
+  {
+    "name": "alpha104",
+    "formula": "(-1 * (delta(rolling_corr(high, volume, 5), 5) * rank(rolling_std(close, 20))))",
+    "direction": 1
+  },
+  {
+    "name": "alpha105",
+    "formula": "(-1 * rolling_corr(rank(open), rank(volume), 10))",
+    "direction": 1
+  },
+  {
+    "name": "alpha106",
+    "formula": "close-delay(close,20)",
+    "direction": 1
+  },
+  {
+    "name": "alpha107",
+    "formula": "(((-1 * rank((open -delay(high, 1)))) * rank((open -delay(close, 1)))) *rank((open -delay(low, 1))))",
+    "direction": 1
+  },
+  {
+    "name": "alpha108",
+    "formula": "((rank((high -rolling_min(high, 2)))**rank(rolling_corr((vwap), (rolling_mean(volume,120)), 6))) * -1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha109",
+    "formula": "sma(high-low,10,2)/sma(sma(high-low,10,2),10,2)",
+    "direction": 1
+  },
+  {
+    "name": "alpha110",
+    "formula": "rolling_sum(maximum(0, high-delay(close,1)),20)/rolling_sum(maximum(0, delay(close,1)-low),20)*100",
+    "direction": 1
+  },
+  {
+    "name": "alpha111",
+    "formula": "sma(volume*((close-low)-(high-close))/(high-low),11,2)-sma(volume*((close-low)-(high-close))/(high-low),4,2)",
+    "direction": 1
+  },
+  {
+    "name": "alpha112",
+    "formula": "(rolling_sum((where(close-delay(close,1)>0, close-delay(close,1), 0)),12)-rolling_sum((where(close-delay(close,1)<0, abs(close-delay(close,1)), 0)),12))/(rolling_sum((where(close-delay(close,1)>0, close-delay(close,1), 0)),12)+rolling_sum((where(close-delay(close,1)<0, abs(close-delay(close,1)), 0)),12))*100",
+    "direction": 1
+  },
+  {
+    "name": "alpha113",
+    "formula": "(-1 * ((rank((rolling_sum(delay(close, 5), 20) / 20)) * rolling_corr(close, volume, 2)) *rank(rolling_corr(rolling_sum(close, 5),rolling_sum(close, 20), 2))))",
+    "direction": 1
+  },
+  {
+    "name": "alpha114",
+    "formula": "((rank(delay(((high -low) / (rolling_sum(close, 5) / 5)), 2)) * rank(rank(volume))) / (((high -low) /(rolling_sum(close, 5) / 5)) / (vwap -close)))",
+    "direction": 1
+  },
+  {
+    "name": "alpha115",
+    "formula": "(rank(rolling_corr(((high * 0.9) + (close * 0.1)), rolling_mean(volume,30), 10))**rank(rolling_corr(ts_rank(((high + low) /2), 4), ts_rank(volume, 10), 7)))",
+    "direction": 1
+  },
+  {
+    "name": "alpha116",
+    "formula": "regbeta_seq(close, 20)",
+    "direction": 1
+  },
+  {
+    "name": "alpha117",
+    "formula": "((ts_rank(volume, 32) * (1 -ts_rank(((close + high) -low), 16))) * (1 -ts_rank(ret_1d, 32)))",
+    "direction": 1
+  },
+  {
+    "name": "alpha118",
+    "formula": "rolling_sum(high-open,20)/rolling_sum(open-low,20)*100",
+    "direction": 1
+  },
+  {
+    "name": "alpha119",
+    "formula": "(rank(decay_linear(rolling_corr(vwap, rolling_sum(rolling_mean(volume,5), 26), 5), 7)) -rank(decay_linear(ts_rank(rolling_min(rolling_corr(rank(open), rank(rolling_mean(volume,15)), 21), 9), 7), 8)))",
+    "direction": 1
+  },
+  {
+    "name": "alpha120",
+    "formula": "(rank((vwap -close)) / rank((vwap + close)))",
+    "direction": 1
+  },
+  {
+    "name": "alpha121",
+    "formula": "((rank((vwap -rolling_min(vwap, 12)))**ts_rank(rolling_corr(ts_rank(vwap, 20), ts_rank(rolling_mean(volume,60), 2), 18), 3)) * -1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha122",
+    "formula": "(sma(sma(sma(log(close),13,2),13,2),13,2)-delay(sma(sma(sma(log(close),13,2),13,2),13,2),1))/delay(sma(sma(sma(log(close),13,2),13,2),13,2),1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha123",
+    "formula": "((rank(rolling_corr(rolling_sum(((high + low) / 2), 20), rolling_sum(rolling_mean(volume,60), 20), 9))<rank(rolling_corr(low, volume,6))) * -1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha124",
+    "formula": "(close -vwap) / decay_linear(rank(rolling_max(close, 30)),2)",
+    "direction": 1
+  },
+  {
+    "name": "alpha125",
+    "formula": "(rank(decay_linear(rolling_corr((vwap), rolling_mean(volume,80),17), 20)) / rank(decay_linear(delta(((close * 0.5)+ (vwap * 0.5)), 3), 16)))",
+    "direction": 1
+  },
+  {
+    "name": "alpha126",
+    "formula": "(close+high+low)/3",
+    "direction": 1
+  },
+  {
+    "name": "alpha127",
+    "formula": "(rolling_mean((100*(close-rolling_max(close, 12))/(rolling_max(close, 12)))**2, 20))**(1/2)",
+    "direction": 1
+  },
+  {
+    "name": "alpha128",
+    "formula": "100-(100/(1+rolling_sum((where((high+low+close)/3>delay((high+low+close)/3,1), (high+low+close)/3*volume, 0)),14)/rolling_sum((where((high+low+close)/3<delay((high+low+close)/3,1), (high+low+close)/3*volume, 0)),14)))",
+    "direction": 1
+  },
+  {
+    "name": "alpha129",
+    "formula": "rolling_sum((where(close-delay(close,1)<0, abs(close-delay(close,1)), 0)),12)",
+    "direction": 1
+  },
+  {
+    "name": "alpha130",
+    "formula": "(rank(decay_linear(rolling_corr(((high + low) / 2), rolling_mean(volume,40), 9), 10)) /rank(decay_linear(rolling_corr(rank(vwap), rank(volume), 7),3)))",
+    "direction": 1
+  },
+  {
+    "name": "alpha131",
+    "formula": "(rank(delta(vwap, 1))**ts_rank(rolling_corr(close,rolling_mean(volume,50), 18), 18))",
+    "direction": 1
+  },
+  {
+    "name": "alpha132",
+    "formula": "rolling_mean(amount,20)",
+    "direction": 1
+  },
+  {
+    "name": "alpha133",
+    "formula": "((20-highday(high,20))/20)*100-((20-lowday(low,20))/20)*100",
+    "direction": 1
+  },
+  {
+    "name": "alpha134",
+    "formula": "(close-delay(close,12))/delay(close,12)*volume",
+    "direction": 1
+  },
+  {
+    "name": "alpha135",
+    "formula": "sma(delay(close/delay(close,20),1),20,1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha136",
+    "formula": "((-1 * rank(delta(ret_1d, 3))) * rolling_corr(open, volume, 10))",
+    "direction": 1
+  },
+  {
+    "name": "alpha137",
+    "formula": "16*(close-delay(close,1)+(close-open)/2+delay(close,1)-delay(open,1))/((where((abs(high-delay(close,1))>abs(low-delay(close,1))) & (abs(high-delay(close,1))>abs(high-delay(low,1))), abs(high-delay(close,1))+abs(low-delay(close,1))/2+abs(delay(close,1)-delay(open,1))/4, (where((abs(low-delay(close,1))>abs(high-delay(low,1))) & (abs(low-delay(close,1))>abs(high-delay(close,1))), abs(low-delay(close,1))+abs(high-delay(close,1))/2+abs(delay(close,1)-delay(open,1))/4, abs(high-delay(low,1))+abs(delay(close,1)-delay(open,1))/4)))))*maximum(abs(high-delay(close,1)), abs(low-delay(close,1)))",
+    "direction": 1
+  },
+  {
+    "name": "alpha138",
+    "formula": "((rank(decay_linear(delta((((low * 0.7) + (vwap *0.3))), 3), 20)) -ts_rank(decay_linear(ts_rank(rolling_corr(ts_rank(low, 8), ts_rank(rolling_mean(volume,60), 17), 5), 19), 16), 7)) * -1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha139",
+    "formula": "(-1 * rolling_corr(open, volume, 10))",
+    "direction": 1
+  },
+  {
+    "name": "alpha140",
+    "formula": "minimum(rank(decay_linear(((rank(open) + rank(low)) -(rank(high) + rank(close))), 8)), ts_rank(decay_linear(rolling_corr(ts_rank(close, 8), ts_rank(rolling_mean(volume,60), 20), 8), 7), 3))",
+    "direction": 1
+  },
+  {
+    "name": "alpha141",
+    "formula": "(rank(rolling_corr(rank(high), rank(rolling_mean(volume,15)), 9))* -1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha142",
+    "formula": "(((-1 * rank(ts_rank(close, 10))) * rank(delta(delta(close, 1), 1))) *rank(ts_rank((volume/rolling_mean(volume,20)), 5)))",
+    "direction": 1
+  },
+  {
+    "name": "alpha144",
+    "formula": "sumif(abs(close/delay(close,1)-1)/amount,20,close<delay(close,1))/count(close<delay(close,1),20)",
+    "direction": 1
+  },
+  {
+    "name": "alpha145",
+    "formula": "(rolling_mean(volume,9)-rolling_mean(volume,26))/rolling_mean(volume,12)*100",
+    "direction": 1
+  },
+  {
+    "name": "alpha146",
+    "formula": "rolling_mean((close-delay(close,1))/delay(close,1)-sma((close-delay(close,1))/delay(close,1),61,2),20)*((close-delay(close,1))/delay(close,1)-sma((close-delay(close,1))/delay(close,1),61,2))/rolling_mean(((close-delay(close,1))/delay(close,1)-((close-delay(close,1))/delay(close,1)-sma((close-delay(close,1))/delay(close,1),61,2)))**2,60)",
+    "direction": 1
+  },
+  {
+    "name": "alpha147",
+    "formula": "regbeta_seq(rolling_mean(close,12), 12)",
+    "direction": 1
+  },
+  {
+    "name": "alpha148",
+    "formula": "((rank(rolling_corr((open), rolling_sum(rolling_mean(volume,60), 9), 6)) < rank((open -rolling_min(open, 14)))) * -1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha149",
+    "formula": "regbeta(filter_cond(close/delay(close,1)-1,benchmark_close<delay(benchmark_close,1)), filter_cond(benchmark_close/delay(benchmark_close,1)-1,benchmark_close<delay(benchmark_close,1)), 252)",
+    "direction": 1
+  },
+  {
+    "name": "alpha150",
+    "formula": "(close+high+low)/3*volume",
+    "direction": 1
+  },
+  {
+    "name": "alpha151",
+    "formula": "sma(close-delay(close,20),20,1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha152",
+    "formula": "sma(rolling_mean(delay(sma(delay(close/delay(close,9),1),9,1),1),12)-rolling_mean(delay(sma(delay(close/delay(close,9),1),9,1),1),26),9,1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha153",
+    "formula": "(rolling_mean(close,3)+rolling_mean(close,6)+rolling_mean(close,12)+rolling_mean(close,24))/4",
+    "direction": 1
+  },
+  {
+    "name": "alpha154",
+    "formula": "(((vwap -rolling_min(vwap, 16))) < (rolling_corr(vwap, rolling_mean(volume,180), 18)))",
+    "direction": 1
+  },
+  {
+    "name": "alpha155",
+    "formula": "sma(volume,13,2)-sma(volume,27,2)-sma(sma(volume,13,2)-sma(volume,27,2),10,2)",
+    "direction": 1
+  },
+  {
+    "name": "alpha156",
+    "formula": "(maximum(rank(decay_linear(delta(vwap, 5), 3)), rank(decay_linear(((delta(((open * 0.15) + (low *0.85)),2) / ((open * 0.15) + (low * 0.85))) * -1), 3))) * -1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha157",
+    "formula": "(rolling_min(prod(rank(rank(log(rolling_sum(rolling_min(rank(rank((-1 * rank(delta((close -1), 5))))), 2), 1)))), 1), 5) +ts_rank(delay((-1 * ret_1d), 6), 5))",
+    "direction": 1
+  },
+  {
+    "name": "alpha158",
+    "formula": "((high-sma(close,15,2))-(low-sma(close,15,2)))/close",
+    "direction": 1
+  },
+  {
+    "name": "alpha159",
+    "formula": "((close-rolling_sum(minimum(low, delay(close,1)),6))/rolling_sum(maximum(high, delay(close,1))-minimum(low, delay(close,1)),6)*12*24+(close-rolling_sum(minimum(low, delay(close,1)),12))/rolling_sum(maximum(high, delay(close,1))-minimum(low, delay(close,1)),12)*6*24+(close-rolling_sum(minimum(low, delay(close,1)),24))/rolling_sum(maximum(high, delay(close,1))-minimum(low, delay(close,1)),24)*6*24)*100/(6*12+6*24+12*24)",
+    "direction": 1
+  },
+  {
+    "name": "alpha160",
+    "formula": "sma((where(close<=delay(close,1), rolling_std(close,20), 0)),20,1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha161",
+    "formula": "rolling_mean(maximum(maximum((high-low), abs(delay(close,1)-high)), abs(delay(close,1)-low)),12)",
+    "direction": 1
+  },
+  {
+    "name": "alpha162",
+    "formula": "(sma(maximum(close-delay(close,1), 0),12,1)/sma(abs(close-delay(close,1)),12,1)*100-rolling_min(sma(maximum(close-delay(close,1), 0),12,1)/sma(abs(close-delay(close,1)),12,1)*100, 12))/(rolling_max(sma(maximum(close-delay(close,1), 0),12,1)/sma(abs(close-delay(close,1)),12,1)*100, 12)-rolling_min(sma(maximum(close-delay(close,1), 0),12,1)/sma(abs(close-delay(close,1)),12,1)*100, 12))",
+    "direction": 1
+  },
+  {
+    "name": "alpha163",
+    "formula": "rank(((((-1 * ret_1d) * rolling_mean(volume,20)) * vwap) * (high -close)))",
+    "direction": 1
+  },
+  {
+    "name": "alpha164",
+    "formula": "sma(((where((close>delay(close,1)), 1/(close-delay(close,1)), 1))-rolling_min((where((close>delay(close,1)), 1/(close-delay(close,1)), 1)), 12))/(high-low)*100,13,2)",
+    "direction": 1
+  },
+  {
+    "name": "alpha165",
+    "formula": "(sumac(close-rolling_mean(close,48)))-(sumac(close-rolling_mean(close,48)))/rolling_std(close,48)",
+    "direction": 1
+  },
+  {
+    "name": "alpha166",
+    "formula": "-20*(20-1)**1.5*rolling_sum(close/delay(close,1)-1-rolling_mean(close/delay(close,1)-1,20),20)/((20-1)*(20-2)*rolling_sum((close/delay(close,1)-1)**2,20)**1.5)",
+    "direction": 1
+  },
+  {
+    "name": "alpha167",
+    "formula": "rolling_sum((where(close-delay(close,1)>0, close-delay(close,1), 0)),12)",
+    "direction": 1
+  },
+  {
+    "name": "alpha168",
+    "formula": "(-1*volume/rolling_mean(volume,20))",
+    "direction": 1
+  },
+  {
+    "name": "alpha169",
+    "formula": "sma(rolling_mean(delay(sma(close-delay(close,1),9,1),1),12)-rolling_mean(delay(sma(close-delay(close,1),9,1),1),26),10,1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha170",
+    "formula": "((((rank((1 / close)) * volume) / rolling_mean(volume,20)) * ((high * rank((high -close))) / (rolling_sum(high, 5) /5))) -rank((vwap -delay(vwap, 5))))",
+    "direction": 1
+  },
+  {
+    "name": "alpha171",
+    "formula": "((-1 * ((low -close) * (open**5))) / ((close -high) * (close**5)))",
+    "direction": 1
+  },
+  {
+    "name": "alpha172",
+    "formula": "rolling_mean(abs(rolling_sum(where((ld>0) & (ld>hd), ld, 0), 14)*100/rolling_sum(tr,14)-rolling_sum(where((hd>0) & (hd>ld), hd, 0), 14)*100/rolling_sum(tr,14))/(rolling_sum(where((ld>0) & (ld>hd), ld, 0), 14)*100/rolling_sum(tr,14)+rolling_sum(where((hd>0) & (hd>ld), hd, 0), 14)*100/rolling_sum(tr,14))*100,6)",
+    "direction": 1
+  },
+  {
+    "name": "alpha173",
+    "formula": "3*sma(close,13,2)-2*sma(sma(close,13,2),13,2)+sma(sma(sma(log(close),13,2),13,2),13,2)",
+    "direction": 1
+  },
+  {
+    "name": "alpha174",
+    "formula": "sma((where(close>delay(close,1), rolling_std(close,20), 0)),20,1)",
+    "direction": 1
+  },
+  {
+    "name": "alpha175",
+    "formula": "rolling_mean(maximum(maximum((high-low), abs(delay(close,1)-high)), abs(delay(close,1)-low)),6)",
+    "direction": 1
+  },
+  {
+    "name": "alpha176",
+    "formula": "rolling_corr(rank(((close -rolling_min(low, 12)) / (rolling_max(high, 12) -rolling_min(low,12)))),rank(volume), 6)",
+    "direction": 1
+  },
+  {
+    "name": "alpha177",
+    "formula": "((20-highday(high,20))/20)*100",
+    "direction": 1
+  },
+  {
+    "name": "alpha178",
+    "formula": "(close-delay(close,1))/delay(close,1)*volume",
+    "direction": 1
+  },
+  {
+    "name": "alpha179",
+    "formula": "(rank(rolling_corr(vwap, volume, 4)) *rank(rolling_corr(rank(low),rank(rolling_mean(volume,50)), 12)))",
+    "direction": 1
+  },
+  {
+    "name": "alpha180",
+    "formula": "where(rolling_mean(volume,20) < volume, (-1 * ts_rank(abs(delta(close, 7)), 60)) * sign(delta(close, 7)), -1 * volume)",
+    "direction": 1
+  },
+  {
+    "name": "alpha181",
+    "formula": "rolling_sum(((close/delay(close,1)-1)-rolling_mean((close/delay(close,1)-1),20))-(benchmark_close-rolling_mean(benchmark_close,20))**2,20)/rolling_sum((benchmark_close-rolling_mean(benchmark_close,20))**3,20)",
+    "direction": 1
+  },
+  {
+    "name": "alpha182",
+    "formula": "count(((close>open) & (benchmark_close>benchmark_open))|((close<open) & (benchmark_close<benchmark_open)),20)/20",
+    "direction": 1
+  },
+  {
+    "name": "alpha183",
+    "formula": "(sumac(close-rolling_mean(close,24)))-(sumac(close-rolling_mean(close,24)))/rolling_std(close,24)",
+    "direction": 1
+  },
+  {
+    "name": "alpha184",
+    "formula": "(rank(rolling_corr(delay((open -close), 1), close, 200)) + rank((open -close)))",
+    "direction": 1
+  },
+  {
+    "name": "alpha185",
+    "formula": "rank((-1 * ((1 -(open / close))**2)))",
+    "direction": 1
+  },
+  {
+    "name": "alpha186",
+    "formula": "(rolling_mean(abs(rolling_sum(where((ld>0) & (ld>hd), ld, 0), 14)*100/rolling_sum(tr,14)-rolling_sum(where((hd>0) & (hd>ld), hd, 0), 14)*100/rolling_sum(tr,14))/(rolling_sum(where((ld>0) & (ld>hd), ld, 0), 14)*100/rolling_sum(tr,14)+rolling_sum(where((hd>0) & (hd>ld), hd, 0), 14)*100/rolling_sum(tr,14))*100,6)+delay(rolling_mean(abs(rolling_sum(where((ld>0) & (ld>hd), ld, 0), 14)*100/rolling_sum(tr,14)-rolling_sum(where((hd>0) & (hd>ld), hd, 0), 14)*100/rolling_sum(tr,14))/(rolling_sum(where((ld>0) & (ld>hd), ld, 0), 14)*100/rolling_sum(tr,14)+rolling_sum(where((hd>0) & (hd>ld), hd, 0), 14)*100/rolling_sum(tr,14))*100,6),6))/2",
+    "direction": 1
+  },
+  {
+    "name": "alpha187",
+    "formula": "rolling_sum((where(open<=delay(open,1), 0, maximum((high-open), (open-delay(open,1))))),20)",
+    "direction": 1
+  },
+  {
+    "name": "alpha188",
+    "formula": "((high-low-sma(high-low,11,2))/sma(high-low,11,2))*100",
+    "direction": 1
+  },
+  {
+    "name": "alpha189",
+    "formula": "rolling_mean(abs(close-rolling_mean(close,6)),6)",
+    "direction": 1
+  },
+  {
+    "name": "alpha190",
+    "formula": "log((count(close/delay(close,1)-1>((close/delay(close,19))**(1/20)-1),20)-1)*(sumif(((close/delay(close,1)-1-(close/delay(close,19))**(1/20)-1))**2,20,close/delay(close,1)-1<(close/delay(close,19))**(1/20)-1))/((count((close/delay(close,1)-1<(close/delay(close,19))**(1/20)-1),20))*(sumif((close/delay(close,1)-1-((close/delay(close,19))**(1/20)-1))**2,20,close/delay(close,1)-1>(close/delay(close,19))**(1/20)-1))))",
+    "direction": 1
+  },
+  {
+    "name": "alpha191",
+    "formula": "((rolling_corr(rolling_mean(volume,20), low, 5) + ((high + low) / 2)) -close)",
+    "direction": 1
+  }
+]

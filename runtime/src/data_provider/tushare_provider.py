@@ -1751,6 +1751,53 @@ class TushareProvider(BaseDataProvider):
             print(f"获取交易日列表失败: {e}")
             return []
 
+    def get_index_daily(
+        self,
+        index_code: str,
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame:
+        """获取指数日线行情（open/high/low/close）
+
+        Args:
+            index_code: 指数代码，支持本项目统一格式（如 SH000300）或 Tushare 格式（如 000300.SH）
+            start_date: 起始日期 YYYY-MM-DD 或 YYYYMMDD
+            end_date: 结束日期 YYYY-MM-DD 或 YYYYMMDD
+
+        Returns:
+            DataFrame，index 为 datetime（DatetimeIndex），columns 为 open/high/low/close
+        """
+        self.initialize()
+
+        ts_code = self.INDEX_CODE_MAP.get(index_code, index_code)
+        start_text = str(start_date).replace("-", "")
+        end_text = str(end_date).replace("-", "")
+
+        cache_key = f"index_daily_{ts_code}_{start_text}_{end_text}"
+        cached = self._load_from_cache(cache_key)
+        if cached is not None and not cached.empty:
+            return cached
+
+        df = self._call_pro_api(
+            "index_daily",
+            ts_code=ts_code,
+            start_date=start_text,
+            end_date=end_text,
+        )
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        import pandas as pd
+        frame = df.copy()
+        frame["trade_date"] = pd.to_datetime(frame["trade_date"], format="%Y%m%d")
+        frame = frame.set_index("trade_date").sort_index()
+        frame.index.name = "datetime"
+        result = frame[["open", "high", "low", "close"]].copy()
+        result.columns = ["open", "high", "low", "close"]
+
+        self._save_to_cache(cache_key, result)
+        return result
+
     def get_market_daily_indicators(
         self,
         start_date: str,
